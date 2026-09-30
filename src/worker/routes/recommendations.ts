@@ -23,6 +23,7 @@ import type { AppEnv } from "../app";
 import { requireUser } from "../platform/require-user";
 import type { Db } from "../lib/db";
 import { parseJson } from "../lib/db";
+import { inChunks } from "../coverage/common";
 import { badRequest, conflict, notFound } from "../lib/errors";
 import { newId } from "../lib/ids";
 import { iso, utcDay } from "../lib/time";
@@ -164,14 +165,18 @@ async function withProviders(db: Db, rows: RecRow[]): Promise<Recommendation[]> 
   if (rows.length === 0) return [];
   const first = rows[0]!;
   const keys = [...new Set(rows.map((r) => r.dedup_key))];
-  const found = await db.all<{ candidate_key: string; provider: string }>(
-    `SELECT candidate_key, provider FROM decision_records
-      WHERE workspace_id = ? AND project_id = ? AND provider IS NOT NULL AND candidate_key IN (${keys.map(() => "?").join(",")})
-      ORDER BY created_at DESC`,
-    first.workspace_id,
-    first.project_id,
-    ...keys,
+  // Up to 200 keys per list: chunked so each statement stays under D1's 100 bound-parameter limit.
+  const found = await inChunks(keys, (chunk, placeholders) =>
+    db.all<{ candidate_key: string; provider: string }>(
+      `SELECT candidate_key, provider FROM decision_records
+        WHERE workspace_id = ? AND project_id = ? AND provider IS NOT NULL AND candidate_key IN (${placeholders})
+        ORDER BY created_at DESC`,
+      first.workspace_id,
+      first.project_id,
+      ...chunk,
+    ),
   );
+  // A key lives in exactly one chunk, so per-chunk newest-first order already picks the latest provider.
   const byKey = new Map<string, string>();
   for (const f of found) if (!byKey.has(f.candidate_key)) byKey.set(f.candidate_key, f.provider);
   return rows.map((r) => mapRecommendation(r, r.decision_label ? byKey.get(r.dedup_key) ?? null : null));
@@ -190,15 +195,16 @@ async function loadRecForUser(db: Db, userId: string, id: string): Promise<RecRo
 
 async function detail(db: Db, r: RecRow): Promise<RecommendationDetail> {
   const ids = parseJson<string[]>(r.evidence_ids_json, []).filter((x) => typeof x === "string").slice(0, 100);
-  const evidence = ids.length
-    ? await db.all<{ id: string; source: EvidenceItem["source"]; ref_id: string | null; window: string | null; text: string; data_json: string; tainted: number; created_at: string }>(
-        `SELECT id, source, ref_id, window, text, data_json, tainted, created_at FROM evidence
-          WHERE workspace_id = ? AND project_id = ? AND id IN (${ids.map(() => "?").join(",")})`,
-        r.workspace_id,
-        r.project_id,
-        ...ids,
-      )
-    : [];
+  // 100 ids + 2 scope params would exceed D1's 100 bound-parameter limit: chunked.
+  const evidence = await inChunks(ids, (chunk, placeholders) =>
+    db.all<{ id: string; source: EvidenceItem["source"]; ref_id: string | null; window: string | null; text: string; data_json: string; tainted: number; created_at: string }>(
+      `SELECT id, source, ref_id, window, text, data_json, tainted, created_at FROM evidence
+        WHERE workspace_id = ? AND project_id = ? AND id IN (${placeholders})`,
+      r.workspace_id,
+      r.project_id,
+      ...chunk,
+    ),
+  );
   const decisions = await db.all(
     `SELECT * FROM decision_records WHERE workspace_id = ? AND project_id = ? AND candidate_key IN (?, ?)
       ORDER BY created_at DESC, id LIMIT 50`,

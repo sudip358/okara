@@ -8,6 +8,7 @@ import { formatNumber } from "@web/lib/format";
 import { useApi } from "@web/lib/hooks";
 import { projectPath, useProject } from "@web/lib/project-context";
 import { Badge, Card, EmptyState, ErrorState, LoadingState, PageHeader, TBody, TD, TH, THead, TR, Table, type BadgeTone } from "@web/components/ui";
+import { ExternalUrl } from "@web/components/ExternalUrl";
 import { ShareOfVoiceTable } from "./components/ShareOfVoiceTable";
 import { sourceTypeLabel } from "./lib";
 
@@ -91,15 +92,9 @@ export function CompetitorsPage() {
                     </TD>
                     <TD className="min-w-48 max-w-xs">
                       {d.url ? (
-                        <a
-                          href={d.url}
-                          target="_blank"
-                          rel="noopener noreferrer nofollow"
-                          className="break-all rounded text-xs text-sky-700 underline hover:text-sky-900 focus-visible:outline-2 focus-visible:outline-sky-600 dark:text-sky-400"
-                        >
-                          {d.url}
+                        <ExternalUrl url={d.url}>
                           <span className="sr-only"> (opens in new tab)</span>
-                        </a>
+                        </ExternalUrl>
                       ) : (
                         <span className="text-xs text-zinc-500">No URL</span>
                       )}

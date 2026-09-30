@@ -19,8 +19,16 @@ Per project (`project_limits`, editable within bounds via `PUT /projects/:pid/li
 
 "4 runs" = one scheduled run plus the manual-run quota (3 per project per UTC day) for each agent.
 
-Global: `GLOBAL_USD_MICROS_PER_DAY` (default 2,000,000 = $2.00/day) across all projects, checked for every
-`usd_micros` reservation.
+Global, across all projects, per UTC day (`wrangler.jsonc` vars; defaults in `src/worker/runs/budget.ts`). These
+are checked only for reservations that will spend an **operator** key; workspaces on their own keys are bounded
+by their project limits alone:
+
+| Var | Default | Resource |
+|---|---|---|
+| `GLOBAL_USD_MICROS_PER_DAY` | 2,000,000 ($2.00) | `usd_micros` (priced GEO calls on the operator Gemini/Perplexity keys) |
+| `GLOBAL_JEV_CALLS_PER_DAY` | 2,000 | `jev_calls` (operator TypeSafe key) |
+| `GLOBAL_PROVIDER_CALLS_PER_DAY` | 3,000 | `provider_calls` (any operator key) |
+| `GLOBAL_WRITER_TOKENS_PER_DAY` | 1,000,000 | `writer_tokens` (operator writer key) |
 
 Other hard caps: 0-2 new recommendations per agent per project per day; manual runs 3 per project per UTC day
 (HTTP 429 `quota_exceeded`; one conditional INSERT, so concurrent requests cannot exceed it); one active run per project and agent (lock TTL 60 minutes); at most 25 runs
@@ -35,8 +43,9 @@ retries; GEO raw answers capped at 20,000 characters; evidence text capped at 60
 1. **Reserve** before any external call: upsert today's counter row (the limit is refreshed from
    `project_limits` on every reservation), then a single conditional statement
    `UPDATE usage_counters SET used = used + :amt WHERE ... AND used + :amt <= limit_value`. If no row changed,
-   `BudgetExceededError` is thrown and no call is made. For `usd_micros` the global counter is reserved the
-   same way, and the project increment is rolled back if the global cap is hit. Because check and increment
+   `BudgetExceededError` is thrown and no call is made. When the reservation spends an operator key, the
+   `global` counter for `usd_micros`, `jev_calls`, `provider_calls` or `writer_tokens` is reserved the same
+   way, and the project increment is rolled back if the global cap is hit. Because check and increment
    are one statement, concurrent reservations cannot overspend (tested: 20 parallel reservations against a
    limit of 5 admit exactly 5).
 2. **Settle** to the actual amount when the outcome is known (`used += actual - reserved`, floored at 0).

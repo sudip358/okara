@@ -3,12 +3,14 @@
  *   GET  /projects/:pid/seo/overview    -> SeoOverview (incl. brandSplit and the non-brand demand curve)
  *   POST /projects/:pid/seo/import-csv  -> body {csv, window:'current'|'previous', start, end}; labelled csv_import
  *                                          201 {data:{syncId, rows, window}}; 400 with details.expectedHeaders on bad input
- *   GET  /projects/:pid/seo/buyer-queries             -> CoverageResponse<BuyerQueryRow> (Jev; rate-limited,
- *                                                        budgeted; 7-day decision cache; setup_required without Jev)
+ *   GET  /projects/:pid/seo/buyer-queries             -> CoverageResponse<BuyerQueryRow> from the 7-day decision
+ *                                                        cache only (never calls Jev; setup_required without Jev)
+ *   POST /projects/:pid/seo/buyer-queries             -> same shape; asks Jev for uncached queries (rate-limited,
+ *                                                        budgeted). Spending is POST-only so a cross-site GET cannot.
  *   GET  /projects/:pid/seo/translation-opportunities -> CoverageResponse<TranslationOpportunityRow> (no Jev)
- * CSRF/origin checks for the POST are enforced by the app-wide middleware.
+ * CSRF/origin checks for the POSTs are enforced by the app-wide middleware.
  */
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../app";
 import { requireUser } from "../platform/require-user";
@@ -40,21 +42,28 @@ export function setSeoJevDecisionsFactory(f: DecisionsFactory | null): void {
   decisionsFactory = f ?? defaultDecisionsFactory;
 }
 
-seoOverviewRoutes.get("/projects/:pid/seo/buyer-queries", async (c) => {
+async function buyerQueries(c: Context<AppEnv, "/projects/:pid/seo/buyer-queries">, classify: boolean) {
   const user = requireUser(c);
   const db = c.get("db");
   const project = await requireProject(db, user.id, c.req.param("pid"));
   const now = c.get("now");
-  const rl = await hitRateLimit(db, `buyer_queries:${project.id}:${user.id}`, BUYER_QUERIES_RATE_LIMIT.limit, BUYER_QUERIES_RATE_LIMIT.windowSeconds, now);
-  if (!rl.allowed) {
-    return c.json({ error: { code: "rate_limited", message: "Too many buyer-query requests. Try again in a minute." } }, 429, { "Retry-After": String(rl.retryAfterSeconds) });
+  if (classify) {
+    const rl = await hitRateLimit(db, `buyer_queries:${project.id}:${user.id}`, BUYER_QUERIES_RATE_LIMIT.limit, BUYER_QUERIES_RATE_LIMIT.windowSeconds, now);
+    if (!rl.allowed) {
+      return c.json({ error: { code: "rate_limited", message: "Too many buyer-query requests. Try again in a minute." } }, 429, { "Retry-After": String(rl.retryAfterSeconds) });
+    }
   }
   const decisions = project.is_demo === 1 ? null : await decisionsFactory(c.env, db, project.workspace_id, project.id);
   const scope = { workspaceId: project.workspace_id, projectId: project.id, runId: null };
   const clock = () => now;
-  const data = await buildBuyerQueries({ db, project, now, decisions, budget: createBudget(db, c.env, scope, clock), calls: createCallRecorder(db, scope, clock) });
+  const data = await buildBuyerQueries({ db, project, now, decisions, budget: createBudget(db, c.env, scope, clock), calls: createCallRecorder(db, scope, clock), classify });
   return c.json({ data });
-});
+}
+
+/** Cached decisions only: a GET never spends Jev budget. */
+seoOverviewRoutes.get("/projects/:pid/seo/buyer-queries", (c) => buyerQueries(c, false));
+/** Classifies uncached queries with Jev (budgeted, rate-limited). */
+seoOverviewRoutes.post("/projects/:pid/seo/buyer-queries", (c) => buyerQueries(c, true));
 
 seoOverviewRoutes.get("/projects/:pid/seo/translation-opportunities", async (c) => {
   const user = requireUser(c);

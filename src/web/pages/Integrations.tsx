@@ -331,7 +331,10 @@ function GscCard({
                 </Button>
               ) : (
                 <>
-                  <span className="text-sm">Revoke access and delete the stored token?</span>
+                  <span className="text-sm">
+                    Delete this project's stored Google token? Other projects connected with the same Google account keep
+                    working. To revoke access entirely, use myaccount.google.com; that affects every project using that account.
+                  </span>
                   <Button
                     variant="danger"
                     size="sm"

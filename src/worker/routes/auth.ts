@@ -2,7 +2,9 @@
  * Authentication routes. OWNED BY: platform-auth module.
  *   GET  /auth/login?returnTo=   -> 302 to Google (state, nonce, PKCE S256; scope "openid email profile")
  *   GET  /auth/callback          -> validates state (single-use, unexpired, browser-bound), verifies the
- *                                   ID token, upserts the user (+ workspace on first login), rotates the session
+ *                                   ID token, checks the sign-in allowlist (platform/session.ts signInAccess:
+ *                                   authError=signup_closed | not_allowed), upserts the user (+ workspace on
+ *                                   first login), rotates the session
  *   POST /auth/logout            -> deletes the session, clears the cookie
  *   GET  /me                     -> Me
  *   POST /auth/dev-login         -> local-only bypass (DEV_AUTH_BYPASS=true AND ENVIRONMENT=development AND localhost)
@@ -16,7 +18,7 @@ import { setupRequired, unauthorized } from "../lib/errors";
 import { sha256Hex } from "../lib/hash";
 import { newId, randomToken } from "../lib/ids";
 import { addSeconds, iso } from "../lib/time";
-import { createSession, deleteSession } from "../platform/session";
+import { createSession, deleteSession, signInAccess } from "../platform/session";
 import {
   appOrigin,
   clearOauthStateCookie,
@@ -114,6 +116,8 @@ async function startSession(c: Context<AppEnv>, userId: string) {
 
 authRoutes.get("/auth/login", rateLimit({ key: "auth_login", limit: 30, windowSeconds: 60 }), async (c) => {
   const cfg = googleConfig(c.env);
+  // Production with no allowlist configured: nobody can sign in, so do not start a Google round trip.
+  if (signInAccess(c.env, "") === "signup_closed") return c.redirect(`${cfg.origin}/?authError=signup_closed`, 302);
   const db = c.get("db");
   const now = c.get("now");
   await db.run("DELETE FROM oauth_states WHERE purpose = 'login' AND expires_at < ?", iso(now));
@@ -177,6 +181,10 @@ authRoutes.get("/auth/callback", rateLimit({ key: "auth_callback", limit: 30, wi
     if (err instanceof OidcError) return fail(err.code);
     throw err;
   }
+
+  // Before any user/workspace row is created: only allowlisted, verified emails get an account.
+  const access = signInAccess(c.env, identity.email);
+  if (access !== "allowed") return fail(access);
 
   const userId = await upsertUser(db, identity, now);
   await startSession(c, userId);

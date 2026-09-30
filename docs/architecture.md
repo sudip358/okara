@@ -137,5 +137,12 @@ it does not consume quota (409).
   Interactions API (documented conflict).
 - **Exactly-once billing** is not guaranteed: providers expose no idempotency keys. Every HTTP attempt is
   recorded and counted; outcomes of timeouts stay conservatively accounted.
-- Workflow step retries after a partially executed step can duplicate `run_events` lines; data writes are
-  owned by the agent modules, which dedup by content hash.
+- **Workflow step retries** (timeout, eviction, a thrown error): a step whose record is already saved in
+  `agent_runs.summary_json.steps` is not run again (`executeStep` returns the saved record), and the
+  bookkeeping after a step's work (saving the record, events, lock renewal) is best-effort so a transient
+  D1 write error cannot trigger a retry. A step attempt that dies before saving its record is re-run from
+  the top: `geo.batch` skips prompt x provider pairs already observed for the run (plus a unique index on
+  `geo_observations(run_id, prompt_id, provider)`), recommendation saves re-check dedup and the 0-2/day
+  cap right before each insert, but other writes (e.g. `crawl_runs`, `run_events` lines) are not
+  deduplicated. Budget reservations stranded as 'reserved' by a killed attempt are released by the cron
+  sweep after an hour once their run is no longer active (`runs/scheduler.ts` `sweepOrphans`).

@@ -17,6 +17,8 @@
  *                        (intents are never guessed)
  *     intentTier = the worse of the two tiers (act < flag).
  *  4. Without Jev (no TypeSafe key): state setup_required and no rows. Demo projects never call Jev.
+ *  5. classify=false (the GET view) reads the decision cache only and never calls Jev; queries without a
+ *     cached answer are reported as not classified yet. Only the POST action (classify=true) spends budget.
  * Budget: every call reserves jev_calls (and provider_calls for the TypeSafe adapter) before dispatch; a
  * refusal stops further calls and the remaining queries stay unclassified (completeness says so).
  */
@@ -58,6 +60,8 @@ export interface BuyerQueriesDeps {
   decisions: DecisionProvider | null;
   budget: Budget;
   calls: CallRecorder;
+  /** false: cached decisions only, no Jev calls (GET). true: ask Jev for uncached queries (POST). */
+  classify: boolean;
 }
 
 interface QueryAgg {
@@ -166,6 +170,7 @@ export async function buildBuyerQueries(deps: BuyerQueriesDeps): Promise<Coverag
         brand_terms: { self: classifier.terms.self, competitors: classifier.terms.competitors },
       },
       queries: eligible.map((a) => a.query),
+      maxCalls: deps.classify ? undefined : 0,
       outcome: (j) => {
         const bq = j.answers[QUESTION.buyerQuery]!;
         const band = noulBand({ questionId: QUESTION.buyerQuery, questionVersion: bq.questionVersion, answer: bq.answer, tier: bq.tier });
@@ -190,7 +195,9 @@ export async function buildBuyerQueries(deps: BuyerQueriesDeps): Promise<Coverag
   }
   const classified = res.results.size;
   const stopped =
-    res.stoppedBy === "budget"
+    !deps.classify && classified < eligible.length
+      ? "; the rest are not classified yet (Classify with Jev asks for them)"
+      : res.stoppedBy === "budget"
       ? "; the daily Jev budget was reached, so the rest are unclassified"
       : res.stoppedBy === "error"
         ? `; Jev was unavailable (${res.error ?? "error"}), so the rest are unclassified`

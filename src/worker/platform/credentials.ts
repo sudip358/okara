@@ -35,3 +35,21 @@ export async function resolveProviderKey(env: Env, db: Db, workspaceId: string, 
   if (typeof op === "string" && op.trim()) return { key: op.trim(), source: "operator_key" };
   return null;
 }
+
+export type CredentialSource = ResolvedKey["source"];
+
+/**
+ * Which credential each provider would use for this workspace, mirroring resolveProviderKey's
+ * precedence (saved workspace key, then operator key) without decrypting anything. null = no key.
+ * Budgets use this to apply the global (operator) daily caps only to operator-key spend.
+ */
+export async function credentialSources(env: Env, db: Db, workspaceId: string): Promise<Record<ProviderId, CredentialSource | null>> {
+  const rows = await db.all<{ provider: ProviderId }>("SELECT provider FROM provider_credentials WHERE workspace_id = ?", workspaceId);
+  const saved = new Set(rows.map((r) => r.provider));
+  const out = {} as Record<ProviderId, CredentialSource | null>;
+  for (const provider of Object.keys(OPERATOR_ENV) as ProviderId[]) {
+    const op = env[OPERATOR_ENV[provider]];
+    out[provider] = saved.has(provider) ? "workspace_key" : typeof op === "string" && op.trim() ? "operator_key" : null;
+  }
+  return out;
+}

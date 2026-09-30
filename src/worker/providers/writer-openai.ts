@@ -9,6 +9,12 @@
  *   response: { id, model, choices: [{ message: { content, refusal? }, finish_reason }], usage: { prompt_tokens, completion_tokens } }
  *   request id header: x-request-id
  *
+ * `max_completion_tokens` is "an upper bound for ... visible output tokens and reasoning tokens"
+ * (openai-openapi ChatCompletion request), so the caller's answer budget gets OPENAI_REASONING_HEADROOM_TOKENS
+ * added; the budget reservation covers the total. `reasoning_effort` (documented only "for reasoning
+ * models"; values none|minimal|low|medium|high|xhigh|max, not all supported by every model) is sent only
+ * when the operator sets WRITER_REASONING_EFFORT, since non-reasoning models may reject it.
+ *
  * `strict: false` because strict mode requires every property to be listed in `required`, which the
  * recommendation.v1 schema (optional fields) does not satisfy; callers validate every output with
  * zod regardless. No `tools` are sent. The model id comes only from WRITER_MODEL.
@@ -25,7 +31,22 @@ export interface OpenAiWriterConfig extends WriterHooks {
   fetchImpl: typeof fetch;
   timeoutMs?: number;
   maxRetries?: number;
+  /** Opt-in reasoning_effort (WRITER_REASONING_EFFORT); omitted when unset. */
+  reasoningEffort?: OpenAiReasoningEffort | null;
 }
+
+/** Engineering headroom for reasoning tokens on top of the caller's answer budget (not a provider limit). */
+export const OPENAI_REASONING_HEADROOM_TOKENS = 4000;
+export const OPENAI_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type OpenAiReasoningEffort = (typeof OPENAI_REASONING_EFFORTS)[number];
+
+/** Parse WRITER_REASONING_EFFORT; unset or unknown values -> null (parameter not sent). */
+export function parseReasoningEffort(raw: string | undefined | null): OpenAiReasoningEffort | null {
+  const v = (raw ?? "").trim().toLowerCase();
+  return (OPENAI_REASONING_EFFORTS as readonly string[]).includes(v) ? (v as OpenAiReasoningEffort) : null;
+}
+
+export const openAiCompletionBudget = (maxOutputTokens: number) => maxOutputTokens + OPENAI_REASONING_HEADROOM_TOKENS;
 
 interface ChatResponse {
   id?: string;
@@ -40,19 +61,21 @@ export function normalizeBaseUrl(raw: string): string {
   return u.toString().replace(/\/+$/, "");
 }
 
-export function buildOpenAiRequest(model: string, req: WritingRequest): Record<string, unknown> {
-  return {
+export function buildOpenAiRequest(model: string, req: WritingRequest, reasoningEffort: OpenAiReasoningEffort | null = null): Record<string, unknown> {
+  const body: Record<string, unknown> = {
     model,
     messages: [
       { role: "system", content: req.system },
       { role: "user", content: JSON.stringify(req.input) },
     ],
-    max_completion_tokens: req.maxOutputTokens,
+    max_completion_tokens: openAiCompletionBudget(req.maxOutputTokens),
     response_format: {
       type: "json_schema",
       json_schema: { name: req.purpose, schema: toProviderSchema(req.jsonSchema), strict: false },
     },
   };
+  if (reasoningEffort) body.reasoning_effort = reasoningEffort;
+  return body;
 }
 
 export function parseOpenAiResponse(body: ChatResponse, fallbackModel: string): { result: WritingResult; failure: WriterOutputError | null } {
@@ -61,7 +84,10 @@ export function parseOpenAiResponse(body: ChatResponse, fallbackModel: string): 
   const base = { provider: "openai_compatible", model, usage };
   const choice = body.choices?.[0];
   if (choice?.message?.refusal) return { result: { ...base, output: null }, failure: new WriterOutputError("The writing model declined the request.", "refusal") };
-  if (choice?.finish_reason === "length") return { result: { ...base, output: null }, failure: new WriterOutputError("Writer output was truncated (length).", "truncated") };
+  if (choice?.finish_reason === "length") return { result: { ...base, output: null }, failure: new WriterOutputError(
+        `Writer output was truncated: finish_reason "length" (hit max_completion_tokens; reasoning tokens count toward it${usage.outputTokens ? `; ${usage.outputTokens} completion tokens used` : ""}). Use a non-reasoning model or set WRITER_REASONING_EFFORT=low.`,
+        "truncated",
+      ) };
   const text = choice?.message?.content ?? "";
   if (!text.trim()) return { result: { ...base, output: null }, failure: new WriterOutputError("Writer returned no content.", "empty") };
   try {
@@ -79,14 +105,14 @@ export function createOpenAiCompatibleWriter(cfg: OpenAiWriterConfig): WritingPr
     name: "openai_compatible",
     model: cfg.model,
     async write(req: WritingRequest): Promise<WritingResult> {
-      const body = buildOpenAiRequest(cfg.model, req);
+      const body = buildOpenAiRequest(cfg.model, req, cfg.reasoningEffort ?? null);
       return metered(
         cfg,
         {
           provider: "openai_compatible",
           model: cfg.model,
           purpose: req.purpose,
-          estimatedTokens: estimateTokens(req.system + JSON.stringify(req.input)) + req.maxOutputTokens,
+          estimatedTokens: estimateTokens(req.system + JSON.stringify(req.input)) + openAiCompletionBudget(req.maxOutputTokens),
           maxRetries,
         },
         async (onAttempt) => {

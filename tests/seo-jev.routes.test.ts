@@ -1,5 +1,5 @@
 /**
- * [A23] GET /projects/:pid/seo/buyer-queries and /seo/translation-opportunities: honest states (no Jev ->
+ * [A23] GET/POST /projects/:pid/seo/buyer-queries and /seo/translation-opportunities: honest states (no Jev ->
  * setup_required, never guessed), Noul-based buyer classification with the 7-day decision cache,
  * brand exclusion, budget refusal, rate limit, and tenancy.
  */
@@ -35,8 +35,8 @@ function makeApp(env: Env, userId: string) {
     if (err instanceof HttpError) return c.json({ error: { code: err.code, message: err.message } }, err.status as 400);
     throw err;
   });
-  return async (path: string) => {
-    const res = await app.request(path, { method: "GET" }, env);
+  return async (path: string, method: "GET" | "POST" = "GET") => {
+    const res = await app.request(path, { method }, env);
     return { status: res.status, json: (await res.json()) as { data: never; error?: { code: string } } };
   };
 }
@@ -59,7 +59,7 @@ const DATA = { ...DEFAULT_GSC_DATA, qp: { current: [...QP_CURRENT, row(["resex b
 
 afterEach(() => setSeoJevDecisionsFactory(null));
 
-describe("GET /projects/:pid/seo/buyer-queries", () => {
+describe("GET/POST /projects/:pid/seo/buyer-queries", () => {
   it("without Jev: setup_required with a clear label and no guessed intents", async () => {
     const s = await scenario({ crawl: false, gsc: DATA });
     setSeoJevDecisionsFactory(async () => null);
@@ -76,7 +76,12 @@ describe("GET /projects/:pid/seo/buyer-queries", () => {
     const jev = buyerJev();
     setSeoJevDecisionsFactory(async () => jev);
     const call = makeApp(s.env, s.userId);
-    const d = (await call(`/projects/${s.projectId}/seo/buyer-queries`)).json.data as CoverageResponse<BuyerQueryRow>;
+    // GET reads the cache only: nothing classified yet and no Jev call (a cross-site GET cannot spend).
+    const before = (await call(`/projects/${s.projectId}/seo/buyer-queries`)).json.data as CoverageResponse<BuyerQueryRow>;
+    expect(jev.requests).toHaveLength(0);
+    expect(before).toMatchObject({ state: "ready", rows: [] });
+    expect(before.completeness!.note).toMatch(/0 of 5 .*0 Jev calls\).*not classified yet/);
+    const d = (await call(`/projects/${s.projectId}/seo/buyer-queries`, "POST")).json.data as CoverageResponse<BuyerQueryRow>;
     expect(d.state).toBe("ready");
     expect(jev.requests).toHaveLength(1);
     const req = jev.requests[0]!;
@@ -100,11 +105,15 @@ describe("GET /projects/:pid/seo/buyer-queries", () => {
     expect(new Set(dec.map((x) => x.question_id))).toEqual(new Set([QUESTION.buyerQuery, QUESTION.buyerReady]));
     expect(dec.some((x) => x.candidate_key === "buyer:brass cabinet knob")).toBe(true);
 
-    // Cached: a second request re-asks nothing and returns the same rows.
-    const again = (await call(`/projects/${s.projectId}/seo/buyer-queries`)).json.data as CoverageResponse<BuyerQueryRow>;
+    // Cached: a second request (POST or GET) re-asks nothing and returns the same rows.
+    const again = (await call(`/projects/${s.projectId}/seo/buyer-queries`, "POST")).json.data as CoverageResponse<BuyerQueryRow>;
     expect(jev.requests).toHaveLength(1);
     expect(again.rows).toEqual(d.rows);
     expect(again.completeness!.note).toMatch(/5 from the 7-day cache, 0 Jev calls/);
+    const cachedGet = (await call(`/projects/${s.projectId}/seo/buyer-queries`)).json.data as CoverageResponse<BuyerQueryRow>;
+    expect(jev.requests).toHaveLength(1);
+    expect(cachedGet.rows).toEqual(d.rows);
+    expect(cachedGet.completeness!.note).not.toMatch(/not classified yet/);
   });
 
   it("a budget refusal stops before any call and leaves queries unclassified (said so)", async () => {
@@ -112,7 +121,7 @@ describe("GET /projects/:pid/seo/buyer-queries", () => {
     await new Db(s.env.DB).run("UPDATE project_limits SET provider_calls_per_day = 0 WHERE project_id = ?", s.projectId);
     const jev = buyerJev();
     setSeoJevDecisionsFactory(async () => jev);
-    const d = (await makeApp(s.env, s.userId)(`/projects/${s.projectId}/seo/buyer-queries`)).json.data as CoverageResponse<BuyerQueryRow>;
+    const d = (await makeApp(s.env, s.userId)(`/projects/${s.projectId}/seo/buyer-queries`, "POST")).json.data as CoverageResponse<BuyerQueryRow>;
     expect(jev.requests).toHaveLength(0);
     expect(d).toMatchObject({ state: "ready", rows: [] });
     expect(d.completeness!.note).toMatch(/0 of 5 .*daily Jev budget was reached/);
@@ -125,9 +134,11 @@ describe("GET /projects/:pid/seo/buyer-queries", () => {
     expect((await makeApp(s.env, other.userId)(`/projects/${s.projectId}/seo/buyer-queries`)).status).toBe(404);
     const call = makeApp(s.env, s.userId);
     const statuses: number[] = [];
-    for (let i = 0; i < 11; i++) statuses.push((await call(`/projects/${s.projectId}/seo/buyer-queries`)).status);
+    for (let i = 0; i < 11; i++) statuses.push((await call(`/projects/${s.projectId}/seo/buyer-queries`, "POST")).status);
     expect(statuses.slice(0, 10).every((x) => x === 200)).toBe(true);
     expect(statuses[10]).toBe(429);
+    // The cache-only GET spends nothing, so it is not limited.
+    expect((await call(`/projects/${s.projectId}/seo/buyer-queries`)).status).toBe(200);
   });
 });
 

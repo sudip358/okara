@@ -12,6 +12,7 @@ import type { SessionUser } from "../platform/access";
 import { requireProject, requireWorkspaceMember } from "../platform/access";
 import { exportProject } from "../platform/export";
 import { revokeGscToken } from "../platform/gsc-oauth";
+import { rateLimit } from "../platform/rate-limit";
 import {
   contextKindSchema,
   contextPutSchema,
@@ -125,15 +126,22 @@ projectRoutes.get("/projects/:pid/verification", async (c) => {
 
 const verificationCheckSchema = z.object({ method: z.enum(["dns", "file", "gsc"]) }).strict();
 
-projectRoutes.post("/projects/:pid/verification/check", async (c) => {
-  const user = userOf(c);
-  const db = c.get("db");
-  const row = await requireProject(db, user.id, c.req.param("pid"));
-  const { method } = await parseBody(c, verificationCheckSchema);
-  const { status, check } = await runVerificationCheck(c.env, db, row, method, outbound.fetch, c.get("now"));
-  // `check` is additive to VerificationStatus: it explains why a check did not verify.
-  return c.json({ data: { ...status, check: { method, ok: check.ok, detail: check.detail } } });
-});
+/** Each check sends outbound GETs / DoH lookups at the project's host: bounded per user and project. */
+export const VERIFICATION_CHECK_RATE_LIMIT = { limit: 10, windowSeconds: 60 } as const;
+
+projectRoutes.post(
+  "/projects/:pid/verification/check",
+  rateLimit({ key: (c) => `verify_check:${c.req.param("pid") ?? ""}:${c.get("user")?.id ?? "anon"}`, ...VERIFICATION_CHECK_RATE_LIMIT }),
+  async (c) => {
+    const user = userOf(c);
+    const db = c.get("db");
+    const row = await requireProject(db, user.id, c.req.param("pid"));
+    const { method } = await parseBody(c, verificationCheckSchema);
+    const { status, check } = await runVerificationCheck(c.env, db, row, method, outbound.fetch, c.get("now"));
+    // `check` is additive to VerificationStatus: it explains why a check did not verify.
+    return c.json({ data: { ...status, check: { method, ok: check.ok, detail: check.detail } } });
+  },
+);
 
 // ------------------------------------------------------------------ limits
 

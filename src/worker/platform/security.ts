@@ -84,12 +84,30 @@ export function timingSafeEqualStr(a: string, b: string): boolean {
   return diff === 0;
 }
 
+/**
+ * Canonical app origin, or null (setup_required) when APP_ORIGIN is missing, unparseable, still the
+ * wrangler.jsonc placeholder, or not https outside development/test.
+ */
 export function appOrigin(env: Env): string | null {
+  const raw = (env.APP_ORIGIN ?? "").trim();
+  if (!raw || /REPLACE_WITH/i.test(raw)) return null;
+  let u: URL;
   try {
-    return new URL(env.APP_ORIGIN).origin;
+    u = new URL(raw);
   } catch {
     return null;
   }
+  if (u.protocol !== "https:" && !(isLocalDevEnv(env) && u.protocol === "http:")) return null;
+  return u.origin;
+}
+
+/**
+ * OAuth redirect URI for an app path (e.g. "/api/auth/callback", "/api/gsc/callback"). Login and Search
+ * Console both build theirs here so the registered URIs always match; null when APP_ORIGIN is not usable.
+ */
+export function appRedirectUri(env: Env, path: `/${string}`): string | null {
+  const origin = appOrigin(env);
+  return origin ? `${origin}${path}` : null;
 }
 
 function applySecurityHeaders(h: Headers, env: Env, isApi: boolean) {
@@ -143,8 +161,9 @@ export const csrfProtection = (): MiddlewareHandler<AppEnv> => async (c, next) =
   if (SAFE_METHODS.has(c.req.method.toUpperCase())) return next();
 
   const expected = appOrigin(c.env);
+  if (!expected) return csrfError(c, "APP_ORIGIN is not configured (setup required); state-changing requests are refused.");
   const origin = c.req.header("Origin");
-  if (!expected || !origin || origin !== expected) {
+  if (!origin || origin !== expected) {
     return csrfError(c, "Cross-origin or origin-less request refused.");
   }
 

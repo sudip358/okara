@@ -38,18 +38,22 @@ labelled fixture project that exercises every screen. Demo mode cannot be enable
 
 ## Configuration
 
-Secrets are set with `wrangler secret put <NAME>`. Workspaces can also bring their own provider keys in the app;
-those are stored encrypted server-side and never returned to the browser.
+**Secrets** are set with `wrangler secret put <NAME>` (locally, in `.dev.vars`). **Vars** are plain values in
+`wrangler.jsonc` → `vars`. A name cannot be both. Workspaces can also bring their own provider keys in the app;
+those are stored encrypted server-side and never returned to the browser. Full list and deploy steps:
+[`docs/deploy.md`](docs/deploy.md).
 
-| Name | Needed for |
-|---|---|
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Sign-in (OIDC) and the Search Console connection |
-| `TOKEN_ENCRYPTION_KEY_V1` | AES-GCM encryption of refresh tokens and provider keys (32 bytes, base64). Add `_V2` to rotate. |
-| `TYPESAFE_API_KEY`, `TYPESAFE_MODEL` | Jev decisions (default alias `jev-latest`) |
-| `GEMINI_API_KEY`, `GEMINI_MODEL` | GEO provider: Gemini with Google Search grounding |
-| `PERPLEXITY_API_KEY`, `PERPLEXITY_MODEL` | GEO provider: Perplexity |
-| `WRITER_PROVIDER`, `WRITER_MODEL`, `WRITER_API_KEY`, `WRITER_BASE_URL` | Recommendation drafting |
-| `GLOBAL_USD_MICROS_PER_DAY` | Global daily spend cap across projects |
+| Name | Kind | Needed for |
+|---|---|---|
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | secret | Sign-in (OIDC) and the Search Console connection |
+| `TOKEN_ENCRYPTION_KEY_V1` | secret | AES-GCM encryption of refresh tokens and provider keys (32 bytes, base64). Add `_V2` to rotate. |
+| `TYPESAFE_API_KEY`, `GEMINI_API_KEY`, `PERPLEXITY_API_KEY`, `WRITER_API_KEY` | secret (optional) | Operator provider keys shared by all workspaces |
+| `APP_ORIGIN` | var | The one https origin users reach; sign-in, CSRF and OAuth redirects are bound to it |
+| `TYPESAFE_MODEL` | var | Jev decisions (default alias `jev-latest`) |
+| `GEMINI_MODEL`, `PERPLEXITY_MODEL` | var | GEO providers: Gemini with Google Search grounding, Perplexity |
+| `WRITER_PROVIDER`, `WRITER_MODEL`, `WRITER_BASE_URL`, `WRITER_REASONING_EFFORT` | var | Recommendation drafting (`WRITER_BASE_URL` for `openai_compatible` only) |
+| `ALLOWED_EMAILS`, `ALLOWED_EMAIL_DOMAINS` | var | Sign-in allowlist. In production nobody can sign in until one is set. |
+| `GLOBAL_USD_MICROS_PER_DAY`, `GLOBAL_JEV_CALLS_PER_DAY`, `GLOBAL_PROVIDER_CALLS_PER_DAY`, `GLOBAL_WRITER_TOKENS_PER_DAY` | var | Daily caps across all projects on the operator keys |
 
 Model IDs always come from configuration. None are hard-coded.
 

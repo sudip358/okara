@@ -20,10 +20,14 @@
  *     ('' when it cannot be resolved).
  *   - Calls run sequentially per provider, at most two provider lanes concurrently, no retries and no
  *     repeat sampling (one sample per prompt x provider).
+ *   - Idempotent per run: a Workflow retry of this step skips prompt x provider pairs already observed
+ *     for the run_id, and a unique index (migrations/0005) refuses a second observation for the same
+ *     (run_id, prompt_id, provider) if two attempts overlap.
  */
 import type { RunContext } from "../runs/context";
 import type { GeoAnswer, GeoProvider } from "../providers/types";
 import { BudgetExceededError } from "../lib/errors";
+import { budgetFor } from "../runs/budget";
 import { newId } from "../lib/ids";
 import { iso } from "../lib/time";
 import type { Row } from "../lib/db";
@@ -55,6 +59,8 @@ interface BatchState {
   failed: number;
   incomplete: number;
   grounded: number;
+  /** Pairs already observed for this run by an earlier attempt of the step (not sampled again). */
+  alreadySampled: number;
 }
 
 /**
@@ -109,7 +115,18 @@ export async function runGeoBatch(ctx: RunContext): Promise<GeoBatchSummary> {
     return summary(providerIds, "setup_required", "Approve at least one prompt");
   }
 
-  const state: BatchState = { stop: null, budgetNote: null, observations: 0, failed: 0, incomplete: 0, grounded: 0 };
+  const state: BatchState = { stop: null, budgetNote: null, observations: 0, failed: 0, incomplete: 0, grounded: 0, alreadySampled: 0 };
+  // A retried step must not pay for, or store, a second sample of a pair it already observed.
+  const observed = new Set(
+    (
+      await db.all<{ prompt_id: string; provider: string }>(
+        "SELECT prompt_id, provider FROM geo_observations WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND measurement_type = 'api' AND prompt_id IS NOT NULL",
+        project.workspaceId,
+        project.id,
+        ctx.runId,
+      )
+    ).map((r) => `${r.prompt_id}|${r.provider}`),
+  );
 
   const lane = async (provider: GeoProvider) => {
     const step = `geo_batch:${provider.id}`;
@@ -118,12 +135,17 @@ export async function runGeoBatch(ctx: RunContext): Promise<GeoBatchSummary> {
     let failed = 0;
     for (const prompt of prompts) {
       if (state.stop) break;
+      if (observed.has(`${prompt.id}|${provider.id}`)) {
+        state.alreadySampled++;
+        continue;
+      }
       if (await ctx.isCancelled()) {
         state.stop = "cancelled";
         break;
       }
       const result = await runOne(ctx, provider, prompt, set.id, set.version, state);
       if (result === "stopped") break;
+      if (result === "duplicate") continue;
       ran++;
       if (result === "failed") failed++;
     }
@@ -136,7 +158,9 @@ export async function runGeoBatch(ctx: RunContext): Promise<GeoBatchSummary> {
 
   let status: GeoBatchSummary["status"];
   let note: string;
-  const counts = `${state.observations} observation(s): ${state.grounded} grounded, ${state.failed} failed, ${state.incomplete} incomplete`;
+  const counts =
+    `${state.observations} observation(s): ${state.grounded} grounded, ${state.failed} failed, ${state.incomplete} incomplete` +
+    (state.alreadySampled ? `; ${state.alreadySampled} already sampled earlier in this run` : "");
   if (state.stop === "budget") {
     status = "partial";
     note = `Budget limit reached; stopped early. ${counts}. ${state.budgetNote ?? ""}`.trim();
@@ -168,17 +192,21 @@ async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promis
   await Promise.all(runners);
 }
 
-type OneResult = "ok" | "failed" | "stopped";
+type OneResult = "ok" | "failed" | "stopped" | "duplicate";
+
+const isUniqueViolation = (e: unknown) => /UNIQUE constraint failed/i.test(String((e as Error)?.message ?? e));
 
 async function runOne(ctx: RunContext, provider: GeoProvider, prompt: PromptRow, promptSetId: string, promptSetVersion: number, state: BatchState): Promise<OneResult> {
   const reservedUsd = reservationMicros(provider.id, provider.model, ctx.clock());
 
   // 1. Reserve before sending.
   const held: Array<{ resource: "geo_prompts" | "provider_calls" | "usd_micros"; id: string }> = [];
+  // Attributed to this provider's key: the global caps apply only to operator-key spend.
+  const budget = budgetFor(ctx.budget, provider.id);
   try {
-    held.push({ resource: "geo_prompts", id: await ctx.budget.reserve("geo_prompts", 1) });
-    held.push({ resource: "provider_calls", id: await ctx.budget.reserve("provider_calls", 1) });
-    held.push({ resource: "usd_micros", id: await ctx.budget.reserve("usd_micros", reservedUsd) });
+    held.push({ resource: "geo_prompts", id: await budget.reserve("geo_prompts", 1) });
+    held.push({ resource: "provider_calls", id: await budget.reserve("provider_calls", 1) });
+    held.push({ resource: "usd_micros", id: await budget.reserve("usd_micros", reservedUsd) });
   } catch (e) {
     for (const h of held) await ctx.budget.release(h.id);
     if (e instanceof BudgetExceededError) {
@@ -237,7 +265,15 @@ async function runOne(ctx: RunContext, provider: GeoProvider, prompt: PromptRow,
   }
 
   // 5. Persist the observation, its provider citations, and exposed search queries atomically.
-  const observationId = await persistObservation(ctx, provider, prompt, promptSetId, promptSetVersion, answer, outcome);
+  let observationId: string;
+  try {
+    observationId = await persistObservation(ctx, provider, prompt, promptSetId, promptSetVersion, answer, outcome);
+  } catch (e) {
+    if (!isUniqueViolation(e)) throw e;
+    // An overlapping attempt of this step stored this pair first; keep one sample per prompt x provider.
+    await ctx.log.event(`geo_batch:${provider.id}`, "info", `Prompt ${prompt.id} was already sampled for this run by another attempt; this answer was not stored.`);
+    return "duplicate";
+  }
   state.observations++;
   if (answer.status === "failed") state.failed++;
   if (answer.status === "incomplete") state.incomplete++;

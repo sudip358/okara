@@ -3,6 +3,7 @@
  * - Sends credentials (session cookie) and X-CSRF-Token on state-changing requests.
  * - Unwraps { data } / throws ApiError for { error }.
  * - A 401 on any request calls the registered unauthorized handler (the shell redirects to /signin).
+ * - A 403 csrf_failed (token rotated by a sign-in in another tab) re-reads /me for the fresh token and retries once.
  */
 import type { ApiErrorBody } from "@shared/types";
 
@@ -28,22 +29,44 @@ export const setUnauthorizedHandler = (fn: (() => void) | null) => {
 
 export async function api<T>(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
   const method = init.method ?? "GET";
-  const headers: Record<string, string> = { Accept: "application/json" };
-  if (init.body !== undefined) headers["Content-Type"] = "application/json";
-  if (method !== "GET" && csrfToken) headers["X-CSRF-Token"] = csrfToken;
-  const res = await fetch(`/api${path}`, {
-    method,
-    headers,
-    credentials: "same-origin",
-    body: init.body === undefined ? undefined : JSON.stringify(init.body),
-    signal: init.signal,
-  });
+  let res = await send(path, method, init);
+  if (res.status === 403 && method !== "GET") {
+    const peek = (await res.clone().json().catch(() => null)) as { error?: ApiErrorBody } | null;
+    if (peek?.error?.code === "csrf_failed" && (await refreshCsrfToken(init.signal))) res = await send(path, method, init);
+  }
   const json = (await res.json().catch(() => null)) as { data?: T; error?: ApiErrorBody } | null;
   if (!res.ok || !json || json.error) {
     if (res.status === 401 && unauthorizedHandler && !path.startsWith("/me")) unauthorizedHandler();
     throw new ApiError(res.status, json?.error ?? { code: "network", message: `Request failed (${res.status}).` });
   }
   return json.data as T;
+}
+
+function send(path: string, method: string, init: { body?: unknown; signal?: AbortSignal }): Promise<Response> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (init.body !== undefined) headers["Content-Type"] = "application/json";
+  if (method !== "GET" && csrfToken) headers["X-CSRF-Token"] = csrfToken;
+  return fetch(`/api${path}`, {
+    method,
+    headers,
+    credentials: "same-origin",
+    body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    signal: init.signal,
+  });
+}
+
+/** Re-reads the session's CSRF token from GET /me. False when the session is gone or unchanged (no point retrying). */
+async function refreshCsrfToken(signal?: AbortSignal): Promise<boolean> {
+  try {
+    const res = await fetch("/api/me", { headers: { Accept: "application/json" }, credentials: "same-origin", signal });
+    const json = (await res.json().catch(() => null)) as { data?: { csrfToken?: string } } | null;
+    const token = res.ok ? json?.data?.csrfToken : undefined;
+    if (!token || token === csrfToken) return false;
+    csrfToken = token;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Human-readable message for any thrown value. */

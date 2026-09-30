@@ -212,6 +212,28 @@ async function runValidate(db: Db, run: RunRow): Promise<{ status: StepStatus; r
   return { status: "completed", reason: null, message: `Project validated. ${notes.join(" ")}`.trim(), summary: { verifiedHost: project.verified_host, gscProperty: project.gsc_property } };
 }
 
+/** The record saved by an earlier attempt of this step, if any (see executeStep). */
+function savedStepRecord(run: RunRow, step: StepName): StepRecord | null {
+  const saved = parseJson<RunSummaryJson>(run.summary_json, {}).steps?.[step];
+  if (!saved || typeof saved.status !== "string") return null;
+  return { step, status: saved.status, reason: saved.reason ?? null, message: saved.message ?? "", summary: saved.summary ?? null };
+}
+
+/** Bookkeeping after a step's work has happened must never throw: a throw would make Workflows re-run the work. */
+async function bestEffort(what: string, runId: string, p: Promise<unknown>): Promise<void> {
+  try {
+    await p;
+  } catch (e) {
+    console.error(`${what} failed for run ${runId}`, e instanceof Error ? redact(e.message).slice(0, 200) : "unknown");
+  }
+}
+
+/**
+ * Run one step. Idempotent per (runId, step): Workflows retries a step.do after a timeout, eviction or
+ * a thrown error, so a step whose record is already saved in summary_json returns that record without
+ * redoing its work (paid provider calls, inserts, budget reservations). Everything after the work is
+ * best-effort so a transient D1 write error cannot trigger such a retry.
+ */
 export async function executeStep(env: Env, runId: string, step: StepName, deps: OrchestrateDeps = {}): Promise<StepRecord> {
   const db = new Db(env.DB);
   const clock = deps.clock ?? systemClock;
@@ -219,10 +241,16 @@ export async function executeStep(env: Env, runId: string, step: StepName, deps:
   if (!run) throw new Error(`Run ${runId} not found.`);
   const log = logger(db, run, clock);
 
+  const saved = savedStepRecord(run, step);
+  if (saved) {
+    await bestEffort("log.event", runId, log.event(step, "info", `Step ${step} already finished (${saved.status}) on an earlier attempt; not run again.`));
+    return saved;
+  }
+
   if (await cancelRequested(db, runId)) {
     const rec: StepRecord = { step, status: "skipped", reason: "cancelled", message: "Run cancelled; step not started.", summary: null };
-    await log.event(step, "skipped", rec.message);
-    await saveStepRecord(db, runId, rec);
+    await bestEffort("log.event", runId, log.event(step, "skipped", rec.message));
+    await bestEffort("saveStepRecord", runId, saveStepRecord(db, runId, rec));
     return rec;
   }
   await renewRunLock(db, run.project_id, run.agent, run.id, clock());
@@ -245,8 +273,9 @@ export async function executeStep(env: Env, runId: string, step: StepName, deps:
   }
   const eventStatus = rec.status === "skipped" ? "skipped" : rec.status;
   const prefix = rec.reason === "setup_required" ? "Skipped (setup required): " : "";
-  await log.event(step, eventStatus, `${prefix}${rec.message}`);
-  await saveStepRecord(db, runId, rec);
+  await bestEffort("saveStepRecord", runId, saveStepRecord(db, runId, rec));
+  await bestEffort("log.event", runId, log.event(step, eventStatus, `${prefix}${rec.message}`));
+  await bestEffort("renewRunLock", runId, renewRunLock(db, run.project_id, run.agent, run.id, clock()));
   return rec;
 }
 

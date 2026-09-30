@@ -49,12 +49,19 @@ export interface EvidenceRow {
 }
 
 export async function loadEvidence(ctx: RunContext, ids: string[]): Promise<EvidenceRow[]> {
-  if (ids.length === 0) return [];
-  return ctx.db.all<EvidenceRow>(
-    `SELECT id, source, ref_id, window, text, data_json, tainted, hash FROM evidence
-      WHERE workspace_id = ? AND project_id = ? AND id IN (${ids.map(() => "?").join(",")})`,
-    ctx.project.workspaceId,
-    ctx.project.id,
-    ...ids,
-  );
+  // Chunked: D1 allows 100 bound parameters per statement and the scope binds 2.
+  const out: EvidenceRow[] = [];
+  for (let i = 0; i < ids.length; i += 90) {
+    const chunk = ids.slice(i, i + 90);
+    out.push(
+      ...(await ctx.db.all<EvidenceRow>(
+        `SELECT id, source, ref_id, window, text, data_json, tainted, hash FROM evidence
+          WHERE workspace_id = ? AND project_id = ? AND id IN (${chunk.map(() => "?").join(",")})`,
+        ctx.project.workspaceId,
+        ctx.project.id,
+        ...chunk,
+      )),
+    );
+  }
+  return out;
 }

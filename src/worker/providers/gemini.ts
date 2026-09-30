@@ -6,7 +6,12 @@
  *     (https://ai.google.dev/api/generate-content#method:-models.generatecontent), auth header
  *     `x-goog-api-key` (https://ai.google.dev/gemini-api/docs/google-search REST example).
  *   - Request: `contents[]`, `systemInstruction` (Content, text only), `tools[].googleSearch` (Tool JSON
- *     representation; the proto also accepts `google_search`), `generationConfig.maxOutputTokens`.
+ *     representation; the proto also accepts `google_search`), `generationConfig.maxOutputTokens`,
+ *     `generationConfig.thinkingConfig.thinkingLevel` (enum MINIMAL|LOW|MEDIUM|HIGH; "Recommended for
+ *     Gemini 3 or later models. Use with earlier models results in an error." — ThinkingConfig in the
+ *     generate-content reference). maxOutputTokens counts thought tokens too
+ *     (https://ai.google.dev/gemini-api/docs/thinking), so a truncated answer ends with finishReason
+ *     MAX_TOKENS ("The maximum number of tokens as specified in the request was reached.").
  *   - Response: `candidates[].content.parts[].text` (parts with `thought: true` are thought summaries and
  *     are excluded), `candidates[].finishReason` (enum; STOP = natural stop), `candidates[].groundingMetadata`
  *     with `webSearchQueries[]`, `groundingChunks[].web.{uri,title}`, `groundingSupports[]`;
@@ -39,11 +44,23 @@
  */
 import type { Env } from "../env";
 import type { GeoCitation } from "./types";
-import { neutralInstruction, resolveCost, sendJson, type GeoAnswerWithOutcome, type GeoProviderAdapter } from "./rates";
+import { neutralInstruction, RESERVATION_ENVELOPE, resolveCost, sendJson, type GeoAnswerWithOutcome, type GeoProviderAdapter } from "./rates";
 
 export const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 export const GEMINI_GROUNDING_MODE = "google_search";
-export const GEMINI_DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+/** Covers thought + answer tokens; equals RESERVATION_ENVELOPE.outputTokens so the budget reservation still bounds a call. */
+export const GEMINI_DEFAULT_MAX_OUTPUT_TOKENS = RESERVATION_ENVELOPE.outputTokens;
+/**
+ * LOW is accepted by every Gemini 3.x model listed in the thinking-levels guide (MINIMAL and MEDIUM are
+ * not). Sent only to Gemini 3+ ids: thinkingLevel on earlier models is an API error.
+ */
+export const GEMINI_THINKING_LEVEL = "LOW";
+
+/** True for model ids like "gemini-3-flash-preview" or "gemini-3.8-flash" (major version >= 3). */
+export function supportsThinkingLevel(model: string): boolean {
+  const m = /^(?:models\/)?gemini-(\d+)(?:[.\-]|$)/i.exec(model.trim());
+  return m !== null && Number(m[1]) >= 3;
+}
 
 /** Hosts known to wrap grounding URIs in a redirect. */
 const REDIRECT_WRAPPER_HOSTS = new Set(["vertexaisearch.cloud.google.com"]);
@@ -175,6 +192,10 @@ export function parseGeminiResponse(body: unknown): ParsedGemini {
   if (!cand) {
     status = "failed";
     error = blockReason ? `Gemini returned no candidates (prompt blocked: ${blockReason}).` : "Gemini returned no candidates.";
+  } else if (finishReason === "MAX_TOKENS") {
+    status = "incomplete";
+    const t = thoughts !== null ? ` (${thoughts} thinking tokens)` : "";
+    error = `Gemini hit the output token limit (finishReason MAX_TOKENS${t}); thinking tokens count toward maxOutputTokens, so the answer is ${text === null ? "empty" : "truncated"}.`;
   } else if (finishReason !== null && finishReason !== "STOP") {
     status = "incomplete";
     error = `Gemini finishReason ${finishReason}.`;
@@ -203,7 +224,8 @@ export function parseGeminiResponse(body: unknown): ParsedGemini {
 export function createGeminiProvider(config: GeminiProviderConfig): GeoProviderAdapter {
   const model = config.model.trim().replace(/^models\//, "");
   const maxOutputTokens = config.maxOutputTokens ?? GEMINI_DEFAULT_MAX_OUTPUT_TOKENS;
-  const samplingOptions = { maxOutputTokens };
+  const thinkingConfig = supportsThinkingLevel(model) ? { thinkingLevel: GEMINI_THINKING_LEVEL } : null;
+  const samplingOptions: Record<string, unknown> = thinkingConfig ? { maxOutputTokens, thinkingLevel: GEMINI_THINKING_LEVEL } : { maxOutputTokens };
   const headers = { "x-goog-api-key": config.apiKey, "Content-Type": "application/json" };
 
   const base = (): Omit<GeoAnswerWithOutcome, "status" | "outcome" | "latencyMs"> => ({
@@ -239,7 +261,7 @@ export function createGeminiProvider(config: GeminiProviderConfig): GeoProviderA
       const body: Record<string, unknown> = {
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         tools: [{ googleSearch: {} }],
-        generationConfig: { maxOutputTokens },
+        generationConfig: thinkingConfig ? { maxOutputTokens, thinkingConfig } : { maxOutputTokens },
       };
       if (instruction) body.systemInstruction = { parts: [{ text: instruction }] };
 

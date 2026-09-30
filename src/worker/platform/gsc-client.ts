@@ -12,7 +12,7 @@ import type { Db } from "../lib/db";
 import { decryptSecret } from "../lib/crypto";
 import { iso } from "../lib/time";
 import type { GscProvider, GscQueryRequest, GscRow } from "../providers/types";
-import { GOOGLE_TOKEN_ENDPOINT, gscOAuthConfigured, gscTokenAad, loadGscConnection } from "./gsc-oauth";
+import { GOOGLE_TOKEN_ENDPOINT, GOOGLE_TOKEN_TIMEOUT_MS, gscOAuthConfigured, gscTokenAad, loadGscConnection } from "./gsc-oauth";
 
 export const GSC_API_BASE = "https://www.googleapis.com/webmasters/v3";
 export const GSC_MAX_ROW_LIMIT = 25000;
@@ -73,6 +73,7 @@ export async function createGscProvider(
           client_id: env.GOOGLE_CLIENT_ID!,
           client_secret: env.GOOGLE_CLIENT_SECRET!,
         }).toString(),
+        signal: AbortSignal.timeout(GOOGLE_TOKEN_TIMEOUT_MS),
       });
     } catch {
       throw new GscApiError(0, "network", "Could not reach Google's token endpoint.");

@@ -86,11 +86,19 @@ export interface GenerateOptions {
   checklistTopPages?: number;
   /** [A23] Run the query relevance pre-filter when Jev is configured (default true). */
   queryRelevance?: boolean;
+  /** Wall-clock ms after the step starts past which no new Jev judgment or draft is started. */
+  deadlineMs?: number;
 }
 
 export const DEFAULT_MAX_JUDGED = 6;
 export const DEFAULT_MAX_TECHNICAL_JUDGED = 3;
 export const DEFAULT_MAX_DRAFT_ATTEMPTS = 6;
+/**
+ * No new Jev judgment or writer draft starts after this much of the step has elapsed. One draft can
+ * take 3 writer attempts x 90 s plus backoff (~4.7 min), so the step ends within ~27 min, under its
+ * 30-minute Workflow step timeout (runs/workflow.ts); a timed-out step would be re-run from the top.
+ */
+export const RECOMMEND_DRAFT_DEADLINE_MS = 22 * 60_000;
 export const NO_NEW_OPPORTUNITIES = "No new verified opportunities.";
 
 interface Pending {
@@ -123,6 +131,8 @@ export async function dedupKeyFor(projectId: string, c: Candidate): Promise<stri
 
 export async function generateSeoRecommendations(ctx: RunContext, opts: GenerateOptions = {}): Promise<RecommendSummary> {
   const step = "seo_recommend";
+  const startedAt = ctx.clock().getTime();
+  const pastDeadline = () => ctx.clock().getTime() - startedAt >= (opts.deadlineMs ?? RECOMMEND_DRAFT_DEADLINE_MS);
   const remaining = await remainingToday(ctx, "seo");
   if (remaining === 0) {
     const note = "Daily limit reached: no more SEO recommendations today.";
@@ -224,7 +234,7 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
     const maxTech = opts.maxTechnicalJudged ?? DEFAULT_MAX_TECHNICAL_JUDGED;
 
     for (const [i, p] of content.entries()) {
-      if (i >= maxJudged || budgetOut) {
+      if (i >= maxJudged || budgetOut || pastDeadline()) {
         await reject(p, "budget");
         continue;
       }
@@ -258,7 +268,7 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
       let j: Judgment | null = null;
       // Deterministic checklist candidates carry their own documented severity: no Jev question.
       // [A23] Thin-content findings always get their seo.thin_content confirmation (budget permitting).
-      if (p.c.kind === "technical" && (techJudged < maxTech || isThinCandidate(p.c)) && !budgetOut) {
+      if (p.c.kind === "technical" && (techJudged < maxTech || isThinCandidate(p.c)) && !budgetOut && !pastDeadline()) {
         techJudged++;
         try {
           const ev = await ensureEvidence(ctx, p);
@@ -320,7 +330,7 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
   const maxAttempts = opts.maxDraftAttempts ?? DEFAULT_MAX_DRAFT_ATTEMPTS;
   const contextDocs = pillarContext(inputs);
   for (const p of ranked) {
-    if (created >= remaining || attempts >= maxAttempts) {
+    if (created >= remaining || attempts >= maxAttempts || pastDeadline()) {
       await reject(p, "budget", p.evaluation!.tier);
       continue;
     }
@@ -357,6 +367,17 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
     if (!result.ok) {
       await ctx.log.event(step, "failed", `Draft for ${p.c.kind} rejected (${result.reason}): ${result.errors.slice(0, 3).join("; ")}`);
       await reject(p, result.reason, ev.tier);
+      continue;
+    }
+    // The 0-2/day cap and dedup are re-checked at save time: drafting is slow, and another attempt of
+    // this step (a Workflow retry, or a concurrent manual run) may have saved in the meantime.
+    if ((await remainingToday(ctx, "seo")) <= 0) {
+      await reject(p, "budget", ev.tier);
+      continue;
+    }
+    const dupNow = await duplicateReason(ctx, p.dedupKey);
+    if (dupNow) {
+      await reject(p, dupNow, ev.tier);
       continue;
     }
     const d = result.draft;

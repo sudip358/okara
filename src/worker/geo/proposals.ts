@@ -739,6 +739,18 @@ export async function generateGeoProposals(ctx: RunContext): Promise<GeoProposal
       }
       d = w.draft ?? templateDraft(c, inputs.brandName, evidence, verified);
     }
+    // The 0-2/day cap and dedup are re-checked at save time: drafting is slow, and another attempt of
+    // this step (a Workflow retry, or a concurrent manual run) may have saved in the meantime.
+    if ((await remainingToday(ctx, "geo")) <= 0) {
+      record(c.dedupKey, "rejected", "daily_cap", c.fit, jevMeta);
+      rejected++;
+      continue;
+    }
+    if (await isDuplicate(ctx, c.dedupKey)) {
+      record(c.dedupKey, "rejected", "duplicate", c.fit, jevMeta);
+      rejected++;
+      continue;
+    }
     const fitFields: Record<string, number | string> | null =
       c.fit.answer && c.fit.answer.type === "score" && (c.fit.tier === "act" || c.fit.tier === "flag")
         ? { question: GEO_QUESTION_IDS.proposalFit, score: c.fit.answer.score, confidence: c.fit.answer.confidence }

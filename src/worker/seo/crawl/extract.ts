@@ -30,6 +30,12 @@ export const CAPS = {
   /** [A25] link-context sentences stored per snapshot, and characters per sentence. */
   linkContextSentences: 40,
   linkContextChars: 240,
+  /**
+   * Open-element depth past which a page is not analysed (tooComplex). htmlparser2's cost per tag grows
+   * with the open-element stack, so unclosed markup is superlinear (about 2 MB of unclosed tags took 30+ s
+   * of CPU). Real pages stay far below this; normal pages are unaffected.
+   */
+  maxDepth: 1024,
 } as const;
 
 /** [A25] Sentences outside this word range are not link-context candidates. */
@@ -166,6 +172,8 @@ export interface ExtractedPage {
    * without nav/header/footer/aside), excluding headings and form controls; see linkContextSentences.
    */
   linkContext: string[];
+  /** Parsing stopped at CAPS.maxDepth open elements; the other fields are partial and must not be used. */
+  tooComplex?: boolean;
 }
 
 const SKIP_TAGS = new Set(["script", "style", "noscript", "template", "svg", "iframe", "object", "canvas"]);
@@ -270,9 +278,18 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
     if (mainDepth > 0) ctxBufMain += t;
   };
 
+  // Open-element depth as the parser sees it: it reports implied and void-element closes too.
+  let depth = 0;
+  let tooComplex = false;
+  const TOO_COMPLEX = new Error("too_complex");
+
   const parser = new Parser(
     {
       onopentag(name, attrs) {
+        if (++depth > CAPS.maxDepth) {
+          tooComplex = true;
+          throw TOO_COMPLEX;
+        }
         if (name === "body") inBody = true;
         if (name === "svg") svgDepth++;
         if (name === "script") {
@@ -370,6 +387,7 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
         if (boilerDepth === 0 && inBody && headingLevel === 0 && uiDepth === 0) pushCtx(text);
       },
       onclosetag(name) {
+        if (depth > 0) depth--;
         if (name === "script" && inJsonLd) {
           inJsonLd = false;
           jsonLdRaw.push(jsonLdBuf);
@@ -413,8 +431,12 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
     },
     { decodeEntities: true, lowerCaseTags: true, lowerCaseAttributeNames: true },
   );
-  parser.write(html);
-  parser.end();
+  try {
+    parser.write(html);
+    parser.end();
+  } catch (e) {
+    if (e !== TOO_COMPLEX) throw e;
+  }
   flushCtx();
   const linkContext = linkContextSentences(hasMain && ctxMain.length > 0 ? ctxMain : ctxBody);
 
@@ -450,6 +472,7 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
     hasBreadcrumbNav,
     genericAnchors,
     linkContext,
+    ...(tooComplex ? { tooComplex: true } : {}),
   };
 }
 

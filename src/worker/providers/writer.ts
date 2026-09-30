@@ -6,7 +6,7 @@
 import type { Env } from "../env";
 import type { WritingProvider } from "./types";
 import { createAnthropicWriter } from "./writer-anthropic";
-import { createOpenAiCompatibleWriter } from "./writer-openai";
+import { createOpenAiCompatibleWriter, parseReasoningEffort } from "./writer-openai";
 import type { WriterHooks } from "../writing/metering";
 
 export type WriterKind = "anthropic" | "openai_compatible";
@@ -39,8 +39,11 @@ export function writerConfigStatus(env: Pick<Env, "WRITER_PROVIDER" | "WRITER_MO
   return { configured: missing.length === 0, provider, model, missing };
 }
 
+/** WRITER_REASONING_EFFORT (optional, openai_compatible only) until Env declares it. */
+type WriterEnv = Pick<Env, "WRITER_PROVIDER" | "WRITER_MODEL" | "WRITER_BASE_URL"> & { WRITER_REASONING_EFFORT?: string };
+
 export function createWriter(
-  env: Pick<Env, "WRITER_PROVIDER" | "WRITER_MODEL" | "WRITER_BASE_URL">,
+  env: WriterEnv,
   apiKey: string | null,
   fetchImpl: typeof fetch,
   hooks: WriterHooks = {},
@@ -48,5 +51,5 @@ export function createWriter(
   const status = writerConfigStatus(env);
   if (!status.configured || !status.provider || !status.model || !apiKey) return null;
   if (status.provider === "anthropic") return createAnthropicWriter({ apiKey, model: status.model, fetchImpl, ...hooks });
-  return createOpenAiCompatibleWriter({ apiKey, model: status.model, baseUrl: env.WRITER_BASE_URL!, fetchImpl, ...hooks });
+  return createOpenAiCompatibleWriter({ apiKey, model: status.model, baseUrl: env.WRITER_BASE_URL!, fetchImpl, reasoningEffort: parseReasoningEffort(env.WRITER_REASONING_EFFORT), ...hooks });
 }

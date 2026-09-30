@@ -3,6 +3,7 @@ import type { GeoObservationDetail } from "@shared/types";
 import { formatDateTime, formatUsd } from "@web/lib/format";
 import { useApi } from "@web/lib/hooks";
 import { Badge, Definition, Drawer, ErrorState, LoadingState, TBody, TD, TH, THead, TR, Table } from "@web/components/ui";
+import { ExternalUrl } from "@web/components/ExternalUrl";
 import { HighlightedAnswer } from "./HighlightedAnswer";
 import { SENTIMENT_LABEL, sourceTypeLabel } from "../lib";
 
@@ -122,14 +123,7 @@ function ObservationBody({ id }: { id: string }) {
                   {c.brandKey && <Badge tone="info">{c.brandKey}</Badge>}
                 </div>
                 {c.title && <p className="mt-0.5 break-words text-xs text-zinc-700 dark:text-zinc-300">{c.title}</p>}
-                <a
-                  href={c.url}
-                  target="_blank"
-                  rel="noopener noreferrer nofollow"
-                  className="mt-0.5 block break-all rounded text-xs text-sky-700 underline hover:text-sky-900 focus-visible:outline-2 focus-visible:outline-sky-600 dark:text-sky-400"
-                >
-                  {c.url}
-                </a>
+                <ExternalUrl url={c.url} className="mt-0.5 block" />
               </li>
             ))}
           </ol>
@@ -165,14 +159,7 @@ function ObservationBody({ id }: { id: string }) {
                   <span className="font-medium">{d.entity}</span> via {sourceTypeLabel(d.sourceType)}
                 </p>
                 {d.url && (
-                  <a
-                    href={d.url}
-                    target="_blank"
-                    rel="noopener noreferrer nofollow"
-                    className="block break-all rounded text-xs text-sky-700 underline hover:text-sky-900 focus-visible:outline-2 focus-visible:outline-sky-600 dark:text-sky-400"
-                  >
-                    {d.url}
-                  </a>
+                  <ExternalUrl url={d.url} className="block" />
                 )}
                 {d.span && <blockquote className="mt-1 border-l-2 border-zinc-300 pl-2 text-xs text-zinc-700 dark:border-zinc-700 dark:text-zinc-300">{d.span}</blockquote>}
               </li>

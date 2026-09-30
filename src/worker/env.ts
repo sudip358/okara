@@ -28,8 +28,21 @@ export interface Env {
   WRITER_API_KEY?: string;
   WRITER_BASE_URL?: string;
 
-  /** Global daily spend cap across all projects, in USD micros. */
+  /**
+   * Global daily caps across all projects, applied only to spend on the operator keys above
+   * (tenants on their own keys are bounded by their project limits only). Defaults in runs/budget.ts.
+   */
   GLOBAL_USD_MICROS_PER_DAY?: string;
+  GLOBAL_JEV_CALLS_PER_DAY?: string;
+  GLOBAL_PROVIDER_CALLS_PER_DAY?: string;
+  GLOBAL_WRITER_TOKENS_PER_DAY?: string;
+
+  /**
+   * Sign-in allowlist (comma-separated, case-insensitive; verified Google emails only). In production
+   * sign-in is refused (authError=signup_closed) unless at least one of these is set.
+   */
+  ALLOWED_EMAILS?: string;
+  ALLOWED_EMAIL_DOMAINS?: string;
 }
 
 export const isProduction = (env: Env) => env.ENVIRONMENT === "production";

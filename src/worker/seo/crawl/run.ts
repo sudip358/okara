@@ -32,15 +32,26 @@ export interface CrawlOptions {
   /** Injectable for tests. */
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  /**
+   * Wall-clock budget for the whole crawl, below the 10-minute crawl step timeout (workflow.ts) so the
+   * crawl can still finish its rules and writes: past it no new page is fetched and the crawl is 'partial'.
+   */
+  deadlineMs?: number;
 }
 
 export const DEFAULT_CRAWL_PAGES = 20;
 export const MAX_CRAWL_PAGES = 500;
 const MAX_SKIP_RECORDS = 50;
+/** Default crawl wall-clock budget: 7.5 minutes of the 10-minute step timeout. */
+export const CRAWL_DEADLINE_MS = 450_000;
+/** Cancellation is checked every loop turn for the first pages, then once per this many dispatched pages. */
+const CANCEL_CHECK_EVERY = 10;
+/** page_snapshots rows are written in D1 batches of this size (one round trip per batch). */
+const SNAPSHOT_BATCH = 10;
 const QUEUE_CAP = 1000;
 const NON_HTML_EXT = /\.(jpe?g|png|gif|webp|avif|svg|ico|bmp|tiff?|pdf|zip|gz|tgz|rar|7z|mp4|m4v|mov|webm|mp3|wav|ogg|css|js|mjs|json|xml|txt|csv|xlsx?|docx?|pptx?|woff2?|ttf|otf|eot)$/i;
 
-type SkipReason = "robots_disallowed" | "non_html" | "too_large" | "timeout" | "js_rendered" | "redirect_offsite" | "error";
+type SkipReason = "robots_disallowed" | "non_html" | "too_large" | "too_complex" | "timeout" | "js_rendered" | "redirect_offsite" | "error";
 
 function skipReasonFor(code: CrawlFetchErrorCode): SkipReason {
   switch (code) {
@@ -76,6 +87,7 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
   const { db, project } = ctx;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = opts.now ?? (() => Date.now());
+  const deadline = now() + (opts.deadlineMs ?? CRAWL_DEADLINE_MS);
 
   const proj = await db.first<{ id: string; workspace_id: string; site_type: SiteType; verified_host: string | null }>(
     "SELECT id, workspace_id, site_type, verified_host FROM projects WHERE id = ? AND workspace_id = ?",
@@ -103,29 +115,78 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
   const limitRow = await db.first<{ crawl_pages: number }>("SELECT crawl_pages FROM project_limits WHERE project_id = ? AND workspace_id = ?", project.id, project.workspaceId);
   let pageLimit = Math.max(1, Math.min(MAX_CRAWL_PAGES, Number(limitRow?.crawl_pages ?? DEFAULT_CRAWL_PAGES) || DEFAULT_CRAWL_PAGES));
 
-  let reservation: string;
-  try {
-    reservation = await ctx.budget.reserve("crawl_pages", pageLimit);
-  } catch (e) {
-    if (e instanceof BudgetExceededError) {
-      const note = `Crawl page budget exhausted: ${e.message}`;
-      await ctx.log.event("crawl", "skipped", note);
-      return { crawlRunId: null, pagesCrawled: 0, pagesSkipped: 0, findings: 0, status: "failed", note };
-    }
-    throw e;
+  // A Workflow step retry re-runs this function under the same run id. Reuse that run's crawl_runs row
+  // (and its still-reserved page reservation) instead of creating a second row and reserving again.
+  const prior = ctx.runId
+    ? await db.first<{ id: string; status: string; pages_crawled: number; pages_skipped: number; notes_json: string }>(
+        "SELECT id, status, pages_crawled, pages_skipped, notes_json FROM crawl_runs WHERE run_id = ? AND project_id = ? AND workspace_id = ? ORDER BY started_at DESC LIMIT 1",
+        ctx.runId,
+        project.id,
+        project.workspaceId,
+      )
+    : null;
+  if (prior && (prior.status === "completed" || prior.status === "partial")) {
+    // The crawl already finished (the step failed afterwards): return its stored result, crawl nothing.
+    const n = await db.first<{ n: number }>("SELECT COUNT(*) AS n FROM audit_findings WHERE crawl_run_id = ? AND workspace_id = ?", prior.id, project.workspaceId);
+    const note = parseJson<string[]>(prior.notes_json, [])[0] ?? "";
+    return { crawlRunId: prior.id, pagesCrawled: prior.pages_crawled, pagesSkipped: prior.pages_skipped, findings: Number(n?.n ?? 0), status: prior.status, note };
   }
 
-  const crawlRunId = newId("crw");
+  let reservation: string | null = null;
+  if (prior) {
+    const held = await db.first<{ id: string; amount: number }>(
+      `SELECT id, amount FROM usage_reservations
+        WHERE run_id = ? AND project_id = ? AND workspace_id = ? AND resource = 'crawl_pages' AND status = 'reserved' AND id NOT LIKE '%\\_g' ESCAPE '\\'
+        ORDER BY created_at DESC LIMIT 1`,
+      ctx.runId,
+      project.id,
+      project.workspaceId,
+    );
+    if (held) {
+      reservation = held.id;
+      pageLimit = Math.max(1, Math.min(pageLimit, Number(held.amount)));
+    }
+  }
+  if (reservation === null) {
+    try {
+      reservation = await ctx.budget.reserve("crawl_pages", pageLimit);
+    } catch (e) {
+      if (e instanceof BudgetExceededError) {
+        const note = `Crawl page budget exhausted: ${e.message}`;
+        if (prior) await markFailed(ctx, prior.id, note).catch(() => undefined);
+        await ctx.log.event("crawl", "skipped", note);
+        return { crawlRunId: null, pagesCrawled: 0, pagesSkipped: 0, findings: 0, status: "failed", note };
+      }
+      throw e;
+    }
+  }
+
+  const crawlRunId = prior?.id ?? newId("crw");
   const startedAt = iso(ctx.clock());
-  await db.insert("crawl_runs", {
-    id: crawlRunId,
-    workspace_id: project.workspaceId,
-    project_id: project.id,
-    run_id: ctx.runId,
-    status: "running",
-    pages_limit: pageLimit,
-    started_at: startedAt,
-  });
+  if (prior) {
+    // Evidence from the interrupted attempt is incomplete; this attempt rewrites it under the same row.
+    await db.batch([
+      ["DELETE FROM audit_findings WHERE crawl_run_id = ? AND workspace_id = ?", crawlRunId, project.workspaceId],
+      ["DELETE FROM page_snapshots WHERE crawl_run_id = ? AND workspace_id = ?", crawlRunId, project.workspaceId],
+      [
+        "UPDATE crawl_runs SET status = 'running', pages_limit = ?, pages_crawled = 0, pages_skipped = 0, notes_json = '[]', started_at = ?, finished_at = NULL WHERE id = ? AND workspace_id = ?",
+        pageLimit,
+        startedAt,
+        crawlRunId,
+        project.workspaceId,
+      ],
+    ]);
+  } else {
+    await db.insert("crawl_runs", {
+      id: crawlRunId,
+      workspace_id: project.workspaceId,
+      project_id: project.id,
+      run_id: ctx.runId,
+      status: "running",
+      pages_limit: pageLimit,
+      started_at: startedAt,
+    });
+  }
   await ctx.log.event("crawl", "started", `Crawling https://${host}/ (limit ${pageLimit} pages).`);
 
   let fetches = 0;
@@ -195,14 +256,16 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
       if (wait > 0) await sleep(wait);
     };
 
+    // One round trip: RETURNING gives the row's id and effective page type (user corrections kept).
     const upsertPage = async (url: string, cls: { pageType: PageType; method: string }, crawledAt: string | null) => {
-      await db.run(
+      const row = await db.first<{ id: string; page_type: PageType }>(
         `INSERT INTO pages (id, workspace_id, project_id, url, page_type, page_type_method, first_seen_at, last_crawled_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(project_id, url) DO UPDATE SET
            last_crawled_at = COALESCE(excluded.last_crawled_at, pages.last_crawled_at),
            page_type = CASE WHEN pages.page_type_method = 'user' THEN pages.page_type ELSE excluded.page_type END,
-           page_type_method = CASE WHEN pages.page_type_method = 'user' THEN 'user' ELSE excluded.page_type_method END`,
+           page_type_method = CASE WHEN pages.page_type_method = 'user' THEN 'user' ELSE excluded.page_type_method END
+         RETURNING id, page_type`,
         newId("pg"),
         project.workspaceId,
         project.id,
@@ -212,8 +275,14 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
         iso(ctx.clock()),
         crawledAt,
       );
-      const row = await db.first<{ id: string; page_type: PageType }>("SELECT id, page_type FROM pages WHERE project_id = ? AND workspace_id = ? AND url = ?", project.id, project.workspaceId, url);
       return row!;
+    };
+
+    // Snapshots are buffered and written in batches. Safe: a URL is recorded at most once per crawl, and
+    // previousExtraction only reads snapshots of earlier crawls.
+    const pendingSnapshots: Array<[string, ...unknown[]]> = [];
+    const flushSnapshots = async () => {
+      if (pendingSnapshots.length > 0) await db.batch(pendingSnapshots.splice(0));
     };
 
     const record = async (
@@ -233,7 +302,7 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
       const cls = classifyPageType({ url, jsonLdTypes: x?.jsonLdTypes, sitemapFile: sitemap.source.get(url) ?? null });
       const fetchedAt = iso(ctx.clock());
       const pageRow = await upsertPage(url, cls, data.fetched ? fetchedAt : null);
-      await db.insert("page_snapshots", {
+      pendingSnapshots.push(insertStatement("page_snapshots", {
         id: newId("snap"),
         workspace_id: project.workspaceId,
         project_id: project.id,
@@ -266,7 +335,8 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
         generic_anchors_json: x ? JSON.stringify(x.genericAnchors) : null,
         link_context_json: JSON.stringify(x?.linkContext ?? []),
         fetched_at: fetchedAt,
-      });
+      }));
+      if (pendingSnapshots.length >= SNAPSHOT_BATCH) await flushSnapshots();
       if (data.skippedReason) skipCounts[data.skippedReason] = (skipCounts[data.skippedReason] ?? 0) + 1;
       else crawled++;
       snapshots.push({
@@ -381,6 +451,11 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
       let extracted = await previousExtraction(target, contentHash);
       if (extracted) reused++;
       else extracted = extractPage(res.body, target);
+      if (extracted.tooComplex) {
+        // Markup nested past the parser budget: skipped rather than analysed from partial evidence.
+        await record(target, { statusCode: res.status, finalUrl: target, skippedReason: "too_complex", contentHash, fetched: true });
+        return;
+      }
       const headerRobots = res.headers.get("x-robots-tag");
       const robotsMeta = [extracted.metaRobots, headerRobots ? `x-robots-tag: ${headerRobots.toLowerCase()}` : null].filter(Boolean).join(", ") || null;
       const textHash = await sha256Hex(`${extracted.excerpt}|${extracted.wordCount}`);
@@ -400,14 +475,24 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
     const nextUrl = () => primary.shift() ?? secondary.shift();
     const active = new Set<Promise<void>>();
     let limitReached = false;
+    let deadlineReached = false;
+    let lastCancelCheck = -CANCEL_CHECK_EVERY;
     for (;;) {
-      if (await ctx.isCancelled()) {
-        cancelled = true;
-        break;
+      // isCancelled is a D1 read: check every turn for small crawls, then every CANCEL_CHECK_EVERY pages.
+      if (fetches < CANCEL_CHECK_EVERY || fetches - lastCancelCheck >= CANCEL_CHECK_EVERY) {
+        lastCancelCheck = fetches;
+        if (await ctx.isCancelled()) {
+          cancelled = true;
+          break;
+        }
       }
       while (active.size < concurrency) {
         if (fetches >= pageLimit) {
           if (primary.length || secondary.length) limitReached = true;
+          break;
+        }
+        if (now() >= deadline) {
+          if (primary.length || secondary.length) deadlineReached = true;
           break;
         }
         const url = nextUrl();
@@ -432,7 +517,9 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
       await Promise.race(active);
     }
     await Promise.all(active);
+    await flushSnapshots();
     if (cancelled) notes.push("Crawl cancelled; stopped before completing the queue.");
+    if (deadlineReached) notes.push(`Crawl time budget (${Math.round((opts.deadlineMs ?? CRAWL_DEADLINE_MS) / 1000)} s) reached; stopped before completing the queue.`);
     if (reused > 0) notes.push(`${reused} page(s) unchanged since the previous crawl (same content hash); extraction reused.`);
 
     // ---- AI crawler access + rules
@@ -468,9 +555,9 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
     for (let i = 0; i < stmts.length; i += 50) await db.batch(stmts.slice(i, i + 50));
 
     const skipped = Object.values(skipCounts).reduce((a, b) => a + b, 0);
-    const note = completenessNote(crawled, skipCounts, pageLimit, limitReached);
+    const note = completenessNote(crawled, skipCounts, pageLimit, limitReached) + (deadlineReached ? "; crawl time budget reached" : "");
     notes.unshift(note);
-    const status: CrawlSummary["status"] = cancelled || robots.status === "unreachable" ? "partial" : "completed";
+    const status: CrawlSummary["status"] = cancelled || deadlineReached || robots.status === "unreachable" ? "partial" : "completed";
     const robotsJson = {
       robots: {
         status: robots.status,
@@ -501,13 +588,23 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
     await ctx.log.event("crawl", status === "completed" ? "completed" : "partial", `${note}; ${findings.length} findings.`);
     return { crawlRunId, pagesCrawled: crawled, pagesSkipped: skipped, findings: findings.length, status, note };
   } catch (e) {
+    // Best effort: cleanup may fail for the same reason the crawl did (e.g. the subrequest cap); the
+    // original error is what gets reported.
     const msg = e instanceof Error ? e.message.slice(0, 300) : "unknown error";
-    await db
-      .run("UPDATE crawl_runs SET status = 'failed', notes_json = ?, finished_at = ? WHERE id = ? AND workspace_id = ?", JSON.stringify([`Crawl failed: ${msg}`]), iso(ctx.clock()), crawlRunId, project.workspaceId)
-      .catch(() => undefined);
+    await markFailed(ctx, crawlRunId, `Crawl failed: ${msg}`).catch(() => undefined);
     // Requests may have been sent: keep what was used counted.
     await ctx.budget.settle(reservation, fetches).catch(() => undefined);
-    await ctx.log.event("crawl", "failed", `Crawl failed: ${msg}`);
+    await ctx.log.event("crawl", "failed", `Crawl failed: ${msg}`).catch(() => undefined);
     return { crawlRunId, pagesCrawled: 0, pagesSkipped: 0, findings: 0, status: "failed", note: `Crawl failed: ${msg}` };
   }
+}
+
+async function markFailed(ctx: RunContext, crawlRunId: string, note: string): Promise<void> {
+  await ctx.db.run(
+    "UPDATE crawl_runs SET status = 'failed', notes_json = ?, finished_at = ? WHERE id = ? AND workspace_id = ?",
+    JSON.stringify([note]),
+    iso(ctx.clock()),
+    crawlRunId,
+    ctx.project.workspaceId,
+  );
 }

@@ -3,11 +3,13 @@
  * Jev judged are typed by someone looking to buy, hire, or compare options before buying. Flag rows are
  * shown with "Check this yourself". Without a TypeSafe key the view is "Setup required" and nothing is
  * guessed. Query text and URLs are untrusted and render as plain text.
+ * The GET shows cached judgments only; "Classify with Jev" (POST, spends budget) asks for the rest.
  */
 import { Link } from "react-router";
 import type { BuyerQueryRow, CoverageResponse, DemandSegment } from "@shared/types";
 import { formatNumber } from "@web/lib/format";
-import { useApi } from "@web/lib/hooks";
+import { api, errorMessage } from "@web/lib/api";
+import { useApi, useMutation } from "@web/lib/hooks";
 import { projectPath } from "@web/lib/project-context";
 import { Badge, TBody, TD, TH, THead, TR, Table, TierBadge, buttonClass } from "@web/components/ui";
 import { CoverageCard, Detail, UrlText, useOwnHosts } from "./PageAuditTable";
@@ -21,11 +23,30 @@ const SEGMENT_LABEL: Record<DemandSegment, string> = { head: "Head", middle: "Mi
 
 export function BuyerQueriesTable({ projectId }: { projectId: string }) {
   const own = useOwnHosts();
-  const state = useApi<CoverageResponse<BuyerQueryRow>>(projectId ? `/projects/${encodeURIComponent(projectId)}/seo/buyer-queries` : null);
+  const path = projectId ? `/projects/${encodeURIComponent(projectId)}/seo/buyer-queries` : null;
+  const state = useApi<CoverageResponse<BuyerQueryRow>>(path);
+  const classify = useMutation(() => api<CoverageResponse<BuyerQueryRow>>(path!, { method: "POST" }));
+  const onClassify = async () => {
+    const next = await classify.run();
+    if (next) state.setData(next);
+  };
   return (
     <CoverageCard
       title="Buyer queries"
-      description="Non-brand queries from your Search Console data that Jev judged are typed by people looking to buy, hire, or compare options. Impressions are your own, not market search volume."
+      description={
+        <>
+          Non-brand queries from your Search Console data that Jev judged are typed by people looking to buy, hire, or compare options. Impressions are your own, not market search volume.
+          {state.data?.state === "ready" ? (
+            <span className="mt-2 flex flex-wrap items-center gap-2">
+              <button type="button" className={buttonClass("secondary", "sm")} onClick={onClassify} disabled={classify.loading}>
+                {classify.loading ? "Classifying…" : "Classify with Jev"}
+              </button>
+              <span>Asks Jev about queries without a cached answer; uses your daily Jev budget.</span>
+              {classify.error ? <span role="alert" className="text-red-700 dark:text-red-400">{errorMessage(classify.error)}</span> : null}
+            </span>
+          ) : null}
+        </>
+      }
       state={state}
       emptyTitle="No buyer queries found in the classified queries."
       setupHint={

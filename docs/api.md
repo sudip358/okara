@@ -26,7 +26,7 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | GET | /projects/:pid/context | platform-projects | `ContextDocument[]` (latest version per kind) |
 | PUT | /projects/:pid/context/:kind | platform-projects | body `{content, facts}`; new version; `ContextDocument` |
 | GET | /projects/:pid/verification | platform-projects | `VerificationStatus` |
-| POST | /projects/:pid/verification/check | platform-projects | body `{method:'dns'|'file'|'gsc'}`; `VerificationStatus` |
+| POST | /projects/:pid/verification/check | platform-projects | body `{method:'dns'|'file'|'gsc'}`; `VerificationStatus` (rate-limited per user and project) |
 | GET | /projects/:pid/limits | platform-projects | `UsageSummary["limits"]` |
 | PUT | /projects/:pid/limits | platform-projects | bounded update |
 | GET | /projects/:pid/integrations | platform-projects | `IntegrationsStatus` |
@@ -48,7 +48,8 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | GET | /projects/:pid/seo/internal-links | links | latest `LinkSuggestionReport` |
 | PATCH | /projects/:pid/seo/internal-links/:id | links | body `{userStatus}` → `LinkSuggestion` |
 | GET | /projects/:pid/seo/internal-links/export?format=csv\|json | links | download of current suggestions |
-| GET | /projects/:pid/seo/buyer-queries | seo-jev | `CoverageResponse<BuyerQueryRow>` (non-brand, transactional/commercial intent) |
+| GET | /projects/:pid/seo/buyer-queries | seo-jev | `CoverageResponse<BuyerQueryRow>` (non-brand, transactional/commercial intent) from the 7-day decision cache only; never calls Jev |
+| POST | /projects/:pid/seo/buyer-queries | seo-jev | same response; asks Jev for queries without a cached answer (user-triggered; budgeted; rate-limited) |
 | GET | /projects/:pid/seo/translation-opportunities | seo-jev | `CoverageResponse<TranslationOpportunityRow>` |
 | POST | /projects/:pid/seo/draft-check | draft-check | body `DraftCheckRequest` → `DraftCheckResult` (rate-limited, budgeted) |
 | GET | /projects/:pid/pages | seo-crawl | `PageRow[]` |

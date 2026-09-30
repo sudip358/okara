@@ -16,6 +16,8 @@ const AUTH_ERRORS: Record<string, string> = {
   invalid_id_token: "Google returned an identity token we could not verify. Please try again.",
   nonce_mismatch: "The sign-in response could not be matched to your request. Please try again.",
   email_unverified: "Your Google account email is not verified. Verify it with Google, then sign in again.",
+  signup_closed: "Sign-up is closed. This private beta is invite-only right now.",
+  not_allowed: "This Google account is not on the access list for this private beta. Sign in with an invited account or ask the operator for access.",
 };
 
 function authErrorMessage(code: string): string {
