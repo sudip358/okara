@@ -16,8 +16,16 @@ export function AppLayout() {
     );
   }
   if (session.status === "anonymous") {
-    const returnTo = location.pathname + location.search;
-    return <Navigate to={`/signin${returnTo && returnTo !== "/" ? `?returnTo=${encodeURIComponent(returnTo)}` : ""}`} replace />;
+    const params = new URLSearchParams(location.search);
+    const authError = params.get("authError");
+    params.delete("authError");
+    const rest = params.toString();
+    const returnTo = location.pathname + (rest ? `?${rest}` : "");
+    const q = new URLSearchParams();
+    if (returnTo !== "/") q.set("returnTo", returnTo);
+    if (authError) q.set("authError", authError);
+    const qs = q.toString();
+    return <Navigate to={`/signin${qs ? `?${qs}` : ""}`} replace />;
   }
   if (session.status === "error" || !session.me) {
     return (

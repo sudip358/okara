@@ -5,6 +5,23 @@ import { api, errorMessage } from "@web/lib/api";
 import { useSession } from "@web/lib/session";
 import { Button, Card, StateBanner } from "@web/components/ui";
 
+/** Codes from the OIDC callback redirect (`/?authError=<code>`), forwarded here by the app shell. */
+const AUTH_ERRORS: Record<string, string> = {
+  invalid_state: "The sign-in link was invalid. Please start again.",
+  expired_state: "The sign-in attempt took too long and expired. Please try again.",
+  state_mismatch: "The sign-in attempt did not match this browser session. Please try again from this tab.",
+  access_denied: "Google sign-in was cancelled or access was denied.",
+  invalid_request: "The sign-in request was invalid. Please try again.",
+  token_exchange_failed: "We could not complete sign-in with Google. Please try again in a moment.",
+  invalid_id_token: "Google returned an identity token we could not verify. Please try again.",
+  nonce_mismatch: "The sign-in response could not be matched to your request. Please try again.",
+  email_unverified: "Your Google account email is not verified. Verify it with Google, then sign in again.",
+};
+
+function authErrorMessage(code: string): string {
+  return AUTH_ERRORS[code] ?? "Sign-in did not complete. Please try again.";
+}
+
 function safeReturnTo(raw: string | null): string {
   // Only same-app relative paths; never protocol-relative or absolute URLs.
   if (!raw || !raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/\\")) return "/";
@@ -18,7 +35,7 @@ export function SignInPage() {
   const [busy, setBusy] = useState(false);
   const [setupMessage, setSetupMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const authError = params.get("error");
+  const authError = params.get("authError") ?? params.get("error");
 
   if (session.status === "authenticated") return <Navigate to={returnTo} replace />;
 
@@ -71,7 +88,7 @@ export function SignInPage() {
       </p>
       <Card title="Sign in">
         <div className="space-y-4">
-          {authError && <StateBanner state="failed" message="Sign-in did not complete. Please try again." />}
+          {authError && <StateBanner state="failed" title="Sign-in failed" message={authErrorMessage(authError)} />}
           {setupMessage && <StateBanner state="setup_required" message={setupMessage} />}
           {error && <StateBanner state="failed" message={error} />}
           {session.status === "error" && <StateBanner state="failed" message={errorMessage(session.error)} />}

@@ -53,8 +53,7 @@ export function ProjectForm({
     e.preventDefault();
     setShowErrors(true);
     if (Object.keys(errors).length > 0) {
-      const first = document.querySelector<HTMLElement>("[aria-invalid=true]");
-      first?.focus();
+      requestAnimationFrame(() => document.querySelector<HTMLElement>("form [aria-invalid=true]")?.focus());
       return;
     }
     onSubmit({

@@ -418,6 +418,7 @@ export interface RunSummary {
 export interface RunEvent {
   id: string;
   runId: string;
+  agent?: AgentKind;
   step: string;
   status: "started" | "completed" | "skipped" | "failed" | "partial" | "info";
   message: string;
