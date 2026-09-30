@@ -1,0 +1,3 @@
+{"id":"seo-intent-001","question_id":"seo.query_intent","state":{"query":"unlacquered brass cabinet pulls","site_type":"ecommerce","locale":"en-US"},"human_answer":"transactional","source":"manual","labelled_by":"seed","labelled_at":"2026-09-30"}
+{"id":"seo-intent-002","question_id":"seo.query_intent","state":{"query":"how to clean unlacquered brass","site_type":"ecommerce","locale":"en-US"},"human_answer":"informational","source":"manual","labelled_by":"seed","labelled_at":"2026-09-30"}
+{"id":"seo-intent-003","question_id":"seo.query_intent","state":{"query":"lacquered vs unlacquered brass hardware","site_type":"ecommerce","locale":"en-US"},"human_answer":"commercial_investigation","source":"manual","labelled_by":"seed","labelled_at":"2026-09-30"}
