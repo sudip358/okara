@@ -6,10 +6,10 @@
 import type { Env } from "../env";
 import type { Db } from "../lib/db";
 import { decryptSecret, encryptSecret, encryptionConfigured } from "../lib/crypto";
-import { HttpError, badRequest } from "../lib/errors";
+import { HttpError } from "../lib/errors";
 import { base64Url, newId, randomToken } from "../lib/ids";
 import { addSeconds, iso } from "../lib/time";
-import type { SessionUser } from "./access";
+import type { ProjectRow as ProjectRowLite, SessionUser } from "./access";
 import { requireProject } from "./access";
 
 export const GSC_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
@@ -114,28 +114,35 @@ export interface CallbackResult {
 /**
  * Handle Google's redirect. The state row is consumed (deleted) before any other check so it can never be
  * replayed. The callback must arrive in the same session, for the same user, that started the flow.
+ * Failures never throw: they redirect to the integrations page with `?gscError=<code>`.
  */
 export async function handleGscCallback(
   env: Env,
   db: Db,
   args: { query: URLSearchParams; user: SessionUser | null; sessionId: string | null; now: Date; fetchImpl: typeof fetch },
 ): Promise<CallbackResult> {
-  const stateParam = args.query.get("state");
-  if (!stateParam || stateParam.length > 200) throw badRequest("Missing or invalid OAuth state.");
-  const row = await db.first<StateRow>("DELETE FROM oauth_states WHERE state = ? AND purpose = 'gsc' RETURNING *", stateParam);
-  if (!row || !row.project_id || !row.workspace_id) throw new HttpError(400, "invalid_state", "OAuth state is unknown or was already used.");
-  if (new Date(row.expires_at) <= args.now) throw new HttpError(400, "invalid_state", "OAuth state expired. Start the connection again.");
-  if (!args.user || !args.sessionId) throw new HttpError(401, "unauthorized", "Sign in required.");
-  if (row.session_id !== args.sessionId || row.user_id !== args.user.id) {
-    throw new HttpError(403, "session_mismatch", "This Search Console connection was started in a different session.");
-  }
-  const project = await requireProject(db, args.user.id, row.project_id);
-  if (project.workspace_id !== row.workspace_id) throw new HttpError(403, "session_mismatch", "Workspace changed during connection.");
-  const back = (reason?: string): CallbackResult => ({
-    redirectTo: `${integrationsPath(project.id)}?gsc=${reason ? `error&reason=${encodeURIComponent(reason)}` : "connected"}`,
-    ok: !reason,
+  const fail = (projectId: string | null, reason: string): CallbackResult => ({
+    redirectTo: projectId ? `${integrationsPath(projectId)}?gscError=${reason}` : `/?gscError=${reason}`,
+    ok: false,
     reason,
   });
+  const stateParam = args.query.get("state");
+  if (!stateParam || stateParam.length > 200) return fail(null, "invalid_state");
+  const row = await db.first<StateRow>("DELETE FROM oauth_states WHERE state = ? AND purpose = 'gsc' RETURNING *", stateParam);
+  if (!row || !row.project_id || !row.workspace_id) return fail(null, "invalid_state");
+  if (new Date(row.expires_at) <= args.now) return fail(row.project_id, "invalid_state");
+  if (!args.user || !args.sessionId || row.session_id !== args.sessionId || row.user_id !== args.user.id) {
+    return fail(row.project_id, "session_mismatch");
+  }
+  let project: ProjectRowLite;
+  try {
+    project = await requireProject(db, args.user.id, row.project_id);
+  } catch {
+    return fail(null, "invalid_state");
+  }
+  if (project.workspace_id !== row.workspace_id) return fail(project.id, "session_mismatch");
+  const back = (reason?: string): CallbackResult =>
+    reason ? fail(project.id, reason) : { redirectTo: `${integrationsPath(project.id)}?gsc=connected`, ok: true };
 
   if (args.query.get("error")) return back(args.query.get("error")!.replace(/[^a-z_]/gi, "").slice(0, 40) || "access_denied");
   const code = args.query.get("code");

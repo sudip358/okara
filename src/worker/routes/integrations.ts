@@ -14,9 +14,8 @@ import type { ProjectRow, SessionUser } from "../platform/access";
 import { requireProject } from "../platform/access";
 import { createGscProvider, GscApiError } from "../platform/gsc-client";
 import { disconnectGsc, gscOAuthConfigured, handleGscCallback, integrationsPath, loadGscConnection, startGscConnect } from "../platform/gsc-oauth";
-import { outbound, parseBody } from "../platform/projects";
+import { outbound, parseBody, siteHost } from "../platform/projects";
 import { gscEntryVerifiesHost, markVerified, verificationStatus } from "../platform/verification";
-import { siteHost } from "../platform/projects";
 import { listProviderStatuses } from "./credentials";
 
 export const integrationRoutes = new Hono<AppEnv>();
@@ -57,8 +56,8 @@ integrationRoutes.get("/projects/:pid/gsc/connect", async (c) => {
   if (!session) throw unauthorized();
   const db = c.get("db");
   const p = await requireProject(db, user.id, c.req.param("pid"));
-  if (p.is_demo === 1) return c.redirect(`${integrationsPath(p.id)}?gsc=error&reason=demo_project`, 302);
-  if (!gscOAuthConfigured(c.env)) return c.redirect(`${integrationsPath(p.id)}?gsc=error&reason=setup_required`, 302);
+  if (p.is_demo === 1) return c.redirect(`${integrationsPath(p.id)}?gscError=demo_project`, 302);
+  if (!gscOAuthConfigured(c.env)) return c.redirect(`${integrationsPath(p.id)}?gscError=setup_required`, 302);
   const url = await startGscConnect(c.env, db, { user, sessionId: session.id, workspaceId: p.workspace_id, projectId: p.id, now: c.get("now") });
   c.header("Cache-Control", "no-store");
   return c.redirect(url, 302);

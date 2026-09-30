@@ -7,7 +7,6 @@ import type { AppEnv } from "../app";
 import { demoModeEnabled } from "../env";
 import { unauthorized } from "../lib/errors";
 import { seedDemoProject } from "../demo/seed";
-import { toProject } from "../platform/projects";
 
 export const demoRoutes = new Hono<AppEnv>();
 
@@ -18,5 +17,5 @@ demoRoutes.post("/demo/seed", async (c) => {
   const user = c.get("user");
   if (!user) throw unauthorized();
   const row = await seedDemoProject(c.env, c.get("db"), user.id, c.get("now"));
-  return c.json({ data: toProject(row) }, 201);
+  return c.json({ data: { projectId: row.id } }, 201);
 });

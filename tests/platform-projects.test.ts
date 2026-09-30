@@ -307,9 +307,10 @@ describe("GSC OAuth", () => {
     const f = tokenEndpoint("rt-1");
     outbound.fetch = f.fn;
     const wrong = await call({ sessionToken: other.token, csrfToken: other.csrfToken }, "GET", `/gsc/callback?state=${state}&code=c1`);
-    expect(wrong.status).toBe(403);
+    expect(wrong.status).toBe(302);
+    expect(wrong.headers.get("location")).toBe(`/projects/${p.id}/integrations?gscError=session_mismatch`);
     const replay = await call(A, "GET", `/gsc/callback?state=${state}&code=c1`);
-    expect(replay.status).toBe(400);
+    expect(replay.headers.get("location")).toBe("/?gscError=invalid_state");
     expect(f.calls).toHaveLength(0);
     expect(await A.db.first("SELECT id FROM oauth_connections WHERE project_id = ?", p.id)).toBeNull();
   });
@@ -319,7 +320,8 @@ describe("GSC OAuth", () => {
     const { state } = await startConnect(A, p.id);
     await A.db.run("UPDATE oauth_states SET expires_at = '2000-01-01T00:00:00.000Z' WHERE state = ?", state);
     outbound.fetch = tokenEndpoint("rt").fn;
-    expect((await call(A, "GET", `/gsc/callback?state=${state}&code=c1`)).status).toBe(400);
+    const res = await call(A, "GET", `/gsc/callback?state=${state}&code=c1`);
+    expect(res.headers.get("location")).toBe(`/projects/${p.id}/integrations?gscError=invalid_state`);
   });
 
   it("stores the refresh token encrypted and keeps it when a reconnect omits refresh_token", async () => {
@@ -358,7 +360,7 @@ describe("GSC OAuth", () => {
     const { state } = await startConnect(A, p.id);
     outbound.fetch = tokenEndpoint(undefined).fn;
     const cb = await call(A, "GET", `/gsc/callback?state=${state}&code=c`);
-    expect(cb.headers.get("location")).toContain("reason=no_refresh_token");
+    expect(cb.headers.get("location")).toContain("gscError=no_refresh_token");
   });
 
   it("disconnect revokes at Google and deletes the token", async () => {
@@ -549,7 +551,8 @@ describe("export and delete", () => {
     A = await seedUser(env);
     const seeded = await call(A, "POST", "/demo/seed", undefined, demoEnv);
     expect(seeded.status).toBe(201);
-    const p = ((await seeded.json()) as { data: Project }).data;
+    const { projectId } = ((await seeded.json()) as { data: { projectId: string } }).data;
+    const p = ((await (await call(A, "GET", `/projects/${projectId}`, undefined, demoEnv)).json()) as { data: Project }).data;
     await insertConnection(p, "rt-delete");
     await A.db.insert("run_locks", { project_id: p.id, agent: "seo", run_id: "r", expires_at: "x" });
     await A.db.insert("usage_counters", { scope_key: `project:${p.id}`, day: "2026-09-30", resource: "provider_calls", used: 1, limit_value: 60 });
@@ -595,7 +598,8 @@ describe("demo seed", () => {
     const u = await seedUser(demoEnv);
     const res = await call(u, "POST", "/demo/seed", undefined, demoEnv);
     expect(res.status).toBe(201);
-    const p = ((await res.json()) as { data: Project }).data;
+    const { projectId } = ((await res.json()) as { data: { projectId: string } }).data;
+    const p = ((await (await call(u, "GET", `/projects/${projectId}`, undefined, demoEnv)).json()) as { data: Project }).data;
     expect(p).toMatchObject({ isDemo: true, scheduleEnabled: false, siteUrl: "https://demo.example", workspaceId: u.workspaceId });
     const db = new Db(demoEnv.DB);
     const count = async (sql: string) => (await db.first<{ n: number }>(sql, p.id))!.n;
