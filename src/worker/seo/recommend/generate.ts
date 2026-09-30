@@ -18,6 +18,12 @@
  *
  * The card's decision fields are the headline question's answer under the provider's real field
  * names (choice/confidence, score/confidence, noul); every raw answer is on decision_records.
+ *
+ * [A21] Readiness-checklist gaps join the shortlist as kind 'checklist' (checklist-candidates.ts): the
+ * deterministic ones skip Jev like technical findings, heuristic content ones need seo.action_choice,
+ * and a blocked search-engine crawler adds a critical robots.txt candidate whose snippet is the
+ * advisor's suggestion (drafted by the deterministic template only; the snippet is code-owned).
+ * Checklist dedup key = hash(project, 'checklist', item id, target). The daily cap is unchanged.
  */
 import type { Tier } from "@shared/types";
 import { BudgetExceededError } from "../../lib/errors";
@@ -29,6 +35,7 @@ import { isDuplicate, remainingToday, saveRecommendation } from "../../recommend
 import type { RunContext } from "../../runs/context";
 import { POLICY_VERSION } from "../../runs/policy";
 import { buildCandidates, CANDIDATE_RULES_VERSION, type Candidate, type CandidateConfig } from "./candidates";
+import { buildSeoChecklistCandidates } from "./checklist-candidates";
 import {
   DecisionCallError,
   evaluateContent,
@@ -59,6 +66,10 @@ export interface GenerateOptions {
   maxTechnicalJudged?: number;
   /** Drafts attempted per run (writer calls are paid); the rest are rejected 'budget'. */
   maxDraftAttempts?: number;
+  /** [A21] Feed readiness-checklist gaps and the robots.txt advisor into the shortlist (default true). */
+  checklist?: boolean;
+  /** [A21] Per-page checklists evaluated for up to this many top pages (default 10). */
+  checklistTopPages?: number;
 }
 
 export const DEFAULT_MAX_JUDGED = 6;
@@ -77,6 +88,12 @@ interface Pending {
 
 /** Dedup key: project + target (url/template/site) + issue type + hash of the stable evidence identity. */
 export async function dedupKeyFor(projectId: string, c: Candidate): Promise<string> {
+  if (c.kind === "checklist") {
+    // [A21] hash(project, 'checklist', item id, scope target): reruns with fresh counts still match.
+    const id = c.identity as { checklist: string; target: string };
+    const h = await hashJson({ p: projectId, k: "checklist", i: id.checklist, t: id.target });
+    return `seo:checklist:${h.slice(0, 24)}`;
+  }
   const target = c.target.url ?? c.target.template ?? "site";
   const h = await hashJson({ p: projectId, t: target, i: c.issueType, e: c.identity });
   return `seo:${c.issueType}:${h.slice(0, 24)}`;
@@ -98,7 +115,18 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
     return { candidates: 0, created: 0, rejected: 0, note };
   }
 
-  const all = buildCandidates(inputs, opts.candidateConfig);
+  let all = buildCandidates(inputs, opts.candidateConfig);
+  if (opts.checklist !== false) {
+    // [A21] Checklist gaps + robots.txt advisor. Never fatal: without them the run continues as before.
+    try {
+      const cl = await buildSeoChecklistCandidates(ctx, inputs, all, { topPages: opts.checklistTopPages });
+      if (cl.supersedes.length) all = all.filter((c) => !cl.supersedes.includes(c.key));
+      all.push(...cl.candidates);
+      for (const n of cl.notes) await ctx.log.event(step, "info", n);
+    } catch (e) {
+      await ctx.log.event(step, "info", `Checklist gaps unavailable this run (${e instanceof Error ? e.message.slice(0, 200) : "error"}); continuing without them.`);
+    }
+  }
   const byKind = all.reduce<Record<string, number>>((m, c) => ((m[c.kind] = (m[c.kind] ?? 0) + 1), m), {});
   await ctx.log.event(
     step,
@@ -176,9 +204,12 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
       }
     }
 
-    for (const [i, p] of technical.entries()) {
+    let techJudged = 0;
+    for (const p of technical) {
       let j: Judgment | null = null;
-      if (i < maxTech && !budgetOut) {
+      // Deterministic checklist candidates carry their own documented severity: no Jev question.
+      if (p.c.kind === "technical" && techJudged < maxTech && !budgetOut) {
+        techJudged++;
         try {
           const ev = await ensureEvidence(ctx, p);
           j = await judgeCandidate(ctx, p.c, inputs, ev.map((e) => e.id));
@@ -251,7 +282,7 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
     const draftInput = { candidate: p.c, action: ev.action, tier: ev.tier, intent: ev.intent, severityScore: ev.severityScore, evidence, contextDocs: ev.fields["seo.pillar_fit.choice"] ? contextDocs : [] };
     let result: DraftResult;
     try {
-      result = ctx.writer ? await draftWithWriter(ctx, draftInput) : draftDeterministic(draftInput);
+      result = ctx.writer && !p.c.checklist?.deterministicOnly ? await draftWithWriter(ctx, draftInput) : draftDeterministic(draftInput);
     } catch (e) {
       const why = e instanceof BudgetExceededError ? "Writer budget exhausted." : e instanceof Error ? e.message.slice(0, 200) : "writer error";
       result = { ok: false, reason: "writer_failed", errors: [why] };

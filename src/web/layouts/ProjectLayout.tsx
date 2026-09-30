@@ -10,6 +10,7 @@ const NAV: Array<{ to: string; label: string; end?: boolean; group?: string }> =
   { to: "", label: "Overview", end: true },
   { to: "checklists", label: "Checklists" },
   { to: "seo", label: "SEO audit", group: "SEO" },
+  { to: "redirects", label: "Redirects" },
   { to: "recommendations", label: "Recommendations" },
   { to: "geo/prompts", label: "GEO prompts", group: "GEO" },
   { to: "geo/results", label: "GEO results" },

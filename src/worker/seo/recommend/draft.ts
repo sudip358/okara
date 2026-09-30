@@ -69,12 +69,15 @@ const EFFORT_BY_ACTION: Record<ActionChoice, Level> = {
 
 export function effortFor(c: Candidate, action: ActionChoice | null): Level {
   if (c.kind === "technical") return c.scope === "page" ? "low" : "medium";
+  // [A21] Deterministic checklist candidates carry their own effort; Jev-dependent ones follow the chosen action.
+  if (c.kind === "checklist" && c.checklist && !c.jevDependent) return c.checklist.effort;
   return action ? EFFORT_BY_ACTION[action] : c.priority.effort;
 }
 
 export function uncertaintyFor(c: Candidate, tier: Tier): Level {
   if (c.reviewRequired || tier === "flag") return "high";
   if (c.kind === "technical") return c.severity === "critical" || c.severity === "major" ? "low" : "medium";
+  if (c.kind === "checklist" && c.checklist) return c.severity === "critical" || (c.checklist.method === "measured" && c.checklist.status === "not_met") ? "low" : "medium";
   return "medium";
 }
 
@@ -178,7 +181,8 @@ export async function draftWithWriter(ctx: RunContext, d: DraftInput): Promise<D
       trigger: o.trigger,
       issue: o.issue,
       action: o.action,
-      suggestedSnippet: o.suggested_snippet ?? null,
+      // A code-owned snippet (robots.txt advisor) always wins over anything the writer produced.
+      suggestedSnippet: c.checklist?.snippet ?? o.suggested_snippet ?? null,
       rationale: o.rationale,
       // Code owns scope/target/effort (priority used it) and verification; the writer cannot change them.
       effort: effortFor(c, d.action),
@@ -222,6 +226,7 @@ const RATIONALE: Record<Candidate["kind"], string> = {
   engine_query: "AI engines issued this search while answering sampled prompts; aligning a page with it is a hypothesis to review, not a measured effect.",
   technical: "The rule reported this on the crawled HTML; fixing it once at the reported scope addresses every affected URL together.",
   duplicate: "Jev judged that the two pages compete for the same search intent, and they share title words or queries, so one strong page may serve searchers better than two partial ones.",
+  checklist: "The readiness checklist measured this gap from the project's own crawl, Search Console, or robots.txt data; it describes a practice that makes pages easier to crawl and understand, and no ranking change is promised.",
 };
 
 export function draftDeterministic(d: DraftInput): DraftResult {
@@ -231,7 +236,9 @@ export function draftDeterministic(d: DraftInput): DraftResult {
   const ids = d.evidence.map((e) => e.id);
   const primary = d.evidence.slice(0, 2).map((e) => e.id);
   let actionText: string;
-  if (d.action) actionText = ACTION_TEXT[d.action](targetText);
+  // [A21] Deterministic checklist candidates carry code-owned action text; Jev-dependent ones use the chosen action.
+  if (c.checklist?.actionText && (!c.jevDependent || !d.action)) actionText = c.checklist.actionText;
+  else if (d.action) actionText = ACTION_TEXT[d.action](targetText);
   else {
     const rule = c.issueType.startsWith("technical:") ? c.issueType.slice("technical:".length) : c.issueType;
     actionText = `Resolve rule ${rule} at the reported scope (${c.scope}) for ${targetText}, following the finding details; [confirm: the intended fix for this rule].`;
@@ -244,7 +251,7 @@ export function draftDeterministic(d: DraftInput): DraftResult {
     c.demand && demandEv
       ? ` In this site's own Search Console impressions, "${clip(c.demand.query, 80)}" is ${demandPhrase(c.demand)}; this describes first-party visibility, not market search volume. ${cite([demandEv.id])}`
       : "";
-  const rationale = `${RATIONALE[c.kind]} ${cite(ids.slice(0, 3))}${demandText}`;
+  const rationale = `${c.checklist?.rationale ?? RATIONALE[c.kind]} ${cite(ids.slice(0, 3))}${demandText}`;
   const text = {
     trigger: clip(c.trigger, 200),
     issue: `${clip(c.issue, 360)} ${cite(primary.slice(0, 1))}`,
@@ -259,7 +266,7 @@ export function draftDeterministic(d: DraftInput): DraftResult {
     warnings: check.warnings,
     draft: {
       ...text,
-      suggestedSnippet: null,
+      suggestedSnippet: c.checklist?.snippet ?? null,
       effort: effortFor(c, d.action),
       uncertainty: uncertaintyFor(c, d.tier),
       verified: c.verified && !c.reviewRequired,

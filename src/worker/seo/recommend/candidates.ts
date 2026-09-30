@@ -20,6 +20,9 @@
  *  duplicate     [A15]  title-token prefilter (>= 2 shared non-stopword tokens AND >= 50% of the
  *                       shorter title; brand name/alias tokens excluded) OR GSC queries where both URLs
  *                       received impressions; <= 40 pairs
+ *  checklist     [A21]  readiness-checklist gaps (checklists/bridge.ts) that fit the SEO agent, plus the
+ *                       robots.txt advisor for blocked search-engine crawlers; built asynchronously by
+ *                       checklist-candidates.ts (not by buildCandidates, which stays pure)
  *
  * Technical grouping uses the rule registry: only rules marked `templateable` become template-scope
  * candidates (one per rule + template); a non-templateable rule on >= templateMinUrls URLs (for
@@ -105,7 +108,8 @@ export type CandidateKind =
   | "internal_link"
   | "engine_query"
   | "technical"
-  | "duplicate";
+  | "duplicate"
+  | "checklist";
 
 export interface EvidenceSpec {
   source: EvidenceSource;
@@ -149,6 +153,26 @@ export interface Candidate {
   limitations: string;
   /** Demand segment of `query` in this site's own GSC impressions (null without a GSC query). */
   demand: CandidateDemand | null;
+  /** [A21] Set for kind 'checklist': the checklist item and the code-owned draft parts. */
+  checklist?: ChecklistCandidateMeta;
+}
+
+/** Checklist provenance and code-owned draft parts for a 'checklist' candidate (see checklist-candidates.ts). */
+export interface ChecklistCandidateMeta {
+  itemId: string;
+  checklistKind: "seo" | "geo" | "page";
+  checklistVersion: string;
+  label: string;
+  status: "not_met" | "partial";
+  method: "measured" | "heuristic";
+  /** Deterministic action text (the draft step appends evidence citations); null = use the Jev action's template. */
+  actionText: string | null;
+  rationale: string;
+  /** Code-owned snippet (robots.txt advisor suggestion); never produced or changed by the writer. */
+  snippet: string | null;
+  /** Draft with the deterministic template only (the snippet and its limitations are code-owned). */
+  deterministicOnly: boolean;
+  effort: Level;
 }
 
 export interface CandidateDemand {

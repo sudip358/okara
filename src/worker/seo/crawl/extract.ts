@@ -27,7 +27,83 @@ export const CAPS = {
   genericAnchors: 10,
   anchorText: 60,
   imageCount: 10_000,
+  /** [A25] link-context sentences stored per snapshot, and characters per sentence. */
+  linkContextSentences: 40,
+  linkContextChars: 240,
 } as const;
+
+/** [A25] Sentences outside this word range are not link-context candidates. */
+export const LINK_CONTEXT_MIN_WORDS = 6;
+export const LINK_CONTEXT_MAX_WORDS = 60;
+/** Text-block buffer cap while parsing (per block and in total) for link-context extraction. */
+const LINK_CONTEXT_BLOCK_MAX = 4000;
+const LINK_CONTEXT_TOTAL_MAX = 60_000;
+
+/**
+ * Abbreviations that end with a period without ending a sentence (compared lower-cased, without the
+ * final period). Single letters (initials such as "J. Smith") are handled separately.
+ */
+const ABBREVIATIONS = new Set([
+  "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "mt", "vs", "v", "e.g", "i.e", "eg", "ie", "cf", "approx", "incl", "est",
+  "no", "nos", "fig", "figs", "vol", "p", "pp", "ch", "sec", "dept", "inc", "ltd", "co", "corp", "llc", "jan", "feb", "mar",
+  "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec", "u.s", "u.k", "a.m", "p.m", "ft", "in", "lb", "lbs", "oz",
+]);
+
+/**
+ * Split plain text into sentences. A boundary is terminal punctuation (. ! ? …), optionally followed by
+ * closing quotes/brackets, then whitespace, then an uppercase letter, digit, or opening quote/bracket.
+ * Periods after known abbreviations, single-letter initials, and decimals do not end a sentence.
+ */
+export function splitSentences(text: string): string[] {
+  const t = text.replace(/\s+/g, " ").trim();
+  if (!t) return [];
+  const out: string[] = [];
+  const boundary = /([.!?…]+)(["'”’)\]]*)\s+(?=["'“‘(\[]?[\p{Lu}\p{N}])/gu;
+  let start = 0;
+  let m: RegExpExecArray | null;
+  while ((m = boundary.exec(t)) !== null) {
+    const end = m.index + m[1]!.length + m[2]!.length;
+    if (m[1] === ".") {
+      const before = t.slice(start, m.index);
+      const word = (before.match(/([\p{L}.]+)$/u)?.[1] ?? "").toLowerCase();
+      if (ABBREVIATIONS.has(word) || /^\p{L}$/u.test(word)) continue;
+    }
+    const s = t.slice(start, end).trim();
+    if (s) out.push(s);
+    start = m.index + m[0].length;
+  }
+  const rest = t.slice(start).trim();
+  if (rest) out.push(rest);
+  return out;
+}
+
+/**
+ * [A25] Link-context sentences from main-content text blocks: split into sentences, keep those with
+ * LINK_CONTEXT_MIN_WORDS..LINK_CONTEXT_MAX_WORDS words, cap each at CAPS.linkContextChars (cut at a word
+ * boundary with an ellipsis), drop duplicates, and keep at most CAPS.linkContextSentences.
+ */
+export function linkContextSentences(blocks: readonly string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const block of blocks) {
+    for (const s of splitSentences(block)) {
+      const words = countWords(s);
+      if (words < LINK_CONTEXT_MIN_WORDS || words > LINK_CONTEXT_MAX_WORDS) continue;
+      let text = s;
+      if (text.length > CAPS.linkContextChars) {
+        const cut = text.slice(0, CAPS.linkContextChars - 1);
+        const sp = cut.lastIndexOf(" ");
+        text = `${(sp > 40 ? cut.slice(0, sp) : cut).replace(/[\s,;:]+$/, "")}…`;
+      }
+      const key = text.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(text);
+      if (out.length >= CAPS.linkContextSentences) return out;
+    }
+  }
+  return out;
+}
 
 /**
  * Internal-link anchor texts that say nothing about the target ([A21] on-page checklist). Compared after
@@ -85,6 +161,11 @@ export interface ExtractedPage {
   hasBreadcrumbNav: boolean;
   /** Internal links whose anchor text is generic ("click here", "read more"), capped. */
   genericAnchors: Array<{ href: string; text: string }>;
+  /**
+   * [A25] Plain-text sentences from the main content (text inside <main> when present, else the body
+   * without nav/header/footer/aside), excluding headings and form controls; see linkContextSentences.
+   */
+  linkContext: string[];
 }
 
 const SKIP_TAGS = new Set(["script", "style", "noscript", "template", "svg", "iframe", "object", "canvas"]);
@@ -94,6 +175,8 @@ const BLOCK_TAGS = new Set([
   "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "dd", "dt", "figcaption", "form",
 ]);
 const APP_ROOT_IDS = new Set(["root", "app", "__next", "__nuxt", "___gatsby", "svelte", "q-app"]);
+/** [A25] Form controls whose text is UI, not prose; excluded from link-context sentences. */
+const UI_TEXT_TAGS = new Set(["button", "select", "option", "label", "textarea"]);
 
 const collapse = (s: string) => s.replace(/\s+/g, " ").trim();
 const cap = (s: string, n: number) => (s.length > n ? s.slice(0, n) : s);
