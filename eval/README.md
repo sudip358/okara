@@ -16,7 +16,7 @@ Rows come from two places: hand-labelled fixtures and "Disagree" submissions in 
 
 ## Benchmark (`npm run eval`)
 
-`scripts/eval.ts` replays every labelled row through the configured DecisionProvider and reports per question:
+`scripts/eval.mjs` (running `src/worker/eval/harness.ts`) replays every labelled row through the configured DecisionProvider and reports per question:
 agreement with the human label, agreement by tier (act/flag/drop), latency p50/p95, and cost per call (actual, estimate,
 or unknown). Results are written to `eval/results/<date>.json`. Without `TYPESAFE_API_KEY` the script exits with
 "setup required" and writes nothing.
