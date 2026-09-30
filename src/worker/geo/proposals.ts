@@ -125,17 +125,52 @@ export function geoPriority(pairs: number, ageDays: number, fit: number | null):
   return Math.round(raw * 1000) / 10;
 }
 
+interface GeoClaimRule {
+  label: string;
+  /** Global + indices flags. */
+  pattern: RegExp;
+  /**
+   * Capture group holding the guarantee verb. A negation right before it ("does not guarantee",
+   * "without any guarantee") is a disclaimer, not a claim, so the match is ignored (same semantics as
+   * validateDraft's negated-guarantee warning). Rules without a verb group are never softened:
+   * predicting citation likelihood is not allowed in any form, negated or not.
+   */
+  verbGroup?: number;
+}
+
+const GEO_CLAIM_RULES: GeoClaimRule[] = [
+  {
+    label: "claims a format change guarantees inclusion",
+    pattern: /\b(?:faq schema|llms\.txt|indexnow|schema markup|structured data)\b[^.]{0,80}?\b(guarantee[sd]?|guaranteeing|ensures?|ensuring|will (?:get|be|make)|secures?)\b/dgi,
+    verbGroup: 1,
+  },
+  {
+    label: "guarantees inclusion or citation",
+    pattern: /\b(guarantee[sd]?|guaranteeing|ensures?|ensuring)\b[^.]{0,60}?\b(?:inclusion|included|cited|citations?|mentions?|mentioned|appear(?:s|ance)?)\b/dgi,
+    verbGroup: 1,
+  },
+  { label: "predicts citation likelihood", pattern: /\b(?:likely|likelihood|probability|chance|odds)\b[^.]{0,40}\b(?:cited|citations?|mentioned|included|recommended)\b/dgi },
+  { label: "predicts a citation outcome", pattern: /\bwill (?:be|get) (?:cited|mentioned|recommended|included)\b/dgi },
+  { label: "names a consumer surface for API-sampled evidence", pattern: /\b(?:ChatGPT|Google AI Overviews?) (?:shows?|says|displays?)\b/dgi },
+];
+
+const NEGATED_BEFORE = /\b(?:not|no|never|cannot|can['’]t|doesn['’]t|don['’]t|won['’]t|isn['’]t|aren['’]t|without|nor)\b(?:\s+\w+){0,2}\s*$/i;
+const NOT_ONLY_BEFORE = /\bnot\s+only\s*$/i;
+
 /** GEO-specific guard on top of validateDraft: no inclusion guarantees, no citation predictions. */
 export function geoClaimViolations(text: string): string[] {
   const out: string[] = [];
-  const rules: Array<[RegExp, string]> = [
-    [/\b(faq schema|llms\.txt|indexnow|schema markup|structured data)\b[^.]{0,80}\b(guarantee|ensure|will (?:get|be|make)|secures?)\b/i, "claims a format change guarantees inclusion"],
-    [/\b(guarantee[sd]?|ensures?)\b[^.]{0,60}\b(inclusion|cited|citation|mention|appear)/i, "guarantees inclusion or citation"],
-    [/\b(likely|likelihood|probability|chance)\b[^.]{0,40}\b(to be |of being )?(cited|citation|mentioned|included)\b/i, "predicts citation likelihood"],
-    [/\bwill (?:be|get) (?:cited|mentioned|recommended|included)\b/i, "predicts a citation outcome"],
-    [/\b(ChatGPT|Google AI Overviews?) (?:shows?|says|displays?)\b/i, "names a consumer surface for API-sampled evidence"],
-  ];
-  for (const [re, label] of rules) if (re.test(text)) out.push(label);
+  for (const rule of GEO_CLAIM_RULES) {
+    for (const m of text.matchAll(rule.pattern)) {
+      if (rule.verbGroup !== undefined) {
+        const verbStart = m.indices?.[rule.verbGroup]?.[0] ?? m.index;
+        const before = text.slice(Math.max(0, verbStart - 40), verbStart);
+        if (NEGATED_BEFORE.test(before) && !NOT_ONLY_BEFORE.test(before)) continue;
+      }
+      out.push(rule.label);
+      break;
+    }
+  }
   return out;
 }
 

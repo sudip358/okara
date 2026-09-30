@@ -6,7 +6,7 @@ import type { WritingProvider } from "@worker/providers/types";
 import { createTestEnv } from "./helpers/env";
 import { seedProject, seedUser, FIXED_NOW } from "./helpers/fixtures";
 import { makeTestContext } from "./helpers/context";
-import { choice, fakeDecisions, fixture, noul, score, seedObservation, type FixtureName } from "./fixtures/geo-analysis/seed";
+import { choice, fakeDecisions, fixture, noul, score, seedObservation, seedPromptSet, type FixtureName } from "./fixtures/geo-analysis/seed";
 
 async function setup(projectOverrides: Record<string, unknown> = {}) {
   const env = createTestEnv();
@@ -216,9 +216,11 @@ async function seedProposalScenario() {
   const s = await setup();
   const ctx = makeTestContext(s.env, s.project);
   const prompts = ["Where can I buy solid brass cabinet hardware?", "Best brass knobs for a kitchen"];
+  // geo_observations.prompt_id references geo_prompts(id): observations must point at real prompt rows.
+  const { promptIds } = await seedPromptSet(s.env, s.project, prompts);
   for (const [i, prompt] of prompts.entries()) {
     for (const provider of ["gemini", "perplexity"]) {
-      const id = await seedObservation(s.env, s.project, { ...fixture("competitor_only"), prompt }, { provider, promptId: `p${i}`, createdAt: new Date(FIXED_NOW.getTime() - 3600_000).toISOString() });
+      const id = await seedObservation(s.env, s.project, { ...fixture("competitor_only"), prompt }, { provider, promptId: promptIds[i]!, createdAt: new Date(FIXED_NOW.getTime() - 3600_000).toISOString() });
       await analyzeObservation(ctx, id);
     }
   }

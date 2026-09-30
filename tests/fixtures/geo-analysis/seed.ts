@@ -33,6 +33,43 @@ export interface SeedObservationOptions {
   costUsd?: number | null;
 }
 
+/**
+ * Create an active prompt set with the given prompts (approved by default) and return the prompt ids
+ * in order. geo_observations.prompt_id references geo_prompts(id), so observations that carry a
+ * prompt id must point at a real prompt row.
+ */
+export async function seedPromptSet(
+  env: Env,
+  project: { id: string; workspaceId: string },
+  prompts: Array<string | { text: string; promptType?: "discovery" | "reputation"; approved?: boolean }>,
+  opts: { version?: number } = {},
+): Promise<{ setId: string; promptIds: string[] }> {
+  const db = new Db(env.DB);
+  const setId = newId("gps");
+  await db.run("UPDATE geo_prompt_sets SET active = 0 WHERE workspace_id = ? AND project_id = ?", project.workspaceId, project.id);
+  await db.insert("geo_prompt_sets", { id: setId, workspace_id: project.workspaceId, project_id: project.id, version: opts.version ?? 1, active: 1, created_at: FIXED_NOW.toISOString() });
+  const promptIds: string[] = [];
+  for (const [position, p] of prompts.entries()) {
+    const item = typeof p === "string" ? { text: p } : p;
+    const id = newId("gpr");
+    await db.insert("geo_prompts", {
+      id,
+      workspace_id: project.workspaceId,
+      project_id: project.id,
+      prompt_set_id: setId,
+      text: item.text,
+      prompt_type: item.promptType ?? "discovery",
+      stage: null,
+      locale: "en-US",
+      language: "en",
+      approved: item.approved === false ? 0 : 1,
+      position,
+    });
+    promptIds.push(id);
+  }
+  return { setId, promptIds };
+}
+
 export async function seedObservation(env: Env, project: { id: string; workspaceId: string }, c: FixtureCase, o: SeedObservationOptions = {}): Promise<string> {
   const db = new Db(env.DB);
   const id = newId("gobs");
