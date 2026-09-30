@@ -27,6 +27,12 @@
  * Every candidate gets a decision record: selected, or rejected with duplicate | low_fit |
  * decision_unavailable | budget | daily_cap | insufficient_evidence; a writer draft that was not used
  * gets a `<dedupKey>:draft` record (validation_failed, or the writer failure reason).
+ *
+ * [A21] Readiness-checklist candidates (checklist-proposals.ts: blocked AI answer/search crawlers with the
+ * robots.txt advisor snippet, structure/trust gaps tied to displaced prompts, and one manual mentions
+ * list) join the same dedup, Jev proposal_fit, daily cap, and decision_records flow. They are drafted by
+ * code templates (validateDraft + GEO claim guard) and prioritized with GEO_CHECKLIST_PRIORITY_VERSION;
+ * heuristic ones without a usable fit answer are rejected (decision_unavailable when Jev is not asked).
  */
 import type { EvidenceBullet, EvidenceSource, Level, SourceType, Tier } from "@shared/types";
 import type { RunContext } from "../runs/context";
@@ -43,6 +49,7 @@ import { validateDraft } from "../writing/validate";
 import { GEO_WRITER_SYSTEM } from "../writing/prompts";
 import { RECOMMENDATION_V1_JSON_SCHEMA, recommendationOutputSchema, recommendationTextFields, toProviderSchema, type RecommendationOutput } from "../writing/schemas";
 import { GEO_QUESTION_IDS, PROPOSAL_FIT_LEVELS, geoQuestion, geoQuestionVersion } from "./questions";
+import { buildGeoChecklistCandidates, draftChecklistProposal, GEO_CHECKLIST_PRIORITY_VERSION, geoChecklistPriority, type GeoChecklistPlan } from "./checklist-proposals";
 import { isSourceType } from "./source-type";
 
 export interface GeoProposalSummary {
@@ -59,7 +66,7 @@ const RECURRING_MIN = 2;
 
 type IssueType = "geo_displacement" | "geo_missing_from_answer" | "geo_inconsistent_positioning" | "geo_evidence_gap";
 
-interface ObsLite {
+export interface ObsLite {
   id: string;
   provider: string;
   model: string;
@@ -71,7 +78,7 @@ interface ObsLite {
   created_at: string;
 }
 
-interface BrandLite {
+export interface BrandLite {
   observation_id: string;
   brand_key: string;
   is_self: number;
@@ -81,7 +88,7 @@ interface BrandLite {
   sentiment: string;
 }
 
-interface EvidenceLite {
+export interface EvidenceLite {
   id: string;
   ref_id: string;
   source: EvidenceSource;
@@ -93,16 +100,18 @@ interface EvidenceLite {
 
 export interface GeoCandidate {
   dedupKey: string;
-  issueType: IssueType;
+  issueType: IssueType | `geo_checklist:${string}`;
   summary: string;
   observations: ObsLite[];
   pairs: number;
   latestAt: string;
-  scope: "page" | "site";
+  scope: "page" | "template" | "site";
   target: RecommendationDraft["target"];
   entity: { name: string; url: string | null; sourceType: SourceType } | null;
   prompts: string[];
   competitors: string[];
+  /** [A21] Set for readiness-checklist candidates (checklist-proposals.ts). */
+  checklist?: GeoChecklistPlan;
 }
 
 interface Scored extends GeoCandidate {
@@ -495,6 +504,9 @@ export function templateDraft(c: GeoCandidate, brand: string, evidence: Evidence
         limitations: `${API_LIMITATION}${reviewNote}`.slice(0, 400),
         confirmPlaceholders: ["the page URL", "which stated facts are correct"],
       };
+    default:
+      // Checklist candidates are drafted by checklist-proposals.ts, never by this template.
+      throw new Error(`No template for ${c.issueType}`);
   }
 }
 
@@ -584,7 +596,17 @@ export async function generateGeoProposals(ctx: RunContext): Promise<GeoProposal
   const remaining = await remainingToday(ctx, "geo");
   if (remaining <= 0) return { candidates: 0, created: 0, rejected: 0, note: "Daily proposal cap reached; no new proposals today." };
   const inputs = await loadInputs(ctx);
-  const candidates = await buildCandidates(inputs);
+  const observationCandidates = await buildCandidates(inputs);
+  // [A21] Checklist gaps + robots.txt advisor. Never fatal: without them the run continues as before.
+  let checklistCandidates: GeoCandidate[] = [];
+  try {
+    const cl = await buildGeoChecklistCandidates(ctx, inputs, observationCandidates);
+    checklistCandidates = cl.candidates;
+    for (const n of cl.notes) await ctx.log.event("geo.proposals", "info", n);
+  } catch (e) {
+    await ctx.log.event("geo.proposals", "info", `Checklist gaps unavailable this run (${e instanceof Error ? e.message.slice(0, 200) : "error"}); continuing without them.`);
+  }
+  const candidates = [...observationCandidates, ...checklistCandidates];
   if (candidates.length === 0) return { candidates: 0, created: 0, rejected: 0, note: "No new verified opportunities today." };
 
   const now = ctx.clock();
@@ -603,16 +625,19 @@ export async function generateGeoProposals(ctx: RunContext): Promise<GeoProposal
     ]);
   };
 
+  // Checklist candidates use their own documented formula; the reference tier never enters either.
+  const priorityOf = (c: GeoCandidate, fit: number | null) => (c.checklist ? geoChecklistPriority(c.checklist, c.pairs, fit) : geoPriority(c.pairs, ageDays(now, c.latestAt), fit));
+
   // Deterministic pre-priority, then dedup.
   const live: Scored[] = [];
   let rejected = 0;
-  for (const c of candidates.sort((a, b) => geoPriority(b.pairs, ageDays(now, b.latestAt), null) - geoPriority(a.pairs, ageDays(now, a.latestAt), null))) {
+  for (const c of candidates.sort((a, b) => priorityOf(b, null) - priorityOf(a, null))) {
     if (await isDuplicate(ctx, c.dedupKey)) {
       record(c.dedupKey, "rejected", "duplicate");
       rejected++;
       continue;
     }
-    live.push({ ...c, priority: geoPriority(c.pairs, ageDays(now, c.latestAt), null), fit: { answer: undefined, tier: "n/a", asked: false } });
+    live.push({ ...c, priority: priorityOf(c, null), fit: { answer: undefined, tier: "n/a", asked: false } });
   }
 
   // Jev geo.proposal_fit (one batched call) when configured and a positioning document exists.
@@ -660,7 +685,14 @@ export async function generateGeoProposals(ctx: RunContext): Promise<GeoProposal
         continue;
       }
     }
-    c.priority = geoPriority(c.pairs, ageDays(now, c.latestAt), fitNorm);
+    if (c.checklist?.requiresJev && fitNorm === null) {
+      // Heuristic checklist gaps need a usable Jev judgment, like SEO content candidates.
+      const reason = c.fit.asked ? "insufficient_evidence" : ctx.decisions && inputs.positioning ? "budget" : "decision_unavailable";
+      record(c.dedupKey, "rejected", reason, c.fit, jevMeta);
+      rejected++;
+      continue;
+    }
+    c.priority = priorityOf(c, fitNorm);
     eligible.push(c);
   }
   eligible.sort((a, b) => b.priority - a.priority);
@@ -673,28 +705,40 @@ export async function generateGeoProposals(ctx: RunContext): Promise<GeoProposal
       rejected++;
       continue;
     }
-    const obsIds = new Set(c.observations.map((o) => o.id));
-    const ev = inputs.evidence.filter((e) => obsIds.has(e.ref_id));
-    const summaries = ev.filter((e) => parseJson<{ kind?: string }>(e.data_json, {}).kind === "summary").slice(0, 6);
-    const passages = ev.filter((e) => parseJson<{ kind?: string }>(e.data_json, {}).kind === "passage").slice(0, 2);
-    const observationEvidence = [...summaries, ...passages];
-    if (observationEvidence.length === 0) {
-      record(c.dedupKey, "rejected", "insufficient_evidence", c.fit, jevMeta);
-      rejected++;
-      continue;
+    let d: Draft;
+    if (c.checklist) {
+      const r = await draftChecklistProposal(ctx, { ...c, checklist: c.checklist }, geoClaimViolations);
+      if (!r.ok) {
+        await ctx.log.event("geo.proposals", "info", `Checklist proposal not used (${r.reason}): ${r.errors.slice(0, 3).join("; ").slice(0, 300)}`);
+        record(c.dedupKey, "rejected", r.reason, c.fit, jevMeta);
+        rejected++;
+        continue;
+      }
+      d = r.draft;
+    } else {
+      const obsIds = new Set(c.observations.map((o) => o.id));
+      const ev = inputs.evidence.filter((e) => obsIds.has(e.ref_id));
+      const summaries = ev.filter((e) => parseJson<{ kind?: string }>(e.data_json, {}).kind === "summary").slice(0, 6);
+      const passages = ev.filter((e) => parseJson<{ kind?: string }>(e.data_json, {}).kind === "passage").slice(0, 2);
+      const observationEvidence = [...summaries, ...passages];
+      if (observationEvidence.length === 0) {
+        record(c.dedupKey, "rejected", "insufficient_evidence", c.fit, jevMeta);
+        rejected++;
+        continue;
+      }
+      // verified = our own target page has a usable crawl snapshot, cited as crawl evidence. A cited
+      // third-party page is never fetched here ([A7] requires the user's approval of that single URL).
+      const page = c.target.kind === "url" && c.target.url ? await crawlPageEvidence(ctx, c.target.url) : null;
+      const verified = page !== null;
+      const evidence = page ? [page, ...observationEvidence] : observationEvidence;
+      const w = await writerDraft(ctx, c, evidence, verified, inputs.positioning);
+      if (w.failure && ctx.writer) {
+        const reason = /writer (call failed|budget)/.test(w.failure) ? (w.failure.includes("budget") ? "budget" : "decision_unavailable") : w.failure === "all evidence tainted" ? "insufficient_evidence" : "validation_failed";
+        record(`${c.dedupKey}:draft`, "rejected", reason);
+        await ctx.log.event("geo.proposals", "info", `Writer draft not used (${w.failure}); used the deterministic template.`);
+      }
+      d = w.draft ?? templateDraft(c, inputs.brandName, evidence, verified);
     }
-    // verified = our own target page has a usable crawl snapshot, cited as crawl evidence. A cited
-    // third-party page is never fetched here ([A7] requires the user's approval of that single URL).
-    const page = c.target.kind === "url" && c.target.url ? await crawlPageEvidence(ctx, c.target.url) : null;
-    const verified = page !== null;
-    const evidence = page ? [page, ...observationEvidence] : observationEvidence;
-    const w = await writerDraft(ctx, c, evidence, verified, inputs.positioning);
-    if (w.failure && ctx.writer) {
-      const reason = /writer (call failed|budget)/.test(w.failure) ? (w.failure.includes("budget") ? "budget" : "decision_unavailable") : w.failure === "all evidence tainted" ? "insufficient_evidence" : "validation_failed";
-      record(`${c.dedupKey}:draft`, "rejected", reason);
-      await ctx.log.event("geo.proposals", "info", `Writer draft not used (${w.failure}); used the deterministic template.`);
-    }
-    const d = w.draft ?? templateDraft(c, inputs.brandName, evidence, verified);
     const fitFields: Record<string, number | string> | null =
       c.fit.answer && c.fit.answer.type === "score" && (c.fit.tier === "act" || c.fit.tier === "flag")
         ? { question: GEO_QUESTION_IDS.proposalFit, score: c.fit.answer.score, confidence: c.fit.answer.confidence }
@@ -716,7 +760,7 @@ export async function generateGeoProposals(ctx: RunContext): Promise<GeoProposal
         limitations: d.limitations,
         verified: d.verified,
         priority: c.priority,
-        priorityVersion: GEO_PRIORITY_VERSION,
+        priorityVersion: c.checklist ? GEO_CHECKLIST_PRIORITY_VERSION : GEO_PRIORITY_VERSION,
         decisionTier: fitFields ? c.fit.tier : null,
         decisionFields: fitFields,
         evidenceIds: d.evidenceIds,

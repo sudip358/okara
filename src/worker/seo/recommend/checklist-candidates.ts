@@ -9,7 +9,9 @@
  *   - shared signals go to the agent they fit: author / dateModified / outbound sources are GEO trust
  *     proposals, mention lists are the GEO mentions proposal; sitemap, JS-only text, schema, and content
  *     formats (comparison pages, listicles) are SEO;
- *   - setup and tracking items (GSC/GA4) are not recommendations.
+ *   - setup and tracking items (GSC/GA4) are not recommendations;
+ *   - content-format gaps (no comparison page, no "best of" page) need first-party demand: current GSC
+ *     queries with those modifiers (cited as evidence); otherwise they stay on the checklist only.
  *
  * Scope [A9]: template when >= 3 affected pages share a templated page type (product, collection,
  * article); page when one page is affected; otherwise site (one candidate per group).
@@ -36,6 +38,7 @@ import {
   type RobotsAdvice,
 } from "../../checklists/bridge";
 import { CHECKLIST_VERSION } from "../../checklists/registry";
+import { BESTOF_PATTERN, COMPARISON_PATTERN } from "../../checklists/text";
 import type { RunContext } from "../../runs/context";
 import { templateName } from "../crawl/page-type";
 import { pageMetrics } from "../gsc/aggregate";
@@ -65,6 +68,11 @@ export interface SeoRoute {
   /** The gap affects the whole site (reach 1) even without a page population. */
   siteWide?: boolean;
   wantsIntent?: boolean;
+  /**
+   * Content-format gaps ("no comparison page") need first-party demand: current-window GSC queries
+   * matching this pattern. Without them the gap stays on the checklist only (no candidate).
+   */
+  demand?: RegExp;
 }
 
 /** Checklist items that fit the SEO agent (see the file header for what is excluded and why). */
@@ -123,8 +131,8 @@ export const SEO_ROUTES: Readonly<Record<string, SeoRoute>> = {
     actionText: (t) => `Add descriptive alt text to the informative images on ${t} (an empty alt for decorative images); [confirm: what each image shows].`,
   },
   "seo.on_page.answer_first_lines": { mode: "jev", action: "improve_intro_answer", effort: "medium", actionText: null },
-  "seo.content.comparison_pages": { mode: "jev", action: "new_page_candidate", effort: "high", actionText: null, reviewRequired: true },
-  "seo.content.listicles": { mode: "jev", action: "new_page_candidate", effort: "high", actionText: null, reviewRequired: true },
+  "seo.content.comparison_pages": { mode: "jev", action: "new_page_candidate", effort: "high", actionText: null, reviewRequired: true, demand: COMPARISON_PATTERN },
+  "seo.content.listicles": { mode: "jev", action: "new_page_candidate", effort: "high", actionText: null, reviewRequired: true, demand: BESTOF_PATTERN },
   "page.before_write.search_intent": { mode: "jev", action: null, effort: "medium", actionText: null, wantsIntent: true },
 };
 
@@ -210,7 +218,9 @@ export function checklistCandidatesFromGaps(gaps: ChecklistGap[], inputs: Candid
     if (gap.kind === "geo" || gap.equivalentTo) continue;
     const route = SEO_ROUTES[gap.itemId];
     if (!route) continue;
-    for (const g of scopeGroups(gap, route)) out.push(ctx.candidate(gap, route, g));
+    const demand = route.demand ? ctx.demandRows(route.demand) : null;
+    if (route.demand && demand!.length === 0) continue;
+    for (const g of scopeGroups(gap, route)) out.push(ctx.candidate(gap, route, g, demand));
   }
   return out;
 }
@@ -238,21 +248,28 @@ class GapContext {
     this.crawled = Math.max(1, inp.crawl?.crawledCount ?? 0);
   }
 
+  /** Current-window query rows whose query matches a content-format pattern, by impressions. */
+  demandRows(pattern: RegExp): CandidateInputs["rows"] {
+    return this.inp.rows.filter((r) => r.window === "current" && r.query && pattern.test(r.query)).sort((a, b) => b.impressions - a.impressions);
+  }
+
   topQuery(url: string): string | null {
     const k = normalizeUrl(url);
     const rows = this.inp.rows.filter((r) => r.window === "current" && r.query && r.page && normalizeUrl(r.page) === k).sort((a, b) => b.impressions - a.impressions);
     return rows[0]?.query ?? null;
   }
 
-  candidate(gap: ChecklistGap, route: SeoRoute, g: Group): Candidate {
+  candidate(gap: ChecklistGap, route: SeoRoute, g: Group, demand: CandidateInputs["rows"] | null = null): Candidate {
     const n = g.pages.length;
     const infos = g.pages.map((p) => this.pagesByNorm.get(normalizeUrl(p.url)) ?? null);
     const first = infos.find((p): p is PageInfo => p !== null) ?? null;
     const examples = g.pages.slice(0, 3);
     const severity = checklistSeverity(gap);
     const withMetrics = g.pages.map((p) => this.metrics.get(normalizeUrl(p.url))).filter((m): m is NonNullable<typeof m> => !!m);
-    const impressions = withMetrics.length ? withMetrics.reduce((s, m) => s + m.impressions, 0) : null;
-    const clicks = withMetrics.length ? withMetrics.reduce((s, m) => s + m.clicks, 0) : null;
+    // Metric part: GSC rows of the affected pages, or (content-format gaps) of the demand queries.
+    const demandRows = demand?.slice(0, 5) ?? [];
+    const impressions = withMetrics.length ? withMetrics.reduce((s, m) => s + m.impressions, 0) : demandRows.length ? demandRows.reduce((s, r) => s + r.impressions, 0) : null;
+    const clicks = withMetrics.length ? withMetrics.reduce((s, m) => s + m.clicks, 0) : demandRows.length ? demandRows.reduce((s, r) => s + r.clicks, 0) : null;
     const reach = route.siteWide ? 1 : n > 0 ? Math.min(1, n / this.crawled) : null;
     const priority: PriorityInputs = { impressions, clicks, totalImpressions: this.totalImpr, totalClicks: this.totalClicks, severity: SEVERITY_WEIGHT[severity], reach, effort: route.effort };
     const template = g.scope === "template" && g.pageType ? (templateName(g.pageType) ?? `${g.pageType} template`) : null;
@@ -279,7 +296,7 @@ class GapContext {
         tainted: info?.tainted,
       });
     }
-    if (impressions !== null && this.inp.sync) {
+    if (withMetrics.length > 0 && impressions !== null && this.inp.sync) {
       const gscSource = this.inp.sync.source === "csv_import" ? "manual_import" : "gsc";
       evidence.push({
         source: gscSource,
@@ -287,6 +304,19 @@ class GapContext {
         window: this.win,
         text: `GSC ${this.win}: the ${withMetrics.length} affected URL(s) with Search Console rows received ${fmtInt(impressions)} impressions and ${fmtInt(clicks ?? 0)} clicks combined (lower bound).`,
         data: { impressions, clicks, urls: withMetrics.length },
+      });
+    }
+    if (demand?.length && this.inp.sync) {
+      const rows = demand.slice(0, 5);
+      evidence.push({
+        source: this.inp.sync.source === "csv_import" ? "manual_import" : "gsc",
+        refId: this.inp.sync.id,
+        window: this.win,
+        text: clip(
+          `GSC ${this.win} (queries with this format's modifiers): ${rows.map((r) => `"${clip(r.query, 80)}"${r.page ? ` on ${r.page}` : ""}: ${fmtInt(r.impressions)} impressions, ${fmtInt(r.clicks)} clicks`).join("; ")}.`,
+          580,
+        ),
+        data: { rows: rows.map((r) => ({ query: r.query, page: r.page, impressions: r.impressions, clicks: r.clicks, position: r.position })) },
       });
     }
     if (evidence.length < 2 && this.inp.crawl) {
@@ -299,7 +329,7 @@ class GapContext {
       });
     }
 
-    const query = route.mode === "jev" && g.pages[0] ? this.topQuery(g.pages[0].url) : null;
+    const query = route.mode !== "jev" ? null : demand?.[0]?.query ?? (g.pages[0] ? this.topQuery(g.pages[0].url) : null);
     const meta: ChecklistCandidateMeta = {
       itemId: gap.itemId,
       checklistKind: gap.kind,

@@ -242,8 +242,8 @@ export function checklistSignalsFromData(data: ChecklistData, opts: ChecklistSig
     if (page) {
       affected = [{ url: page.url, pageId: page.id, pageType: page.pageType, detail: item.summary }];
     } else {
-      const fn = AFFECTED[item.id];
-      affected = fn ? fn(sig).map((a) => ({ url: a.snap.url, pageId: a.snap.pageId, pageType: a.snap.pageType, detail: a.detail })) : null;
+      const found = AFFECTED[item.id]?.(sig) ?? null;
+      affected = found ? found.map((a) => ({ url: a.snap.url, pageId: a.snap.pageId, pageType: a.snap.pageType, detail: a.detail })) : null;
     }
     if (affected && cover?.mode === "pages") {
       const coveredUrls = new Set(sig.findingUrls(cover.rules).map(normalizeUrlKey));
@@ -356,6 +356,7 @@ function latestIntent(decisions: DecisionInfo[], url: string): DecisionInfo | nu
  */
 type Affected = Array<{ snap: Snap; detail: string }>;
 const OFFER_ISSUES = new Set(["missing_offers", "offer_missing_price", "offer_missing_currency", "aggregate_offer_missing_low_price"]);
+const PRICING_PATH = /\/(?:pricing|prices|plans|price-list|rates)(?:\/|$)/i;
 
 const nonHome = (sig: Signals) => sig.analyzable().filter((s) => s.pageType !== "home");
 const withDetail = (snaps: Snap[], detail: (s: Snap) => string): Affected => snaps.map((snap) => ({ snap, detail: detail(snap) }));
@@ -386,7 +387,8 @@ function articleAttr(attr: "author" | "updated" | "citations") {
   };
 }
 
-const AFFECTED: Readonly<Record<string, (sig: Signals) => Affected>> = {
+/** null = the item has no page population (site-level). */
+const AFFECTED: Readonly<Record<string, (sig: Signals) => Affected | null>> = {
   "seo.technical.breadcrumbs": (sig) =>
     withDetail(
       nonHome(sig).filter((s) => !s.jsonLdTypes.includes("BreadcrumbList") && s.breadcrumbNav === false),
@@ -456,7 +458,9 @@ const AFFECTED: Readonly<Record<string, (sig: Signals) => Affected>> = {
     ),
   "geo.trust.public_pricing": (sig) => {
     const products = sig.analyzable().filter((s) => s.pageType === "product");
-    if (sig.d.project.siteType !== "ecommerce" && products.length === 0) return []; // site-level (pricing page) handled without pages
+    const pricingPages = sig.analyzable().filter((s) => PRICING_PATH.test(pathOf(s.url)));
+    // Mirrors publicPricing(): the products path, else a site-level pricing-page check (no page population).
+    if (!(sig.d.project.siteType === "ecommerce" || (products.length > 0 && pricingPages.length === 0))) return null;
     return withDetail(
       products.filter((s) => !((s.jsonLdTypes.includes("Product") || s.jsonLdTypes.includes("ProductGroup")) && !s.jsonLdIssues.some((i) => OFFER_ISSUES.has(i.issue)))),
       () => "no Offer price in Product structured data",
