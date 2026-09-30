@@ -1,0 +1,76 @@
+/**
+ * Hono API app. All routes live under /api. Route modules are owned per area (see TASKS.md) and
+ * receive a typed context with `db`, `user`, and `session`. Tenancy: use platform/access.ts helpers.
+ */
+import { Hono } from "hono";
+import type { Env } from "./env";
+import { Db } from "./lib/db";
+import { HttpError } from "./lib/errors";
+import type { SessionUser } from "./platform/access";
+import type { SessionRecord } from "./platform/session";
+import { loadSession, securityHeaders, csrfProtection } from "./platform/security";
+
+import { authRoutes } from "./routes/auth";
+import { credentialRoutes } from "./routes/credentials";
+import { projectRoutes } from "./routes/projects";
+import { integrationRoutes } from "./routes/integrations";
+import { seoRoutes } from "./routes/seo";
+import { geoRoutes } from "./routes/geo";
+import { recommendationRoutes } from "./routes/recommendations";
+import { runRoutes } from "./routes/runs";
+import { demoRoutes } from "./routes/demo";
+
+export interface AppVariables {
+  db: Db;
+  now: Date;
+  user: SessionUser | null;
+  session: SessionRecord | null;
+}
+
+export type AppEnv = { Bindings: Env; Variables: AppVariables };
+
+export function createApp() {
+  const app = new Hono<AppEnv>().basePath("/api");
+
+  app.use("*", async (c, next) => {
+    c.set("db", new Db(c.env.DB));
+    c.set("now", new Date());
+    c.set("user", null);
+    c.set("session", null);
+    await next();
+  });
+  app.use("*", securityHeaders());
+  app.use("*", loadSession());
+  app.use("*", csrfProtection());
+
+  app.get("/health", (c) => c.json({ data: { ok: true } }));
+
+  app.route("/", authRoutes);
+  app.route("/", credentialRoutes);
+  app.route("/", projectRoutes);
+  app.route("/", integrationRoutes);
+  app.route("/", seoRoutes);
+  app.route("/", geoRoutes);
+  app.route("/", recommendationRoutes);
+  app.route("/", runRoutes);
+  app.route("/", demoRoutes);
+
+  app.notFound((c) => c.json({ error: { code: "not_found", message: "Not found." } }, 404));
+  app.onError((err, c) => {
+    if (err instanceof HttpError) {
+      return c.json({ error: { code: err.code, message: err.message, details: err.details } }, err.status as 400);
+    }
+    // Never leak internals or secrets.
+    console.error("unhandled", err instanceof Error ? err.message : "unknown");
+    return c.json({ error: { code: "internal", message: "Something went wrong." } }, 500);
+  });
+
+  return app;
+}
+
+/** Route helper: the signed-in user or 401. */
+export function requireUser(c: { get(key: "user"): SessionUser | null }): SessionUser {
+  const u = c.get("user");
+  if (!u) throw new HttpError(401, "unauthorized", "Sign in required.");
+  return u;
+}
