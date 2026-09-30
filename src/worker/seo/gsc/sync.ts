@@ -18,15 +18,37 @@
  * the sync is 'partial' (or 'failed' if nothing usable was fetched). `truncated` means the row cap
  * was reached while Google was still returning full pages, so more rows may exist.
  * Budget: `gsc_rows` is reserved at the project row cap and settled to the slice rows actually
- * imported (the few totals/daily rows are not counted against the cap).
+ * imported (the few totals/daily/probe rows are not counted against the cap).
+ *
+ * [A23]/[A25] extra slices (slices.ts), fetched after both windows and stored in totals_json.extras:
+ *   (d) ['query','page','date'] for the current window (10% of the cap), aggregated to weeks for the
+ *       top 200 queries by current impressions -> alternating ranking URLs (cannibalisation prefilter);
+ *   (e) year-over-year: a ['date'] probe of the same window one year (364 days) earlier; only when the
+ *       property has data on >= 90% of those days is the ['page'] slice fetched (10% of the cap)
+ *       -> seasonality check for declining pages;
+ *   (f) ['country'] (2% of the cap, <= 250 rows) and (g) ['country','page'] (4%) for the current window
+ *       -> translation opportunities.
+ * Their shares are carved out of the row cap before the base slices, so a sync never exceeds the cap;
+ * caps below EXTRA_SLICES_MIN_CAP skip them (noted).
  */
 import type { RunContext } from "../../runs/context";
 import type { GscQueryRequest, GscRow } from "../../providers/types";
 import { BudgetExceededError } from "../../lib/errors";
 import { newId } from "../../lib/ids";
 import { iso } from "../../lib/time";
-import { finalizedWindows, GSC_DATA_STATE, windowLabel, type WindowOptions } from "./windows";
-import { missingTrailingDays, totalsFromAggregateRow, type TotalsJson } from "./aggregate";
+import { daysInWindow, finalizedWindows, GSC_DATA_STATE, windowLabel, type WindowOptions } from "./windows";
+import { missingTrailingDays, parseTotalsJson, totalsFromAggregateRow, type TotalsJson } from "./aggregate";
+import {
+  aggregateQueryPageWeeks,
+  extraCaps,
+  EXTRA_SLICES_MIN_CAP,
+  EXTRA_SLICES_VERSION,
+  QPD_TOP_QUERIES,
+  weekStartsOf,
+  YOY_MIN_DAY_COVERAGE,
+  yoyWindow,
+  type ExtrasJson,
+} from "./slices";
 
 export interface GscSyncSummary {
   syncId: string | null;
@@ -146,7 +168,11 @@ export async function syncGsc(ctx: RunContext, opts: SyncOptions = {}): Promise<
   let truncated = false;
   let dailyRows = 0;
   let missingDays = 0;
-  const perWindowCap = { current: Math.ceil(rowCap / 2), previous: Math.floor(rowCap / 2) };
+  const caps = extraCaps(rowCap);
+  const baseCap = rowCap - caps.total;
+  const perWindowCap = { current: Math.ceil(baseCap / 2), previous: Math.floor(baseCap / 2) };
+  /** Current-window query impressions from the query+page slice (ranks queries for the weekly slice). */
+  const currentQueryImpr = new Map<string, number>();
 
   const flush = async () => {
     for (let i = 0; i < insertedRows.length; i += 200) await ctx.db.batch(insertedRows.slice(i, i + 200));
@@ -200,6 +226,7 @@ export async function syncGsc(ctx: RunContext, opts: SyncOptions = {}): Promise<
           const [a, b] = r.keys;
           const q = slice.dims.length === 2 ? String(a ?? "") : null;
           const page = slice.dims.length === 2 ? String(b ?? "") : String(a ?? "");
+          if (q && which === "current") currentQueryImpr.set(q, (currentQueryImpr.get(q) ?? 0) + Math.round(r.impressions));
           insertedRows.push([
             "INSERT INTO gsc_metrics (workspace_id, project_id, sync_id, window, query, page, device, clicks, impressions, ctr, position) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             ctx.project.workspaceId, ctx.project.id, syncId, which, q, page || null, null,
@@ -223,6 +250,76 @@ export async function syncGsc(ctx: RunContext, opts: SyncOptions = {}): Promise<
     if (outcome.kind !== "ok") break;
   }
   await flush();
+
+  // (d)-(g) extra slices, stored in totals_json.extras.
+  if (outcome.kind === "ok") {
+    const extras: ExtrasJson = { version: EXTRA_SLICES_VERSION, notes: [] };
+    totals.extras = extras;
+    if (caps.total === 0) {
+      extras.notes.push(`Row cap below ${EXTRA_SLICES_MIN_CAP.toLocaleString("en-US")}: year-over-year, weekly query/page, and country slices were skipped.`);
+    } else {
+      const fetchSlice = async (dims: GscQueryRequest["dimensions"], w: { start: string; end: string }, cap: number): Promise<{ rows: GscRow[]; truncated: boolean } | null> => {
+        const out: GscRow[] = [];
+        let startRow = 0;
+        let truncatedHere = false;
+        while (out.length < cap) {
+          const rowLimit = Math.min(pageSize, cap - out.length);
+          const rows = await query({ startDate: w.start, endDate: w.end, dimensions: dims, rowLimit, startRow });
+          if (rows === null) return out.length ? { rows: out, truncated: true } : null;
+          const take = rows.slice(0, rowLimit);
+          out.push(...take);
+          startRow += take.length;
+          if (take.length < rowLimit) break;
+          if (out.length >= cap) truncatedHere = true;
+        }
+        totalRows += out.length;
+        return { rows: out, truncated: truncatedHere };
+      };
+      const cur = windows.current;
+
+      // (d) query + page + date, aggregated to weeks for the top queries.
+      const qpd = await fetchSlice(["query", "page", "date"], cur, caps.queryPageDate);
+      if (qpd) {
+        const rows = qpd.rows.map((r) => ({ query: String(r.keys[0] ?? ""), page: String(r.keys[1] ?? ""), date: String(r.keys[2] ?? ""), clicks: r.clicks, impressions: r.impressions }));
+        const rank = currentQueryImpr.size > 0 ? currentQueryImpr : rows.reduce((m, r) => m.set(r.query, (m.get(r.query) ?? 0) + Math.round(r.impressions)), new Map<string, number>());
+        const top = new Set([...rank.entries()].sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1)).slice(0, QPD_TOP_QUERIES).map(([q]) => q));
+        extras.queryPageWeeks = { window: cur, weekStarts: weekStartsOf(cur), topQueries: top.size, fetchedRows: rows.length, rows: aggregateQueryPageWeeks(rows, cur, top), truncated: qpd.truncated };
+      }
+
+      // (e) year-over-year probe, then the page slice only when last year's window is covered.
+      if (outcome.kind === "ok") {
+        const ly = yoyWindow(cur);
+        const windowDays = daysInWindow(ly);
+        const probe = await query({ startDate: ly.start, endDate: ly.end, dimensions: ["date"], rowLimit: windowDays, startRow: 0 });
+        if (probe !== null) {
+          const days = probe.filter((r) => String(r.keys[0] ?? "") >= ly.start && String(r.keys[0] ?? "") <= ly.end && r.impressions > 0);
+          const daysWithData = new Set(days.map((r) => String(r.keys[0]))).size;
+          const lyTotals = days.length ? { clicks: days.reduce((n, r) => n + Math.round(r.clicks), 0), impressions: days.reduce((n, r) => n + Math.round(r.impressions), 0) } : null;
+          const covered = daysWithData >= Math.ceil(windowDays * YOY_MIN_DAY_COVERAGE);
+          extras.yoy = { window: ly, status: covered ? "available" : daysWithData > 0 ? "partial_history" : "no_history", daysWithData, windowDays, totals: lyTotals, pages: [], truncated: false };
+          if (covered) {
+            const pages = await fetchSlice(["page"], ly, caps.yoyPages);
+            if (pages) {
+              extras.yoy.pages = pages.rows.map((r) => [String(r.keys[0] ?? ""), Math.round(r.clicks), Math.round(r.impressions), Number(r.position) || 0]);
+              extras.yoy.truncated = pages.truncated;
+            }
+          } else {
+            extras.notes.push(`Same window last year (${windowLabel(ly)}) has data on ${daysWithData} of ${windowDays} days; year-over-year comparison is unavailable.`);
+          }
+        }
+      }
+
+      // (f) countries and (g) country + page.
+      if (outcome.kind === "ok") {
+        const countries = await fetchSlice(["country"], cur, caps.countries);
+        if (countries) extras.countries = { window: cur, rows: countries.rows.map((r) => [String(r.keys[0] ?? "").toLowerCase(), Math.round(r.clicks), Math.round(r.impressions)]), truncated: countries.truncated };
+      }
+      if (outcome.kind === "ok") {
+        const cp = await fetchSlice(["country", "page"], cur, caps.countryPages);
+        if (cp) extras.countryPages = { window: cur, rows: cp.rows.map((r) => [String(r.keys[0] ?? "").toLowerCase(), String(r.keys[1] ?? ""), Math.round(r.clicks), Math.round(r.impressions)]), truncated: cp.truncated };
+      }
+    }
+  }
   } catch (e) {
     // Unexpected failure (e.g. storage): keep what was committed and finalize the sync row below,
     // so it never stays 'running' and the row budget is still settled.
@@ -287,6 +384,13 @@ async function pruneOldSlices(ctx: RunContext, keepSyncId: string): Promise<void
   );
   for (const { id } of old) {
     await ctx.db.run("DELETE FROM gsc_metrics WHERE workspace_id = ? AND project_id = ? AND sync_id = ?", ctx.project.workspaceId, ctx.project.id, id);
+    // Extra slices live in totals_json.extras: drop them with the slice rows, keep totals and notes.
+    const row = await ctx.db.first<{ totals_json: string }>("SELECT totals_json FROM gsc_syncs WHERE id = ? AND workspace_id = ?", id, ctx.project.workspaceId);
+    if (row && row.totals_json.includes('"extras"')) {
+      const t = parseTotalsJson(row.totals_json);
+      delete t.extras;
+      await ctx.db.run("UPDATE gsc_syncs SET totals_json = ? WHERE id = ? AND workspace_id = ?", JSON.stringify(t), id, ctx.project.workspaceId);
+    }
   }
 }
 

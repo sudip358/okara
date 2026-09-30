@@ -3,10 +3,17 @@
  * summed slices). States: 'demo' for demo projects; 'setup_required' whenever no GSC/CSV data has
  * been imported (whether or not Search Console is connected; the completeness note says which);
  * 'error' when the only syncs failed; otherwise 'ready'.
+ *
+ * [A23] brandSplit: current-window query rows split into brand (the project's brand name/aliases) and
+ * non-brand (everything else, competitor names included) by the deterministic matcher in brand.ts; null
+ * when the project has no usable brand terms or the sync has no query rows. The demand curve is built
+ * from non-brand queries whenever brand terms exist (its note says how many brand queries were left out).
  */
 import type { CapabilityState, DateWindow, DemandCurve, SeoOverview } from "@shared/types";
 import type { Db } from "../../lib/db";
+import { parseJson } from "../../lib/db";
 import { excludeIncompleteDays, parseTotalsJson, toWindowTotals } from "./aggregate";
+import { BRAND_METHOD_VERSION, brandSplitOf, brandTermsFrom, createBrandClassifier, type BrandClassifier } from "./brand";
 import { buildDemandCurve } from "./demand";
 import { GSC_LIMITATIONS } from "./sync";
 import { daysInWindow, windowLabel } from "./windows";
@@ -42,10 +49,40 @@ export async function latestUsableSync(db: Db, workspaceId: string, projectId: s
   );
 }
 
-export async function buildSeoOverview(
-  db: Db,
-  project: { id: string; workspace_id: string; gsc_property: string | null; is_demo: number; language?: string | null },
-): Promise<SeoOverview> {
+export interface OverviewProject {
+  id: string;
+  workspace_id: string;
+  gsc_property: string | null;
+  is_demo: number;
+  language?: string | null;
+  brand_name?: string | null;
+  brand_aliases_json?: string | null;
+  competitors_json?: string | null;
+}
+
+/** Brand classifier for a project (loads the brand fields when the caller did not pass them). */
+export async function projectBrandClassifier(db: Db, project: OverviewProject): Promise<BrandClassifier> {
+  let row: { brand_name: string | null; brand_aliases_json: string | null; competitors_json: string | null } | null =
+    project.brand_name !== undefined ? { brand_name: project.brand_name ?? null, brand_aliases_json: project.brand_aliases_json ?? null, competitors_json: project.competitors_json ?? null } : null;
+  if (!row) {
+    row = await db.first<{ brand_name: string | null; brand_aliases_json: string | null; competitors_json: string | null }>(
+      "SELECT brand_name, brand_aliases_json, competitors_json FROM projects WHERE id = ? AND workspace_id = ?",
+      project.id,
+      project.workspace_id,
+    );
+  }
+  return createBrandClassifier(
+    brandTermsFrom({
+      brandName: row?.brand_name ?? null,
+      brandAliases: parseJson<unknown[]>(row?.brand_aliases_json ?? "[]", []).filter((a): a is string => typeof a === "string"),
+      competitors: parseJson<unknown[]>(row?.competitors_json ?? "[]", [])
+        .filter((c): c is { name?: unknown; aliases?: unknown } => !!c && typeof c === "object")
+        .map((c) => ({ name: typeof c.name === "string" ? c.name : null, aliases: Array.isArray(c.aliases) ? c.aliases.filter((a): a is string => typeof a === "string") : [] })),
+    }),
+  );
+}
+
+export async function buildSeoOverview(db: Db, project: OverviewProject): Promise<SeoOverview> {
   const ws = project.workspace_id;
   const history = await db.all<SyncRow>(
     `SELECT ${SYNC_COLUMNS} FROM gsc_syncs WHERE workspace_id = ? AND project_id = ? ORDER BY synced_at DESC LIMIT 50`,
@@ -77,6 +114,7 @@ export async function buildSeoOverview(
     visitsRevenue: { state: "not_connected" },
     limitations,
     demandCurve: null,
+    brandSplit: null,
   };
 
   const isDemo = project.is_demo === 1;
@@ -132,7 +170,10 @@ export async function buildSeoOverview(
   }
 
   const state: CapabilityState = latest.source === "demo" || isDemo ? "demo" : "ready";
-  const demandCurve = latest.status === "no_data" ? null : await loadDemandCurve(db, ws, project.id, latest, project.language ?? "en");
+  const classifier = await projectBrandClassifier(db, project);
+  const queryRows = latest.status === "no_data" ? [] : await currentQueryRows(db, ws, project.id, latest.id);
+  const split = brandSplitOf(queryRows, classifier, { window: windowLabel(current), basis: latest.source === "csv_import" ? "query_rows" : "query_page_rows" });
+  const demandCurve = latest.status === "no_data" ? null : await loadDemandCurve(db, ws, project.id, latest, project.language ?? "en", classifier, queryRows);
   if (demandCurve && latest.source !== "csv_import") {
     limitations.push(
       "Demand curve: query totals are summed from query+page rows, which Search Console aggregates by page, so a search that showed two of your URLs counts once per URL.",
@@ -154,24 +195,57 @@ export async function buildSeoOverview(
     visitsRevenue: { state: "not_connected" },
     limitations,
     demandCurve,
+    brandSplit: split?.split ?? null,
   };
 }
 
-/** Current-window query-level demand curve for a sync; null when the sync has no query rows. */
-export async function loadDemandCurve(db: Db, workspaceId: string, projectId: string, sync: SyncRow, language: string): Promise<DemandCurve | null> {
-  const rows = await db.all<{ query: string; clicks: number; impressions: number }>(
+/** Current-window query rows of a sync, summed per query string. */
+export async function currentQueryRows(db: Db, workspaceId: string, projectId: string, syncId: string): Promise<Array<{ query: string; clicks: number; impressions: number }>> {
+  return db.all<{ query: string; clicks: number; impressions: number }>(
     `SELECT query, SUM(clicks) AS clicks, SUM(impressions) AS impressions FROM gsc_metrics
       WHERE workspace_id = ? AND project_id = ? AND sync_id = ? AND window = 'current' AND query IS NOT NULL
       GROUP BY query`,
     workspaceId,
     projectId,
-    sync.id,
+    syncId,
   );
-  return buildDemandCurve(rows, {
+}
+
+/**
+ * Current-window query-level demand curve for a sync; null when the sync has no query rows. With a
+ * brand classifier that has brand terms, self-brand queries are excluded (non-brand curve).
+ */
+export async function loadDemandCurve(
+  db: Db,
+  workspaceId: string,
+  projectId: string,
+  sync: SyncRow,
+  language: string,
+  classifier: BrandClassifier | null = null,
+  preloaded: Array<{ query: string; clicks: number; impressions: number }> | null = null,
+): Promise<DemandCurve | null> {
+  const rows = preloaded ?? (await currentQueryRows(db, workspaceId, projectId, sync.id));
+  const useBrand = !!classifier && classifier.terms.self.length > 0;
+  let kept = rows;
+  let excludedQueries = 0;
+  let excludedImpressions = 0;
+  if (useBrand) {
+    const brandKeys = new Set<string>();
+    kept = [];
+    for (const r of rows) {
+      if (classifier!.isSelfBrand(r.query)) {
+        brandKeys.add(r.query.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " "));
+        excludedImpressions += Math.max(0, Math.round(Number(r.impressions) || 0));
+      } else kept.push(r);
+    }
+    excludedQueries = brandKeys.size;
+  }
+  return buildDemandCurve(kept, {
     source: sync.source,
     window: { start: sync.window_start, end: sync.window_end },
     truncated: sync.truncated === 1,
     language,
+    nonBrand: useBrand ? { excludedQueries, excludedImpressions, methodVersion: BRAND_METHOD_VERSION } : null,
   });
 }
 

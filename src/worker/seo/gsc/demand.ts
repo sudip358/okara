@@ -145,6 +145,18 @@ export interface DemandCurveOptions {
   truncated: boolean;
   language?: string | null;
   maxPoints?: number;
+  /**
+   * [A23] Set when the rows were filtered to non-brand queries (gsc/brand.ts): the note says so and how
+   * many brand queries were left out. The curve itself is computed only from the rows passed in.
+   */
+  nonBrand?: { excludedQueries: number; excludedImpressions: number; methodVersion: string } | null;
+}
+
+/** Note for a curve built from non-brand queries only. */
+export function nonBrandNote(n: NonNullable<DemandCurveOptions["nonBrand"]>): string {
+  return n.excludedQueries > 0
+    ? `Non-brand queries only: ${n.excludedQueries.toLocaleString("en-US")} ${n.excludedQueries === 1 ? "query" : "queries"} containing your brand name or an alias (${n.excludedImpressions.toLocaleString("en-US")} impressions) ${n.excludedQueries === 1 ? "is" : "are"} excluded (${n.methodVersion}); see the brand split.`
+    : `Non-brand queries only (${n.methodVersion}): no query in this window contains your brand name or an alias.`;
 }
 
 export function medianOf(values: number[]): number | null {
@@ -212,7 +224,7 @@ export function buildDemandCurve(rows: DemandRow[], opts: DemandCurveOptions): D
     truncated: opts.truncated,
     segments,
     points,
-    note: DEMAND_NOTE,
+    note: opts.nonBrand ? `${DEMAND_NOTE} ${nonBrandNote(opts.nonBrand)}` : DEMAND_NOTE,
   };
 }
 

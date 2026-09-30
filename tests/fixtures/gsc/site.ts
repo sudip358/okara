@@ -114,6 +114,12 @@ export interface FakeGscData {
   daily: GscRow[];
   page: { current: GscRow[]; previous: GscRow[] };
   qp: { current: GscRow[]; previous: GscRow[] };
+  /** [A23]/[A25] extra slices (current window unless noted); absent = Search Console returns no rows. */
+  qpd?: GscRow[];
+  country?: GscRow[];
+  countryPage?: GscRow[];
+  /** Same window one year earlier: the ['date'] probe rows and the ['page'] slice. */
+  lastYear?: { daily: GscRow[]; page: GscRow[] };
 }
 
 export const DEFAULT_GSC_DATA: FakeGscData = {
@@ -134,12 +140,18 @@ export function fakeGsc(data: FakeGscData = DEFAULT_GSC_DATA, fail?: (req: GscQu
       requests.push(req);
       const err = fail?.(req, requests.length);
       if (err) throw err;
-      const which = req.startDate === CURRENT.start ? "current" : "previous";
+      const which = req.startDate === CURRENT.start ? "current" : req.startDate === PREVIOUS.start ? "previous" : "other";
+      const dims = req.dimensions.join(",");
       let rows: GscRow[];
-      if (req.dimensions.length === 0) rows = data.totals[which] ? [data.totals[which]!] : [];
-      else if (req.dimensions[0] === "date") rows = which === "current" ? data.daily : [];
-      else if (req.dimensions.length === 1) rows = data.page[which];
-      else rows = data.qp[which];
+      if (which === "other") rows = dims === "date" ? (data.lastYear?.daily ?? []) : dims === "page" ? (data.lastYear?.page ?? []) : [];
+      else if (dims === "") rows = data.totals[which] ? [data.totals[which]!] : [];
+      else if (dims === "date") rows = which === "current" ? data.daily : [];
+      else if (dims === "page") rows = data.page[which];
+      else if (dims === "query,page") rows = data.qp[which];
+      else if (dims === "query,page,date") rows = which === "current" ? (data.qpd ?? []) : [];
+      else if (dims === "country") rows = which === "current" ? (data.country ?? []) : [];
+      else if (dims === "country,page") rows = which === "current" ? (data.countryPage ?? []) : [];
+      else rows = [];
       return { rows: rows.slice(req.startRow, req.startRow + req.rowLimit) };
     },
   };

@@ -142,8 +142,9 @@ describe("syncGsc", () => {
       [CURRENT.start, CURRENT.end],
       [PREVIOUS.start, PREVIOUS.end],
     ]);
-    // Daily: current window only.
-    const dailyReqs = gsc.requests.filter((r) => r.dimensions[0] === "date");
+    // Daily: current window only. (The [A25] year-over-year probe is a separate ['date'] request on
+    // last year's window, before any last-year page rows are fetched.)
+    const dailyReqs = gsc.requests.filter((r) => r.dimensions.join(",") === "date" && r.startDate >= PREVIOUS.start);
     expect(dailyReqs).toHaveLength(1);
     expect(dailyReqs[0]!.startDate).toBe(CURRENT.start);
     // Slices: query+page for both windows.

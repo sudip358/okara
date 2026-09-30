@@ -20,6 +20,7 @@ import { checklistRoutes } from "./routes/checklists";
 import { robotsRoutes } from "./routes/robots";
 import { coverageRoutes } from "./routes/coverage";
 import { redirectRoutes } from "./routes/redirects";
+import { draftCheckRoutes } from "./routes/draft-check";
 import { linkRoutes } from "./routes/links";
 import { recommendationRoutes } from "./routes/recommendations";
 import { runRoutes } from "./routes/runs";
@@ -60,6 +61,7 @@ export function createApp() {
   app.route("/", robotsRoutes);
   app.route("/", coverageRoutes);
   app.route("/", redirectRoutes);
+  app.route("/", draftCheckRoutes);
   app.route("/", linkRoutes);
   app.route("/", recommendationRoutes);
   app.route("/", runRoutes);

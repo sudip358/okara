@@ -10,10 +10,12 @@
  *
  * `gsc_syncs.totals_json` format (owned by this module; demo seeds must follow it):
  *   { current: WindowTotalsJson | null, previous: WindowTotalsJson | null,
- *     notes?: string[], provenance?: {...} }
+ *     notes?: string[], provenance?: {...}, extras?: ExtrasJson (slices.ts: YoY, query+page+date weeks,
+ *     countries, country+page) }
  *   WindowTotalsJson = { clicks, impressions, ctr, position: number | null, derivedFrom?: string }
  */
 import type { DateWindow, Ratio } from "@shared/types";
+import { parseExtras, type ExtrasJson } from "./slices";
 
 export interface WindowTotals {
   clicks: number;
@@ -36,6 +38,8 @@ export interface TotalsJson {
   previous: WindowTotalsJson | null;
   notes?: string[];
   provenance?: Record<string, unknown>;
+  /** [A23]/[A25] extra slices (API syncs only). */
+  extras?: ExtrasJson;
 }
 
 export function ratio(numerator: number, denominator: number): Ratio {
@@ -95,6 +99,7 @@ export function parseTotalsJson(raw: unknown): TotalsJson {
     previous: o.previous ?? null,
     notes: Array.isArray(o.notes) ? o.notes.filter((n): n is string => typeof n === "string") : [],
     provenance: o.provenance && typeof o.provenance === "object" ? o.provenance : undefined,
+    extras: parseExtras(o.extras) ?? undefined,
   };
 }
 
