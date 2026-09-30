@@ -147,7 +147,9 @@ describe("agent integration: GEO checklist proposals", () => {
     expect(res.candidates).toBeGreaterThanOrEqual(2); // displacement + mentions
     const list = r.suggested_snippet!;
     expect(list).toMatch(/Forum and Reddit threads:\n- https:\/\/www\.reddit\.com\/r\/homeimprovement/);
-    expect(list).toMatch(/Review sites and marketplaces:[\s\S]*https:\/\/reviews\.example\/brass-co[\s\S]*https:\/\/market\.example\/item\/77/);
+    const reviewSection = list.split("Review sites and marketplaces:")[1]!.split("\n\n")[0]!;
+    expect(reviewSection).toContain("https://reviews.example/brass-co");
+    expect(reviewSection).toContain("https://market.example/item/77");
     expect(list).toMatch(/YouTube videos:\n- https:\/\/www\.youtube\.com\/watch\?v=brass/);
     expect(list).toMatch(/News and publisher sites:\n- https:\/\/news\.example\/design\/brass-trend/);
     expect(list).not.toContain(listicle); // covered by the displacement proposal

@@ -53,7 +53,7 @@ const patchBody = z
   .object({
     status: z.enum(["open", "approved", "dismissed", "implemented"]).optional(),
     action: z.string().trim().min(1).max(600).optional(),
-    suggestedSnippet: z.string().max(2000).nullable().optional(),
+    suggestedSnippet: z.string().max(64_000).nullable().optional(),
     note: z.string().max(1000).optional(),
   })
   .strict();

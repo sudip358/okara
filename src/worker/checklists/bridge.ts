@@ -10,9 +10,9 @@
  *   - method measured | heuristic (never manual, not_connected, not_applicable, unknown), AND
  *   - not already produced by a rule-based candidate (COVERED_BY_RULES), AND
  *   - when it is measured from page snapshots: from a crawl extracted with the checklist's extraction
- *     fields ([A21] migration 0002). Snapshots taken before that (images_total NULL on every analyzable
- *     page) still render on the checklist page with its own caveats, but do not feed recommendations
- *     until the next crawl re-extracts them; the agents' runs crawl before they recommend.
+ *     fields ([A21] migration 0002). Snapshots taken before that (images_total NULL on the crawl's
+ *     extracted HTML pages) still render on the checklist page with its own caveats, but do not feed
+ *     recommendations until the next crawl re-extracts them; the agents' runs crawl before they recommend.
  * The reference tier (tacticTier) is never read here: gaps carry no tier, so it cannot reach priority.
  */
 import type { ChecklistItem, ChecklistKind, ChecklistSection, CrawlerPurpose, PageType } from "@shared/types";
@@ -216,10 +216,11 @@ export async function checklistSignals(env: Env, db: Db, project: ProjectRow, no
 /** Pure part of checklistSignals (exported for tests). */
 export function checklistSignalsFromData(data: ChecklistData, opts: ChecklistSignalsOptions): ChecklistSignalsResult {
   const sig = new Signals(data);
-  const analyzable = sig.analyzable();
+  // Pages the crawler extracted (2xx HTML, including js_rendered skips): since [A21] they all carry images_total.
+  const extracted = data.snapshots.filter((s) => s.statusCode !== null && s.statusCode >= 200 && s.statusCode < 300 && (!s.skippedReason || s.skippedReason === "js_rendered"));
   const extraction: ChecklistSignalsResult["extraction"] = !data.crawl
     ? "none"
-    : analyzable.length > 0 && analyzable.every((s) => s.imagesTotal !== null)
+    : extracted.length > 0 && extracted.every((s) => s.imagesTotal !== null)
       ? "current"
       : "legacy";
   const gaps: ChecklistGap[] = [];

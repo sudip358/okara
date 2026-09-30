@@ -226,7 +226,7 @@ const RATIONALE: Record<Candidate["kind"], string> = {
   engine_query: "AI engines issued this search while answering sampled prompts; aligning a page with it is a hypothesis to review, not a measured effect.",
   technical: "The rule reported this on the crawled HTML; fixing it once at the reported scope addresses every affected URL together.",
   duplicate: "Jev judged that the two pages compete for the same search intent, and they share title words or queries, so one strong page may serve searchers better than two partial ones.",
-  checklist: "The readiness checklist measured this gap from the project's own crawl, Search Console, or robots.txt data; it describes a practice that makes pages easier to crawl and understand, and no ranking change is promised.",
+  checklist: "The readiness checklist found this gap in the project's own crawl, Search Console, or robots.txt data; it describes a practice that makes pages easier to crawl and understand, and no ranking change is promised.",
 };
 
 export function draftDeterministic(d: DraftInput): DraftResult {
