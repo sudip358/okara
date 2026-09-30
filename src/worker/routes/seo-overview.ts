@@ -2,6 +2,7 @@
  * SEO overview + GSC CSV import (seo-analysis module).
  *   GET  /projects/:pid/seo/overview    -> SeoOverview
  *   POST /projects/:pid/seo/import-csv  -> body {csv, window:'current'|'previous', start, end}; labelled csv_import
+ *                                          201 {data:{syncId, rows, window}}; 400 with the expected headers on bad input
  * CSRF/origin checks for the POST are enforced by the app-wide middleware.
  */
 import { Hono } from "hono";
@@ -55,5 +56,5 @@ seoOverviewRoutes.post("/projects/:pid/seo/import-csv", async (c) => {
     { workspaceId: project.workspace_id, projectId: project.id, userId: user.id, property: project.gsc_property, now: c.get("now") },
     parsed.data,
   );
-  return c.json({ data: { ...result, source: "csv_import" as const } });
+  return c.json({ data: { syncId: result.syncId, rows: result.rows, window: result.window } }, 201);
 });

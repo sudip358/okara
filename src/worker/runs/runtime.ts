@@ -14,8 +14,8 @@ import { iso, systemClock, type Clock } from "../lib/time";
 import type { ProjectRow } from "../platform/access";
 import { resolveProviderKey } from "../platform/credentials";
 import { createGscProvider } from "../platform/gsc-client";
-import { createGeminiProvider, isValidGeminiModelId } from "../providers/gemini";
-import { createPerplexityProvider, isValidPerplexityModelId } from "../providers/perplexity";
+import { createGeminiProvider, geminiConfigured } from "../providers/gemini";
+import { createPerplexityProvider, perplexityConfigured } from "../providers/perplexity";
 import { createTypeSafeProvider } from "../providers/typesafe";
 import type { GeoProvider, WritingProvider } from "../providers/types";
 import { createWriter } from "../providers/writer";
@@ -160,13 +160,12 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
   const writer = createWriter(env, writerKey, apiFetch, { calls, budget });
 
   const geoProviders: GeoProvider[] = [];
-  const geminiModel = env.GEMINI_MODEL?.trim();
-  if (geminiKey && geminiModel && isValidGeminiModelId(geminiModel)) {
-    geoProviders.push(createGeminiProvider({ apiKey: geminiKey, model: geminiModel, fetchImpl: apiFetch }));
+  // Model ids come only from configuration; both a key and a valid model id are required.
+  if (geminiKey && env.GEMINI_MODEL && geminiConfigured(env, geminiKey)) {
+    geoProviders.push(createGeminiProvider({ apiKey: geminiKey, model: env.GEMINI_MODEL, fetchImpl: apiFetch }));
   }
-  const perplexityModel = env.PERPLEXITY_MODEL?.trim();
-  if (perplexityKey && perplexityModel && isValidPerplexityModelId(perplexityModel)) {
-    geoProviders.push(createPerplexityProvider({ apiKey: perplexityKey, model: perplexityModel, fetchImpl: apiFetch }));
+  if (perplexityKey && env.PERPLEXITY_MODEL && perplexityConfigured(env, perplexityKey)) {
+    geoProviders.push(createPerplexityProvider({ apiKey: perplexityKey, model: env.PERPLEXITY_MODEL, fetchImpl: apiFetch }));
   }
 
   let gsc: RunContext["gsc"] = null;
@@ -225,7 +224,8 @@ export async function capabilityPresence(env: Env, db: Db, workspaceId: string):
   return {
     typesafe: saved.has("typesafe") || op(env.TYPESAFE_API_KEY),
     writer: saved.has("writer") || op(env.WRITER_API_KEY),
-    gemini: (saved.has("gemini") || op(env.GEMINI_API_KEY)) && isValidGeminiModelId(env.GEMINI_MODEL),
-    perplexity: (saved.has("perplexity") || op(env.PERPLEXITY_API_KEY)) && isValidPerplexityModelId(env.PERPLEXITY_MODEL),
+    // Presence only (no decryption): a saved BYO key stands in as "some key".
+    gemini: geminiConfigured(env, saved.has("gemini") ? "saved" : null),
+    perplexity: perplexityConfigured(env, saved.has("perplexity") ? "saved" : null),
   };
 }
