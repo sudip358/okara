@@ -6,6 +6,7 @@
  *   DELETE /workspaces/:wid/credentials/:provider       -> owner only
  * Keys are decrypted only server-side, never returned, and never logged.
  */
+import { TYPESAFE_DEFAULT_MODEL_ALIAS } from "../providers/typesafe";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../app";
@@ -96,7 +97,8 @@ export async function listProviderStatuses(env: Env, db: Db, workspaceId: string
 function statusFor(env: Env, provider: ProviderId, row: CredentialRow | null): ProviderStatus {
   const operatorKey = envStr(env, OPERATOR_KEY_ENV[provider]);
   const source: ProviderStatus["source"] = row ? "workspace_key" : operatorKey ? "operator_key" : "none";
-  const model = envStr(env, MODEL_ENV[provider]);
+  // TypeSafe falls back to the documented `jev-latest` alias (same rule as the runtime's resolveTypeSafeModel).
+  const model = envStr(env, MODEL_ENV[provider]) ?? (provider === "typesafe" ? TYPESAFE_DEFAULT_MODEL_ALIAS : null);
   const configured = model !== null && (provider !== "writer" || writerProvider(env) !== null);
   let state: CapabilityState;
   if (source === "none" || !configured) state = "setup_required";
