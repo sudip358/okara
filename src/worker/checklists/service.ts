@@ -136,7 +136,7 @@ function manualOnlyMessage(item: ChecklistItem): string {
 }
 
 // ------------------------------------------------------------------ per-page checklist
-async function loadPageContext(env: Env, db: Db, project: ProjectRow, pageId: string, now: Date): Promise<{ ctx: PageContext; data: ChecklistData; citedBy: number }> {
+async function loadPageContext(db: Db, project: ProjectRow, pageId: string, now: Date): Promise<{ ctx: PageContext; data: ChecklistData; citedBy: number }> {
   const ws = project.workspace_id;
   const pid = project.id;
   const page = await db.first<{ id: string; url: string; page_type: PageContext["page"]["pageType"] }>(
@@ -195,7 +195,7 @@ async function loadPageContext(env: Env, db: Db, project: ProjectRow, pageId: st
 }
 
 export async function getPageChecklist(env: Env, db: Db, project: ProjectRow, pageId: string, now: Date): Promise<Checklist> {
-  const { ctx, data, citedBy } = await loadPageContext(env, db, project, pageId, now);
+  const { ctx, data, citedBy } = await loadPageContext(db, project, pageId, now);
   const manual = await loadManual(db, project.workspace_id, project.id, "page", pageId);
   const state: CapabilityState = data.project.isDemo ? "demo" : ctx.snap ? "ready" : "setup_required";
   return assembleChecklist({
@@ -222,7 +222,7 @@ export async function putPageManual(
 ): Promise<ChecklistItem> {
   const def = (PAGE_ITEMS as readonly ItemDef<PageContext>[]).find((d) => d.id === itemId);
   if (!def) throw notFound("Checklist item");
-  const { ctx } = await loadPageContext(env, db, project, pageId, now);
+  const { ctx } = await loadPageContext(db, project, pageId, now);
   const current = evaluateItem(def, ctx, undefined, "page");
   if (!current.manual) throw badRequest(manualOnlyMessage(current));
   await upsertManual(db, {

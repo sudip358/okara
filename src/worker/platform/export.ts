@@ -36,6 +36,7 @@ export const EXPORT_TABLES = [
   "geo_displacements",
   "provider_calls",
   "usage_reservations",
+  "checklist_manual",
 ] as const;
 
 /** Column names that must never appear in an export, whichever table they are in. */

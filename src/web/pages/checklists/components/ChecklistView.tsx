@@ -195,6 +195,7 @@ export function ChecklistItemRow({
             {item.label}
           </h3>
           <p className="mt-0.5 break-words text-sm text-zinc-700 dark:text-zinc-300">{item.summary}</p>
+          <CompletenessNote completeness={item.completeness} className="mt-0.5" />
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge tone="neutral" title={METHOD_HINT[item.method]}>
@@ -256,7 +257,6 @@ export function ChecklistItemRow({
               <p className="mt-0.5 text-sm text-zinc-700 dark:text-zinc-300">{item.caveat}</p>
             </div>
           )}
-          <CompletenessNote completeness={item.completeness} />
           {item.links.length > 0 && (
             <ul className="flex flex-wrap gap-x-3 gap-y-1 text-sm">
               {item.links.map((l) => (
