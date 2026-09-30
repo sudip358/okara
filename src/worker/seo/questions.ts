@@ -430,6 +430,30 @@ export const SEO_STATIC_QUESTIONS: Readonly<Record<string, DecisionQuestion>> = 
   [QUESTION.buyerReady]: BUYER_READY_TEMPLATE,
 };
 
+/** Default state path for templated questions when a labelled row gives no `ref`. */
+const TEMPLATE_DEFAULT_PATH: Record<string, [placeholder: string, path: string]> = {
+  [QUESTION.queryIntent]: ["{q}", "query"],
+  [QUESTION.queryRelevance]: ["{q}", "query"],
+  [QUESTION.buyerQuery]: ["{q}", "query"],
+  [QUESTION.buyerReady]: ["{q}", "query"],
+  [QUESTION.thinContent]: ["{p}", "page"],
+  [QUESTION.coversTopic]: ["{t}", "topic"],
+};
+
+/**
+ * The question for an id as asked against one state (eval harness): templated questions are filled
+ * with `ref` (a state path) or their default path; page_overlap keeps its canonical template.
+ */
+export function seoQuestionFor(questionId: string, ref?: string): DecisionQuestion | null {
+  const id = baseQuestionId(questionId);
+  const q = SEO_STATIC_QUESTIONS[id];
+  if (!q) return null;
+  const t = TEMPLATE_DEFAULT_PATH[id];
+  if (!t) return q;
+  const path = ref && /^[a-z_]+(?:\.[a-z0-9_]+)*$/.test(ref) ? ref : t[1];
+  return fillTemplate(TEMPLATES[id]!, t[0], path);
+}
+
 /** Versions of the static questions (snapshot-tested). */
 export async function staticQuestionVersions(): Promise<Record<string, string>> {
   const out: Record<string, string> = {};

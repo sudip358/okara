@@ -1366,7 +1366,7 @@ class Builder {
           datedReferences: refs.map((r) => `${r.year} (${r.field}): ${r.context}`),
           evidence: ev,
           identity: { page: p.norm, years },
-          limitations: `Years detected in the crawled title, H1, and first paragraph only (${STALE_YEAR_VERSION}); historical mentions such as "since 1998" are excluded. Jev judges whether the page presents them as current. No ranking change is promised.`,
+          limitations: `Years detected in the crawled title, H1, and first paragraph only (${STALE_YEAR_VERSION}); historical mentions (a year after "since", "est.", "founded", or a copyright sign) are excluded. Jev judges whether the page presents them as current. No ranking change is promised.`,
         }),
       );
     }

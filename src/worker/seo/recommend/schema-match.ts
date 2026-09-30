@@ -40,7 +40,7 @@ export interface PriceCheck {
   visiblePrices: number[];
 }
 
-const PRICE_RE = /(?:[$€£¥]\s?|\b(?:USD|EUR|GBP|CAD|AUD)\s?)(\d{1,3}(?:[,.\s]\d{3})*(?:[.,]\d{2})?|\d+(?:[.,]\d{2})?)|(\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)\s?(?:USD|EUR|GBP|CAD|AUD|€)/g;
+const PRICE_RE = /(?:[$€£¥]\s?|\b(?:USD|EUR|GBP|CAD|AUD)\s?)(\d{1,3}(?:[,.\s]\d{3})*(?:[.,]\d{2})?|\d+(?:[.,]\d{2})?)|(\d{1,3}(?:[,.]\d{3})*(?:[.,]\d{2})?|\d+(?:[.,]\d{2})?)\s?(?:USD|EUR|GBP|CAD|AUD|€|£)/g;
 
 function toNumber(raw: string): number | null {
   let t = raw.replace(/\s/g, "");

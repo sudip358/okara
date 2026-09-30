@@ -11,8 +11,14 @@
  * - Answers: Choice/Score carry `confidence` + `probabilities`; Noul carries only `noul` (the yes
  *   probability). A Noul answer never gets a confidence field. Malformed answers are dropped
  *   (undefined), never defaulted.
- * - Cost: no verified per-call Jev price is configured, so cost_usd is recorded as NULL (unknown,
- *   flagged as estimate) and spend is bounded by hard call caps instead.
+ * - Cost [A23]: a labelled estimate (costIsEstimate true, rate_version JEV_RATE_VERSION) from the
+ *   official price on https://docs.typesafe.ai/models, read 2026-09-30: model `jev-1.13.0`,
+ *   "Price (per Btok / per Mtok) $42 / $0.042", "Charged per input token. Output tokens are free."
+ *   (typesafe.ai's home page states the same "$42 Per Billion input tokens"; https://typesafe.ai/pricing
+ *   returned 404 and docs.typesafe.ai/llms.txt lists no separate pricing page.) Only the resolved model id
+ *   returned by the API is priced: aliases (`jev-latest`, `jev-preview`) move between releases, and any
+ *   other model id, or an attempt without returned usage (errors, timeouts), stays NULL (unknown, never
+ *   $0). Community-published per-decision rates are not used. Spend is still bounded by hard call caps.
  */
 import { TypeSafeClient, APIConnectionError, APIError, APITimeoutError, type Fetch, type Questions } from "@typesafe-ai/sdk";
 import type { Budget } from "../runs/context";
@@ -20,6 +26,24 @@ import type { CallRecorder, DecisionAnswer, DecisionProvider, DecisionQuestion, 
 import { redact } from "../runs/calls";
 
 export const TYPESAFE_DEFAULT_MODEL_ALIAS = "jev-latest";
+
+/** Bump whenever a value in JEV_RATES changes. Stored on provider_calls.rate_version. */
+export const JEV_RATE_VERSION = "jev-rates-2026-09-30.1";
+export const JEV_PRICING_SOURCE = "https://docs.typesafe.ai/models";
+
+/** Official list prices per 1M tokens (see the header). Exact resolved model ids only. */
+export const JEV_RATES: ReadonlyArray<{ model: string; inputPerMTok: number; outputPerMTok: number; source: string }> = [
+  { model: "jev-1.13.0", inputPerMTok: 0.042, outputPerMTok: 0, source: JEV_PRICING_SOURCE },
+];
+
+/** Labelled estimate for one successful call; null cost when the model has no verified rate. */
+export function estimateJevCost(model: string | null | undefined, inputTokens: number | null, outputTokens: number | null): { costUsd: number | null; costIsEstimate: true; rateVersion: string | null } {
+  const rate = JEV_RATES.find((r) => r.model === (model ?? "").trim());
+  if (!rate || inputTokens === null || !Number.isFinite(inputTokens) || inputTokens < 0) return { costUsd: null, costIsEstimate: true, rateVersion: null };
+  const out = outputTokens !== null && Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
+  const usd = (inputTokens * rate.inputPerMTok + out * rate.outputPerMTok) / 1_000_000;
+  return { costUsd: Math.round(usd * 1e10) / 1e10, costIsEstimate: true, rateVersion: JEV_RATE_VERSION };
+}
 export const TYPESAFE_TIMEOUT_MS = 12_000;
 export const TYPESAFE_MAX_RETRIES = 2;
 
@@ -116,16 +140,20 @@ export function createTypeSafeProvider(cfg: TypeSafeProviderConfig): DecisionPro
         const a = attempts[i]!;
         const isLast = i === attempts.length - 1;
         if (isLast && data) {
+          const resolved = typeof data.model === "string" ? data.model : model;
+          const hasUsage = typeof data.usage?.input_tokens === "number";
+          const cost = hasUsage ? estimateJevCost(resolved, num(data.usage?.input_tokens), num(data.usage?.output_tokens)) : { costUsd: null, costIsEstimate: true as const, rateVersion: null };
           await cfg.calls?.record({
             provider: "typesafe",
-            model: typeof data.model === "string" ? data.model : model,
+            model: resolved,
             purpose: req.purpose,
             status: "ok",
             requestId: requestId ?? a.requestId,
             inputTokens: num(data.usage?.input_tokens),
             outputTokens: num(data.usage?.output_tokens),
-            costUsd: null,
+            costUsd: cost.costUsd,
             costIsEstimate: true,
+            rateVersion: cost.rateVersion,
             latencyMs: a.latencyMs,
           });
         } else {

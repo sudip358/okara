@@ -1,8 +1,11 @@
 /**
- * SEO overview + GSC CSV import (seo-analysis module).
- *   GET  /projects/:pid/seo/overview    -> SeoOverview
+ * SEO overview + GSC CSV import (seo-analysis module) and the [A23]/[A25] Search Console views.
+ *   GET  /projects/:pid/seo/overview    -> SeoOverview (incl. brandSplit and the non-brand demand curve)
  *   POST /projects/:pid/seo/import-csv  -> body {csv, window:'current'|'previous', start, end}; labelled csv_import
  *                                          201 {data:{syncId, rows, window}}; 400 with details.expectedHeaders on bad input
+ *   GET  /projects/:pid/seo/buyer-queries             -> CoverageResponse<BuyerQueryRow> (Jev; rate-limited,
+ *                                                        budgeted; 7-day decision cache; setup_required without Jev)
+ *   GET  /projects/:pid/seo/translation-opportunities -> CoverageResponse<TranslationOpportunityRow> (no Jev)
  * CSRF/origin checks for the POST are enforced by the app-wide middleware.
  */
 import { Hono } from "hono";
@@ -13,8 +16,53 @@ import { badRequest, HttpError } from "../lib/errors";
 import { requireProject } from "../platform/access";
 import { CSV_MAX_BYTES, EXPECTED_CSV_HEADERS, importGscCsv } from "../seo/gsc/csv";
 import { buildSeoOverview } from "../seo/gsc/overview";
+import { buildTranslationOpportunities } from "../seo/gsc/translation";
+import { buildBuyerQueries } from "../seo/recommend/buyer-queries";
+import type { Env } from "../env";
+import type { Db } from "../lib/db";
+import { hitRateLimit } from "../platform/rate-limit";
+import type { DecisionProvider } from "../providers/types";
+import { buildDecisionsForWorkspace } from "../redirects/decisions";
+import { createBudget } from "../runs/budget";
+import { createCallRecorder } from "../runs/calls";
 
 export const seoOverviewRoutes = new Hono<AppEnv>();
+
+/** Buyer-query classification can spend Jev calls: per user + project. */
+export const BUYER_QUERIES_RATE_LIMIT = { limit: 10, windowSeconds: 60 } as const;
+
+type DecisionsFactory = (env: Env, db: Db, workspaceId: string, projectId: string) => Promise<DecisionProvider | null>;
+const defaultDecisionsFactory: DecisionsFactory = (env, db, workspaceId, projectId) => buildDecisionsForWorkspace(env, db, workspaceId, projectId);
+let decisionsFactory: DecisionsFactory = defaultDecisionsFactory;
+
+/** Test hook: inject the DecisionProvider factory for the buyer-query view. Pass null to restore. */
+export function setSeoJevDecisionsFactory(f: DecisionsFactory | null): void {
+  decisionsFactory = f ?? defaultDecisionsFactory;
+}
+
+seoOverviewRoutes.get("/projects/:pid/seo/buyer-queries", async (c) => {
+  const user = requireUser(c);
+  const db = c.get("db");
+  const project = await requireProject(db, user.id, c.req.param("pid"));
+  const now = c.get("now");
+  const rl = await hitRateLimit(db, `buyer_queries:${project.id}:${user.id}`, BUYER_QUERIES_RATE_LIMIT.limit, BUYER_QUERIES_RATE_LIMIT.windowSeconds, now);
+  if (!rl.allowed) {
+    return c.json({ error: { code: "rate_limited", message: "Too many buyer-query requests. Try again in a minute." } }, 429, { "Retry-After": String(rl.retryAfterSeconds) });
+  }
+  const decisions = project.is_demo === 1 ? null : await decisionsFactory(c.env, db, project.workspace_id, project.id);
+  const scope = { workspaceId: project.workspace_id, projectId: project.id, runId: null };
+  const clock = () => now;
+  const data = await buildBuyerQueries({ db, project, now, decisions, budget: createBudget(db, c.env, scope, clock), calls: createCallRecorder(db, scope, clock) });
+  return c.json({ data });
+});
+
+seoOverviewRoutes.get("/projects/:pid/seo/translation-opportunities", async (c) => {
+  const user = requireUser(c);
+  const db = c.get("db");
+  const project = await requireProject(db, user.id, c.req.param("pid"));
+  const data = await buildTranslationOpportunities(db, project, c.get("now"));
+  return c.json({ data });
+});
 
 seoOverviewRoutes.get("/projects/:pid/seo/overview", async (c) => {
   const user = requireUser(c);

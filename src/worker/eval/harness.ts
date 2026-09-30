@@ -5,14 +5,7 @@
  */
 import type { DecisionAnswer, DecisionProvider, DecisionQuestion, ProviderCallRecord } from "../providers/types";
 import { POLICY_VERSION, questionVersion, tierFor } from "../runs/policy";
-import {
-  ACTION_CHOICE,
-  INTENT_PAGE_FIT,
-  ISSUE_SEVERITY,
-  PAGE_OVERLAP_TEMPLATE,
-  QUERY_INTENT,
-  QUERY_PAGE_RELEVANCE,
-} from "../seo/questions";
+import { SEO_STATIC_QUESTIONS, seoQuestionFor, versionFor } from "../seo/questions";
 import { GEO_QUESTION_IDS, geoQuestion, type GeoQuestionId } from "../geo/questions";
 
 export interface LabelRow {
@@ -26,19 +19,19 @@ export interface LabelRow {
   brand?: string;
 }
 
-const SEO_STATIC: Record<string, DecisionQuestion> = {
-  "seo.query_page_relevance": QUERY_PAGE_RELEVANCE,
-  "seo.query_intent": QUERY_INTENT,
-  "seo.intent_page_fit": INTENT_PAGE_FIT,
-  "seo.action_choice": ACTION_CHOICE,
-  "seo.issue_severity": ISSUE_SEVERITY,
-  "seo.page_overlap": PAGE_OVERLAP_TEMPLATE,
-};
-
+/**
+ * Every SEO question id is registered from seo/questions.ts (SEO_STATIC_QUESTIONS), including the [A23]
+ * ones: seo.query_relevance, seo.thin_content, seo.page_action, seo.schema_content_match,
+ * seo.title_matches_query, seo.meta_matches_query, seo.covers_topic, seo.outdated_information,
+ * seo.answer_is_direct, seo.buyer_query, seo.buyer_ready. Templated questions point at `row.ref` (a state
+ * path such as "query" or "queries.q1") or their default path; their question_version is the template's.
+ */
 const GEO_IDS = new Set<string>(Object.values(GEO_QUESTION_IDS));
 
+export const SEO_EVAL_QUESTION_IDS: readonly string[] = Object.keys(SEO_STATIC_QUESTIONS);
+
 export function questionFor(row: LabelRow): DecisionQuestion | null {
-  if (SEO_STATIC[row.question_id]) return SEO_STATIC[row.question_id]!;
+  if (SEO_STATIC_QUESTIONS[row.question_id]) return seoQuestionFor(row.question_id, row.ref);
   if (GEO_IDS.has(row.question_id)) return geoQuestion(row.question_id as GeoQuestionId, row.ref ?? "subject", row.brand);
   return null;
 }
@@ -110,7 +103,7 @@ export async function runEval(
       results.push({ id: row.id, questionId: row.question_id, questionVersion: "", labelVersionMatches: null, status: "unknown_question", agree: null, tier: null, latencyMs: null, error: null });
       continue;
     }
-    const version = await questionVersion(q);
+    const version = row.question_id.startsWith("seo.") ? await versionFor(row.question_id, q) : await questionVersion(q);
     const started = Date.now();
     try {
       const res = await provider.decide({ purpose: "eval", state: row.state, questions: { [row.question_id]: q } });

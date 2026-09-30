@@ -255,6 +255,10 @@ const RATIONALE: Record<Candidate["kind"], string> = {
   answer_clarity: "The page's opening does not directly answer the query that brings it the most impressions; a first sentence that answers it helps readers and answer engines quote the page, without any promise of a snippet or citation.",
 };
 
+/** [A25] Rationale for a concrete internal link suggestion (the suggester's Jev tier is reused). */
+const LINK_SUGGESTION_RATIONALE =
+  "The internal link suggester found this sentence and anchor on the source page, and Jev judged that the link should exist; a contextual link helps readers and crawlers reach the target page, and no ranking change is promised.";
+
 export function draftDeterministic(d: DraftInput): DraftResult {
   const c = d.candidate;
   const targetText = c.target.url ?? (c.target.template ? `the ${c.target.template}` : "the site");
@@ -281,7 +285,8 @@ export function draftDeterministic(d: DraftInput): DraftResult {
       : "";
   const noteEv = c.rationaleNote ? d.evidence[c.rationaleNote.evidenceIndex] : undefined;
   const noteText = c.rationaleNote && noteEv ? ` ${c.rationaleNote.text} ${cite([noteEv.id])}` : "";
-  const rationale = `${c.checklist?.rationale ?? RATIONALE[c.kind]} ${cite(ids.slice(0, 3))}${noteText}${demandText}`;
+  const kindRationale = c.linkSuggestion ? LINK_SUGGESTION_RATIONALE : RATIONALE[c.kind];
+  const rationale = `${c.checklist?.rationale ?? kindRationale} ${cite(ids.slice(0, 3))}${noteText}${demandText}`;
   const text = {
     trigger: clip(c.trigger, 200),
     issue: `${clip(c.issue, 360)} ${cite(primary.slice(0, 1))}`,

@@ -29,6 +29,8 @@ const YEAR_RE = /(?<![\p{L}\p{N}])(19[5-9]\d|20\d{2})(?![\p{L}\p{N}])/gu;
 /** Words that make the year historical context when they end the text right before it (same clause). */
 const HISTORICAL_BEFORE =
   /(?:\bsince(?:\s+the\s+year)?|\best\.?|\bestd\.?|\bestablished(?:\s+in)?|\bfounded(?:\s+in)?|\bfounding(?:\s+year)?|\bin\s+business\s+since|\bserving(?:\s+\S+){0,3}\s+since|©|\(c\)|\bcopyright(?:\s+©)?|\bcirca|\bc\.|\bborn(?:\s+in)?|\bdating\s+(?:back\s+)?(?:to|from)|\bdates?\s+(?:back\s+)?(?:to|from)|\boriginally(?:\s+\S+){0,2}\s+in|\bback\s+in|\bopened(?:\s+its\s+doors)?\s+in|\b(?:first\s+)?(?:introduced|launched|built|made|designed)\s+in|\bheritage\s+(?:since|from)|\bhistory\s+(?:since|from)|\bsince\s+its\s+founding\s+in|\bfrom)\s*$/i;
+/** Clause boundaries: ; | newline, or a sentence period that does not close an abbreviation (est., c., ca.). */
+const CLAUSE_BREAK = /[;|\n]|(?<!\b(?:est|estd|c|ca|no|approx))\.(?=\s)/i;
 /** Words right after the year that mark it as historical (anniversaries, "1998 heritage"). */
 const HISTORICAL_AFTER = /^\s*(?:anniversary|heritage|original|vintage|-era|era\b)/i;
 
@@ -45,9 +47,9 @@ export function detectStaleYears(fields: { title: string | null; h1: string | nu
       if (year > currentYear - STALE_YEAR_MIN_AGE) continue;
       const after = text.slice(at + m[0].length);
       if (/^s\b|^'s\b/i.test(after)) continue; // decade ("1990s")
-      // Historical context within the same clause.
-      const clauseStart = Math.max(text.lastIndexOf(".", at - 1), text.lastIndexOf(";", at - 1), text.lastIndexOf("|", at - 1), text.lastIndexOf("\n", at - 1)) + 1;
-      const before = text.slice(Math.max(clauseStart, at - 60), at);
+      // Historical context within the same clause (abbreviation periods such as "Est." do not end it).
+      const window = text.slice(Math.max(0, at - 60), at);
+      const before = window.split(CLAUSE_BREAK).pop() ?? "";
       if (HISTORICAL_BEFORE.test(before) || HISTORICAL_AFTER.test(after)) continue;
       const start = Math.max(0, at - 20);
       const end = Math.min(text.length, at + m[0].length + 20);
