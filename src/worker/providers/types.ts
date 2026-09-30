@@ -92,7 +92,7 @@ export interface GeoCitation {
 export interface GeoAnswer {
   provider: string; // 'gemini' | 'perplexity'
   model: string; // exact model id returned or requested
-  groundingMode: string; // 'google_search' | 'sonar_web' | 'none'
+  groundingMode: string; // 'google_search' | 'perplexity_web_search' | 'none'
   status: "ok" | "failed" | "incomplete";
   grounded: boolean; // true only if provider metadata proves a search happened
   text: string | null;

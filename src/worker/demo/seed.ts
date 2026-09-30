@@ -38,7 +38,7 @@ function lcg(seed: number) {
   };
 }
 
-const GROUNDING: Record<"gemini" | "perplexity", string> = { gemini: "google_search", perplexity: "sonar_web" };
+const GROUNDING: Record<"gemini" | "perplexity", string> = { gemini: "google_search", perplexity: "perplexity_web_search" };
 
 export async function seedDemoProject(env: Env, db: Db, userId: string, now: Date): Promise<ProjectRow> {
   // Defense in depth: the route already 404s, but the seed itself refuses outside demo mode.
@@ -312,11 +312,11 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
       policy_version: "demo-fixture", provider: DEMO_MODEL, model: DEMO_MODEL, state_hash: null, answer_json: JSON.stringify(answer), tier,
       outcome, reason_code: reason, created_at: at(runId === seoRun ? 120 : 60),
     });
-  decision(seoRun, "seo", "template:product:offer", "selected", null, { type: "choice", choice: "add_offer_markup", confidence: 0.86, probabilities: { add_offer_markup: 0.86, insufficient_context: 0.14 } }, "act");
-  decision(seoRun, "seo", "url:/collections/sofas:meta", "selected", null, { type: "choice", choice: "rewrite_snippet", confidence: 0.64, probabilities: { rewrite_snippet: 0.64, none: 0.36 } }, "flag");
+  decision(seoRun, "seo", `demo:${pid}:template:product:offer`, "selected", null, { type: "choice", choice: "add_offer_markup", confidence: 0.86, probabilities: { add_offer_markup: 0.86, insufficient_context: 0.14 } }, "act");
+  decision(seoRun, "seo", `demo:${pid}:url:sofas:meta`, "selected", null, { type: "choice", choice: "rewrite_snippet", confidence: 0.64, probabilities: { rewrite_snippet: 0.64, none: 0.36 } }, "flag");
   decision(seoRun, "seo", "template:collection:intro", "rejected", "low_fit", { type: "choice", choice: "none", confidence: 0.71, probabilities: { add_intro: 0.29, none: 0.71 } }, "act");
-  decision(geoRun, "geo", "prompt:0:comparison", "selected", null, { type: "choice", choice: "add_comparison_content", confidence: 0.81, probabilities: { add_comparison_content: 0.81, insufficient_context: 0.19 } }, "act");
-  decision(geoRun, "geo", "prompt:1:product_fact", "selected", null, { type: "choice", choice: "clarify_product_fact", confidence: 0.77, probabilities: { clarify_product_fact: 0.77, none: 0.23 } }, "act");
+  decision(geoRun, "geo", `demo:${pid}:geo:prompt0:comparison`, "selected", null, { type: "choice", choice: "add_comparison_content", confidence: 0.81, probabilities: { add_comparison_content: 0.81, insufficient_context: 0.19 } }, "act");
+  decision(geoRun, "geo", `demo:${pid}:geo:prompt1:fact`, "selected", null, { type: "choice", choice: "clarify_product_fact", confidence: 0.77, probabilities: { clarify_product_fact: 0.77, none: 0.23 } }, "act");
   decision(geoRun, "geo", "prompt:4:none", "rejected", "insufficient_evidence", { type: "choice", choice: "insufficient_context", confidence: 0.9, probabilities: { insufficient_context: 0.9, none: 0.1 } }, "act");
 
   const rec = (runId: string, agent: "seo" | "geo", r: Record<string, unknown>, evidence: Array<[string, string, string]>, minutesAgo: number) => {
