@@ -112,8 +112,8 @@ export const FLAG_KIND_META: Record<DraftCheckFlag["kind"], { label: string; des
     description: "A factual, numeric, or comparative claim with no source or evidence given. Add the source or soften the claim.",
   },
   fabricated_testimonial: {
-    label: "Fabricated testimonial",
-    description: "A quote, review, or customer story that looks invented or cannot be traced to a real person. Confirm the source or remove it.",
+    label: "Unsourced testimonial",
+    description: "A quoted review or endorsement attributed to a person or outlet with no source. Okara can't tell whether it is real: verify it and link the source, or remove it. Never publish invented testimonials.",
   },
   guarantee_language: {
     label: "Guarantee language",

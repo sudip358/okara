@@ -70,7 +70,7 @@ const EXTRA_GUARANTEE_RE = /\brisk[- ]free\b|\b100\s?%\s+(?:effective|safe|succe
 const POLICY_GUARANTEE_RE = /\b(?:money[- ]back|satisfaction|price[- ]match|lifetime|best[- ]price|\d+[- ](?:day|month|year)s?)\s+guarantee(?:d|s)?\b/i;
 
 const SUPERLATIVE_RE =
-  /(?:#\s?1\b|\bno\.\s?1\b|\bnumber[- ]one\b|\bbest in the (?:world|country|industry|business|market|business)\b|\bworld['’]s (?:best|finest|leading|most)\b|\bworld[- ]class\b|\bbest[- ]selling\b|\bbestselling\b|\bindustry[- ]leading\b|\bmarket[- ]leading\b|\bleading (?:provider|brand|manufacturer|supplier|expert)s?\b|\bmost trusted\b|\bmost popular\b|\bunbeatable\b|\bunmatched\b|\bunrivall?ed\b|\bsecond to none\b|\baward[- ]winning\b|\b(?:the )?best (?:\w+ ){0,3}(?:on|in) the market\b|\btop[- ]rated\b)/i;
+  /(?:#\s?1\b|\bno\.\s?1\b|\bnumber[- ]one\b|\bbest in the (?:world|country|industry|business|market|business)\b|\bworld['’]s (?:best|finest|leading|most)\b|\bworld[- ]class\b|\bbest[- ]selling\b|\bbestselling\b|\bindustry[- ]leading\b|\bmarket[- ]leading\b|\bleading (?:provider|brand|manufacturer|supplier|expert)s?\b|\bmost trusted\b|\bmost popular\b|\bunbeatable\b|\bunmatched\b|\bunrivall?ed\b|\bsecond to none\b|\baward[- ]winning\b|\b(?:the )?best (?:\w+ ){0,3}(?:on|in) the market\b|\btop[- ]rated\b|\bbest(?: \w+){0,3} ever\b)/i;
 const STAT_RE =
   /\b\d{1,3}(?:\.\d+)?\s?%\s+of\s+(?:\w+\s+){0,2}(?:customers|people|users|buyers|homeowners|shoppers|consumers|americans|designers|experts|clients|businesses|companies|respondents|readers|owners)\b|\b(?:studies|research|surveys?|data|experts|scientists|doctors)\s+(?:show|shows|prove|proves|found|finds|suggests?|confirms?|agree)\b|\b\d+(?:\.\d+)?\s?(?:x|times)\s+(?:faster|more|better|stronger|longer|cheaper|brighter|safer|less)\b|\b\d{1,3}(?:\.\d+)?\s?%\s+(?:more|less|faster|better|cheaper|stronger|longer|brighter|safer|fewer)\b/i;
 const PROVEN_RE = /\b(?:clinically|scientifically|laboratory|lab)[- ](?:proven|tested)\b|\bproven to\b|\bFDA[- ](?:approved|cleared)\b|\bdoctor[- ]recommended\b|\bdermatologist[- ]tested\b/i;
@@ -150,7 +150,6 @@ export function scanFlags(blocks: readonly DraftBlock[]): FlagScan {
     if (b.kind === "code") continue;
     for (const m of b.text.matchAll(QUOTE_RE)) {
       const quote = m[1]!;
-      if (!FIRST_PERSON_RE.test(quote)) continue;
       const start = m.index ?? 0;
       const end = start + m[0].length;
       const after = b.text.slice(end, end + 120);
@@ -158,7 +157,11 @@ export function scanFlags(blocks: readonly DraftBlock[]): FlagScan {
       const praise = PRAISE_RE.test(quote) || RATING_RE.test(b.text);
       const attrAfter = ATTRIBUTION_AFTER_RE.exec(after);
       const attrBefore = ATTRIBUTION_BEFORE_RE.exec(before);
+      // Quoted praise attributed to a named person or outlet needs a source, whether or not it is written
+      // in the first person ("Best sofa ever!" — Jane D., CEO). First-person praise with an attribution is the
+      // classic case; third-person praise with an attribution (press or customer quotes) is flagged the same way.
       if (!praise || (!attrAfter && !attrBefore)) continue;
+      void FIRST_PERSON_RE;
       if (b.hasSource) continue; // a linked or cited quote is attributable evidence
       const tail = attrAfter ? after.slice(0, attrAfter[0].length + after.slice(attrAfter[0].length).search(/\n|$/)) : "";
       const text = attrAfter ? `${m[0]}${tail}` : `${attrBefore![0]}${m[0]}`;

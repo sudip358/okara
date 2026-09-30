@@ -184,3 +184,22 @@ describe("draft flags (deterministic)", () => {
     expect(s.sentences).toBe(3);
   });
 });
+
+describe("draft check regression: third-person attributed praise and 'best … ever'", () => {
+  it("flags an unsourced attributed quote without first-person words, and 'best sofa ever' as a superlative", async () => {
+    const { parseDraft } = await import("@worker/draftcheck/parse");
+    const { scanFlags } = await import("@worker/draftcheck/flags");
+    const doc = parseDraft('# Sofas\n\n"Best sofa ever!" — Jane D., CEO\n', "https://demo.example");
+    const kinds = scanFlags(doc.blocks).flags.map((f) => f.kind);
+    expect(kinds).toContain("fabricated_testimonial");
+    const doc2 = parseDraft("# Sofas\n\nThis is the best sofa ever made for families.\n", "https://demo.example");
+    expect(scanFlags(doc2.blocks).flags.map((f) => f.kind)).toContain("unsupported_claim");
+  });
+
+  it("does not flag an attributed quote that links its source", async () => {
+    const { parseDraft } = await import("@worker/draftcheck/parse");
+    const { scanFlags } = await import("@worker/draftcheck/flags");
+    const doc = parseDraft('# Sofas\n\n"Best sofa ever!" — Jane D., CEO ([review](https://reviews.example/jane))\n', "https://demo.example");
+    expect(scanFlags(doc.blocks).flags.map((f) => f.kind)).not.toContain("fabricated_testimonial");
+  });
+});
