@@ -165,11 +165,11 @@ export const DEMO_FINDINGS: DemoFinding[] = [
     ruleId: "ECOM-PRODUCT-OFFER-INCOMPLETE",
     severity: "moderate" as const,
     path,
-    template: "product",
+    template: "product template",
     detail: d("Product JSON-LD is present but has no offers (price, priceCurrency, availability)."),
   })),
   { ruleId: "SEO-META-DESC-MISSING", severity: "minor", path: "/collections/sofas", template: null, detail: d("No meta description found.") },
-  { ruleId: "ECOM-COLLECTION-NO-INTRO", severity: "minor", path: "/collections/table-lamps", template: "collection", detail: d("Collection page has a product grid but no introductory copy (45 words).") },
+  { ruleId: "ECOM-COLLECTION-NO-INTRO", severity: "minor", path: "/collections/table-lamps", template: "collection template", detail: d("Collection page has a product grid but no introductory copy (45 words).") },
   { ruleId: "SEO-H1-MISSING", severity: "moderate", path: "/pages/about", template: null, detail: d("No H1 found. A missing H1 is not by itself a ranking failure.") },
 ];
 

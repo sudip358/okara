@@ -235,6 +235,26 @@ describe("seo-crawl routes", () => {
     expect(data.limitations[0]).toBe("No Core Web Vitals, JS rendering, or index-status data source connected.");
   });
 
+  it("an unverified demo project shows its seeded crawl with state 'demo' but is never crawled", async () => {
+    const { env, db, workspaceId, userId, projectId } = await setup({ verified_host: null, verification_method: null, verified_at: null, is_demo: 1 });
+    const now = "2026-09-30T12:00:00.000Z";
+    await db.insert("crawl_runs", { id: "crw_demo", workspace_id: workspaceId, project_id: projectId, status: "completed", pages_limit: 20, pages_crawled: 1, pages_skipped: 0, notes_json: "[\"1 of 1 pages crawled\"]", started_at: now, finished_at: now });
+    await db.insert("pages", { id: "pg_demo", workspace_id: workspaceId, project_id: projectId, url: U("/products/demo"), page_type: "product", page_type_method: "url_pattern", first_seen_at: now, last_crawled_at: now });
+    await db.insert("page_snapshots", { id: "snap_demo", workspace_id: workspaceId, project_id: projectId, page_id: "pg_demo", crawl_run_id: "crw_demo", status_code: 200, final_url: U("/products/demo"), title: "Demo", word_count: 300, fetched_at: now });
+    await db.insert("audit_findings", { id: "fnd_demo", workspace_id: workspaceId, project_id: projectId, crawl_run_id: "crw_demo", rule_id: "ECOM-PRODUCT-JSONLD-MISSING", severity: "moderate", url: U("/products/demo"), detail: "No Product JSON-LD found on a product page.", created_at: now });
+    const req = testApp(env, userId);
+    const audit = ((await (await req(`/projects/${projectId}/seo/audit`)).json()) as { data: SeoAudit }).data;
+    expect(audit.state).toBe("demo");
+    expect(audit.crawlRunId).toBe("crw_demo");
+    expect(audit.findings.map((f) => f.ruleId)).toEqual(["ECOM-PRODUCT-JSONLD-MISSING"]);
+    const pages = ((await (await req(`/projects/${projectId}/pages`)).json()) as { data: PageRow[] }).data;
+    expect(pages).toHaveLength(1);
+    const site = sixPageSite();
+    const summary = await runCrawl(makeTestContext(env, { id: projectId, workspaceId }, { crawlFetch: site.fetch }));
+    expect(summary.status).toBe("setup_required");
+    expect(site.calls).toHaveLength(0);
+  });
+
   it("GET /pages lists pages and PATCH corrects the page type (user method)", async () => {
     const { env, workspaceId, userId, projectId } = await setup();
     await runCrawl(makeTestContext(env, { id: projectId, workspaceId }, { crawlFetch: sixPageSite().fetch }));
@@ -256,13 +276,12 @@ describe("seo-crawl routes", () => {
 
   it("is mounted in the real app stack (session + CSRF)", async () => {
     const { env, projectId } = await setup();
-    const env2 = env;
-    const a = await seedUser(env2);
+    const a = await seedUser(env);
     const app = createApp();
     // Not a member of the project's workspace -> 404; the route exists and is session-protected.
-    const res = await app.request(`/api/projects/${projectId}/seo/audit`, { headers: authHeaders(a.sessionToken, a.csrfToken) }, env2);
+    const res = await app.request(`/api/projects/${projectId}/seo/audit`, { headers: authHeaders(a.sessionToken, a.csrfToken) }, env);
     expect(res.status).toBe(404);
-    const anon = await app.request(`/api/projects/${projectId}/seo/audit`, {}, env2);
+    const anon = await app.request(`/api/projects/${projectId}/seo/audit`, {}, env);
     expect(anon.status).toBe(401);
   });
 

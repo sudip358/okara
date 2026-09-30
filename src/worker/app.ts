@@ -68,9 +68,5 @@ export function createApp() {
   return app;
 }
 
-/** Route helper: the signed-in user or 401. */
-export function requireUser(c: { get(key: "user"): SessionUser | null }): SessionUser {
-  const u = c.get("user");
-  if (!u) throw new HttpError(401, "unauthorized", "Sign in required.");
-  return u;
-}
+/** Re-exported for existing imports; new code should import from platform/require-user. */
+export { requireUser } from "./platform/require-user";

@@ -302,7 +302,8 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
       return {
         title: (row.title as string | null) ?? null,
         metaDescription: (row.meta_description as string | null) ?? null,
-        metaRobots: (row.robots_meta as string | null) ?? null,
+        // Stored robots_meta may include the X-Robots-Tag header; it is re-read from the fresh response.
+        metaRobots: ((row.robots_meta as string | null) ?? "").replace(/(^|, )x-robots-tag:.*$/, "") || null,
         canonical: (row.canonical as string | null) ?? null,
         h1s: parseJson<string[]>(row.h1_json, []),
         headings: parseJson<Array<{ level: number; text: string }>>(row.headings_json, []),

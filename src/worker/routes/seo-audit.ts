@@ -8,7 +8,8 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import type { AiCrawlerAccess, AuditFinding, CapabilityState, PageRow, SeoAudit, Severity } from "@shared/types";
-import { requireUser, type AppEnv } from "../app";
+import type { AppEnv } from "../app";
+import { requireUser } from "../platform/require-user";
 import { requireProject } from "../platform/access";
 import { badRequest, notFound } from "../lib/errors";
 import { parseJson } from "../lib/db";
@@ -81,7 +82,8 @@ seoCrawlRoutes.get("/projects/:pid/seo/audit", async (c) => {
     limitations: AUDIT_LIMITATIONS,
   });
 
-  if (!project.verified_host) {
+  // Demo projects are deliberately unverified but carry seeded crawl data: show it, labelled 'demo'.
+  if (!project.verified_host && !project.is_demo) {
     return c.json({ data: empty("setup_required", "Verify site ownership (GSC, DNS, or file) before crawling. No audit findings are produced for unverified sites.") });
   }
 
