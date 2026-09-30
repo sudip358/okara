@@ -138,7 +138,7 @@ export const securityHeaders = (): MiddlewareHandler<AppEnv> => async (c, next) 
 export const loadSession = (): MiddlewareHandler<AppEnv> => async (c, next) => {
   const token = readSessionCookie(c);
   if (token) {
-    const found = await lookupSession(c.get("db"), token, c.get("now"));
+    const found = await lookupSession(c.get("db"), token, c.get("now"), c.env);
     if (found) {
       c.set("user", found.user);
       c.set("session", found.session);
