@@ -1,7 +1,19 @@
 /**
- * [A10]/[A17] Output validator. OWNED BY: runtime module (agent F). Signature is the contract.
- * Rejects drafts that cite unknown evidence ids, contain numeric specs/certifications/metrics not
- * present in cited evidence, or make guarantee claims. Missing facts must be "[confirm: ...]".
+ * [A10]/[A17] Output validator. Pure (no I/O). Signature is the contract used by both agents.
+ *
+ * Errors (draft is rejected):
+ *  - a cited evidence id (argument or inline "[ev_...]" reference) that is not in `evidence`
+ *  - a number / percentage / money amount / dimension in the text that does not appear in the text
+ *    or data of the cited evidence (1,234 == 1234; 12.5% == 12.50; $1,299.00 == 1299)
+ *  - a certification / spec term (UL, ETL, CSA, CE, damp/wet rating, IP44/IP65, dimmable, lumens,
+ *    kelvin, warranty, lead time, ...) that does not appear in the cited evidence
+ *  - guarantee / ranking-promise language ("guarantee", "will rank", "ensures inclusion", "#1 ranking")
+ * Warnings (shown, not rejected):
+ *  - negated guarantee wording ("does not guarantee"), guarantee wording quoted from evidence
+ *  - URLs that do not appear in cited evidence
+ *
+ * Text inside "[confirm: ...]" placeholders is a request for a missing fact, so it is excluded from
+ * the number and term checks and returned in `confirmPlaceholders`.
  */
 export interface ValidationEvidence {
   id: string;
@@ -16,6 +28,214 @@ export interface ValidationResult {
   confirmPlaceholders: string[];
 }
 
-export function validateDraft(_textFields: string[], _citedEvidenceIds: string[], _evidence: ValidationEvidence[]): ValidationResult {
-  throw new Error("validateDraft: not implemented yet (runtime module)");
+export const VALIDATOR_VERSION = "validator-2026-09-30.1";
+
+const PLACEHOLDER_RE = /\[confirm:\s*([^\]]*)\]/gi;
+const EVIDENCE_REF_RE = /\[\s*((?:ev_[A-Za-z0-9_-]+)(?:\s*[,;]\s*ev_[A-Za-z0-9_-]+)*)\s*\]/g;
+const URL_RE = /\bhttps?:\/\/[^\s<>"'\])]+/gi;
+const DATE_RE = /\b\d{4}-\d{2}-\d{2}\b/g;
+const DIMENSION_RE = /(\d[\d,]*(?:\.\d+)?)\s*(?:["″']|in\b|cm\b|mm\b|ft\b)?\s*[x×]\s*(\d[\d,]*(?:\.\d+)?)(?:\s*(?:["″']|in\b|cm\b|mm\b|ft\b)?\s*[x×]\s*(\d[\d,]*(?:\.\d+)?))?/gi;
+/** A standalone number: not glued to a preceding letter/digit (so H1, IP44, ev_12, UTF-8 are skipped). */
+const NUMBER_RE = /(?<![\p{L}\p{N}_.])(?<!\p{L}-)(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)/gu;
+
+interface TermRule {
+  label: string;
+  /** Pattern found in the draft text. */
+  pattern: RegExp;
+  /** Pattern that must be found in the cited evidence corpus (defaults to `pattern`). */
+  evidence?: (match: string) => RegExp;
+}
+
+const TERM_RULES: TermRule[] = [
+  { label: "UL listing", pattern: /\bc?UL(?:us)?\b(?:[- ]?listed)?/ },
+  { label: "ETL listing", pattern: /\bETL\b/ },
+  { label: "CSA certification", pattern: /\bCSA\b/ },
+  { label: "CE marking", pattern: /\bCE\b/ },
+  { label: "damp rating", pattern: /\bdamp[- ]?(?:rated|rating|location)s?\b/i, evidence: () => /\bdamp\b/i },
+  { label: "wet rating", pattern: /\bwet[- ]?(?:rated|rating|location)s?\b/i, evidence: () => /\bwet[- ]?(?:rated|rating|location)/i },
+  { label: "IP rating", pattern: /\bIP\s?\d{2}\b/i, evidence: (m) => new RegExp(`\\bIP\\s?${m.replace(/\D/g, "")}\\b`, "i") },
+  { label: "dimmable", pattern: /\bdimmable\b/i },
+  { label: "dimmer compatibility", pattern: /\bdimmer[- ]compatible\b/i, evidence: () => /\bdimm(?:er|able)/i },
+  { label: "lumens", pattern: /\blumens?\b|\b\d[\d,]*\s?lm\b/i, evidence: () => /\blumens?\b|\d\s?lm\b/i },
+  { label: "color temperature (kelvin)", pattern: /\bkelvin\b|\b\d{3,5}\s?K\b/, evidence: () => /\bkelvin\b|\b\d{3,5}\s?K\b/i },
+  { label: "warranty", pattern: /\bwarrant(?:y|ies|ed)\b/i, evidence: () => /\bwarrant/i },
+  { label: "lead time", pattern: /\blead[- ]times?\b/i },
+  { label: "Energy Star", pattern: /\benergy[- ]star\b/i },
+  { label: "FCC", pattern: /\bFCC\b/ },
+  { label: "ADA compliance", pattern: /\bADA[- ]compliant\b|\bADA\b/ },
+  { label: "Title 24", pattern: /\btitle\s?24\b/i },
+  { label: "certification", pattern: /\bcertified\b|\bcertification\b/i, evidence: () => /\bcertifi/i },
+];
+
+interface GuaranteeRule {
+  label: string;
+  pattern: RegExp;
+  /** Negation / quoting from evidence may downgrade to a warning. */
+  softenable: boolean;
+}
+
+const GUARANTEE_RULES: GuaranteeRule[] = [
+  { label: "guarantee language", pattern: /\bguarantee(?:s|d|ing)?\b/gi, softenable: true },
+  { label: "ranking promise", pattern: /\bwill\s+(?:rank|outrank|appear\s+(?:first|at\s+the\s+top|in\s+ai))\b/gi, softenable: false },
+  { label: "inclusion promise", pattern: /\bensur(?:e|es|ing)\s+(?:your\s+|the\s+brand'?s?\s+)?(?:inclusion|citations?|ai\s+citations?|rankings?)\b/gi, softenable: false },
+  { label: "#1 ranking promise", pattern: /#\s?1\s+(?:rank(?:ing)?|position|spot|result)|\b(?:rank|ranking|position)\s+(?:#\s?1|number\s+one|first)\b/gi, softenable: false },
+  { label: "citation promise", pattern: /\bwill\s+(?:be\s+cited|get\s+cited|cite\s+(?:you|your|the\s+brand))\b/gi, softenable: false },
+];
+
+const NEGATIONS = /\b(?:not|no|never|cannot|can't|doesn't|don't|won't|without)\b(?:\s+\w+){0,2}\s*$/i;
+
+export function validateDraft(textFields: string[], citedEvidenceIds: string[], evidence: ValidationEvidence[]): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const confirmPlaceholders: string[] = [];
+
+  const byId = new Map(evidence.map((e) => [e.id, e]));
+  const fullText = textFields.filter((t) => typeof t === "string").join("\n");
+
+  // 1. Placeholders.
+  for (const m of fullText.matchAll(PLACEHOLDER_RE)) {
+    const p = (m[1] ?? "").trim();
+    if (!p) warnings.push('Empty "[confirm: ]" placeholder.');
+    else if (!confirmPlaceholders.includes(p)) confirmPlaceholders.push(p);
+  }
+
+  // 2. Evidence ids: declared and inline.
+  const cited = new Set<string>();
+  for (const id of citedEvidenceIds) {
+    if (!byId.has(id)) errors.push(`Unknown evidence id cited: ${id}`);
+    else cited.add(id);
+  }
+  for (const m of fullText.matchAll(EVIDENCE_REF_RE)) {
+    for (const id of (m[1] ?? "").split(/\s*[,;]\s*/)) {
+      if (!id) continue;
+      if (!byId.has(id)) {
+        const msg = `Unknown evidence id referenced in text: ${id}`;
+        if (!errors.includes(msg)) errors.push(msg);
+      } else if (!cited.has(id)) {
+        // Referenced inline but not declared: still evidence the writer was given; include it.
+        cited.add(id);
+        warnings.push(`Evidence ${id} is referenced in text but missing from evidence_ids.`);
+      }
+    }
+  }
+  if (citedEvidenceIds.length === 0) errors.push("No evidence cited.");
+
+  // 3. Build the corpus of cited evidence (text + data) and its number set.
+  const corpusParts: string[] = [];
+  for (const id of cited) {
+    const e = byId.get(id)!;
+    corpusParts.push(e.text ?? "");
+    if (e.data !== undefined && e.data !== null) corpusParts.push(flattenData(e.data));
+  }
+  const corpus = corpusParts.join("\n");
+  const corpusNumbers = extractNumbers(corpus);
+  const corpusDates = new Set(corpus.match(DATE_RE) ?? []);
+
+  // 4. Text to check: remove placeholders and evidence refs.
+  let checkText = fullText.replace(PLACEHOLDER_RE, " ").replace(EVIDENCE_REF_RE, " ");
+
+  // URLs: must appear in evidence (warning); removed before number checks.
+  for (const url of checkText.match(URL_RE) ?? []) {
+    const clean = url.replace(/[.,;:]+$/, "");
+    if (!corpus.includes(clean) && !corpus.includes(clean.replace(/\/$/, ""))) warnings.push(`URL not found in cited evidence: ${clean}`);
+  }
+  checkText = checkText.replace(URL_RE, " ");
+
+  // Dates: exact string match.
+  for (const d of checkText.match(DATE_RE) ?? []) {
+    if (!corpusDates.has(d) && !corpus.includes(d)) errors.push(`Date not present in cited evidence: ${d}`);
+  }
+  checkText = checkText.replace(DATE_RE, " ");
+
+  // 5. Numbers (dimensions first so "3x4" yields 3 and 4).
+  const missing = new Set<string>();
+  checkText = checkText.replace(DIMENSION_RE, (whole, a: string, b: string, c: string | undefined) => {
+    for (const n of [a, b, c]) if (n && !hasNumber(corpusNumbers, n)) missing.add(n);
+    return " ".repeat(whole.length);
+  });
+  for (const m of checkText.matchAll(NUMBER_RE)) {
+    const n = m[1]!;
+    if (!hasNumber(corpusNumbers, n)) missing.add(n);
+  }
+  for (const n of missing) errors.push(`Number not present in cited evidence: ${n}`);
+
+  // 6. Certification / spec terms.
+  for (const rule of TERM_RULES) {
+    const re = new RegExp(rule.pattern.source, rule.pattern.flags.includes("g") ? rule.pattern.flags : rule.pattern.flags + "g");
+    const seen = new Set<string>();
+    for (const m of checkText.matchAll(re)) {
+      const found = m[0];
+      const key = found.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const evRe = rule.evidence ? rule.evidence(found) : new RegExp(rule.pattern.source, rule.pattern.flags.replace("g", ""));
+      if (!evRe.test(corpus)) errors.push(`Certification/spec term not present in cited evidence (${rule.label}): "${found.trim()}"`);
+    }
+  }
+
+  // 7. Guarantee / promise language.
+  for (const rule of GUARANTEE_RULES) {
+    for (const m of checkText.matchAll(rule.pattern)) {
+      const before = checkText.slice(Math.max(0, (m.index ?? 0) - 40), m.index ?? 0);
+      if (rule.softenable && NEGATIONS.test(before)) {
+        warnings.push(`Negated ${rule.label}: "${m[0]}" (allowed; review wording).`);
+        continue;
+      }
+      if (rule.softenable && new RegExp(rule.pattern.source, "i").test(corpus)) {
+        warnings.push(`${rule.label} appears in cited evidence; confirm it is quoted, not promised: "${m[0]}".`);
+        continue;
+      }
+      errors.push(`Promise language is not allowed (${rule.label}): "${m[0]}"`);
+    }
+  }
+
+  return { ok: errors.length === 0, errors: dedupe(errors), warnings: dedupe(warnings), confirmPlaceholders };
+}
+
+// ------------------------------------------------------------------ helpers
+/** Normalize "1,234.50" -> 1234.5; returns null for non-numeric. */
+export function normalizeNumber(raw: string): number | null {
+  const n = Number(raw.replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+function extractNumbers(text: string): Set<number> {
+  // Liberal on the evidence side: numbers glued to letters (IP44, 3000K, $1,299) still count.
+  const out = new Set<number>();
+  for (const m of text.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g)) {
+    const n = normalizeNumber(m[0]);
+    if (n !== null) out.add(n);
+  }
+  return out;
+}
+
+function hasNumber(set: Set<number>, raw: string): boolean {
+  const n = normalizeNumber(raw);
+  if (n === null) return true;
+  if (set.has(n)) return true;
+  // Tolerate float representation noise (e.g. 0.1 + 0.2) but nothing else.
+  for (const v of set) if (Math.abs(v - n) < 1e-9) return true;
+  return false;
+}
+
+function flattenData(data: unknown): string {
+  const parts: string[] = [];
+  const walk = (v: unknown, depth: number) => {
+    if (depth > 6 || v === null || v === undefined) return;
+    if (typeof v === "string") parts.push(v);
+    else if (typeof v === "number" || typeof v === "boolean") parts.push(String(v));
+    else if (Array.isArray(v)) v.forEach((x) => walk(x, depth + 1));
+    else if (typeof v === "object") {
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+        parts.push(k);
+        walk(x, depth + 1);
+      }
+    }
+  };
+  walk(data, 0);
+  return parts.join(" ");
+}
+
+function dedupe(list: string[]): string[] {
+  return [...new Set(list)];
 }
