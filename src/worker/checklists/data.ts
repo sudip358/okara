@@ -261,7 +261,8 @@ export function parseRobotsJson(raw: string | null): RobotsInfo {
 
 const bool = (v: unknown) => v === 1 || v === true;
 
-export async function loadCrawl(db: Db, ws: string, pid: string): Promise<{ crawl: CrawlInfo | null; snapshots: Snap[]; findings: Finding[] }> {
+/** The latest completed/partial crawl (or a specific one by id) with its snapshots and findings. */
+export async function loadCrawl(db: Db, ws: string, pid: string, crawlRunId?: string): Promise<{ crawl: CrawlInfo | null; snapshots: Snap[]; findings: Finding[] }> {
   const run = await db.first<{
     id: string;
     status: string;
@@ -274,10 +275,9 @@ export async function loadCrawl(db: Db, ws: string, pid: string): Promise<{ craw
     notes_json: string;
   }>(
     `SELECT id, status, started_at, finished_at, pages_limit, pages_crawled, pages_skipped, robots_json, notes_json
-       FROM crawl_runs WHERE workspace_id = ? AND project_id = ? AND status IN ('completed', 'partial')
+       FROM crawl_runs WHERE workspace_id = ? AND project_id = ? AND ${crawlRunId ? "id = ?" : "status IN ('completed', 'partial')"}
       ORDER BY started_at DESC, rowid DESC LIMIT 1`,
-    ws,
-    pid,
+    ...(crawlRunId ? [ws, pid, crawlRunId] : [ws, pid]),
   );
   if (!run) return { crawl: null, snapshots: [], findings: [] };
   const rows = await db.all<SnapshotRow>(
@@ -489,11 +489,18 @@ export function projectInfo(p: ProjectRow): ChecklistData["project"] {
 }
 
 /** Load the full project snapshot used by the SEO and GEO checklists. */
+/**
+ * Crawl data counts only for verified sites (or seeded demo projects), matching the SEO audit: an
+ * unverified site never produces live crawl-based results.
+ */
+export const crawlAllowed = (p: ProjectRow) => !!p.verified_host || p.is_demo === 1;
+
 export async function loadChecklistData(env: Env, db: Db, project: ProjectRow, now: Date): Promise<ChecklistData> {
   const ws = project.workspace_id;
   const pid = project.id;
+  const noCrawl = { crawl: null, snapshots: [], findings: [] };
   const [crawl, gsc, geo, decisions, pillars] = await Promise.all([
-    loadCrawl(db, ws, pid),
+    crawlAllowed(project) ? loadCrawl(db, ws, pid) : Promise.resolve(noCrawl),
     loadGsc(db, ws, pid),
     loadGeo(env, db, ws, pid),
     loadDecisions(db, ws, pid),
@@ -501,3 +508,5 @@ export async function loadChecklistData(env: Env, db: Db, project: ProjectRow, n
   ]);
   return { now, project: projectInfo(project), crawl: crawl.crawl, snapshots: crawl.snapshots, findings: crawl.findings, gsc, geo, decisions, pillars };
 }
+
+export const EMPTY_GEO: GeoInfo = { promptSet: null, promptsPerRun: null, observations: [], citations: [], brandObs: [], displacements: [], searchQueries: [], providers: [] };

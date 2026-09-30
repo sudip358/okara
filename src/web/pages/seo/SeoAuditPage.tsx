@@ -21,6 +21,7 @@ import {
 } from "@web/components/ui";
 import { FindingsPanel } from "./components/FindingsPanel";
 import { AiCrawlerPanel } from "./components/AiCrawlerPanel";
+import { RobotsAdvisor } from "./components/RobotsAdvisor";
 import { PagesTable } from "./components/PagesTable";
 import { CsvImportPanel } from "./components/CsvImportPanel";
 
@@ -105,6 +106,8 @@ export function SeoAuditPage() {
           <AiCrawlerPanel access={a.aiCrawlerAccess} />
         </>
       ) : null}
+
+      {projectId ? <RobotsAdvisor projectId={projectId} /> : null}
 
       {pages.loading && !pages.data ? (
         <LoadingState label="Loading pages…" />
