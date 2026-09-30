@@ -6,7 +6,7 @@ Resources were checked on September 30, 2026. Re-check current official API cont
 
 | Section | Contents | Origin |
 |---|---|---|
-| 1 | Master implementation prompt | Original kit, completed and amended (amendments marked `[A1]`–`[A22]`) |
+| 1 | Master implementation prompt | Original kit, completed and amended (amendments marked `[A1]`–`[A23]`) |
 | 2 | Reusable prompts, decision definitions, and output schemas | Drafted for this kit; validate against fixtures before use |
 | 3 | Reference review (Okara video, Ryze video, Okara dashboard, two open-source Jev SEO repos) | Review notes: what was adopted, what was rejected, and why |
 | 4 | Resources | Official documentation links, verified reachable on September 30, 2026 |
@@ -214,6 +214,12 @@ SEO items carry an optional reference tier (S-D) from Okara's "SEO tactics, rank
 
 [A22] COVERAGE VIEWS (reference: a "Jev × SEO + GEO" 4-panel concept labelled "illustrative data, not a live Jev run", reviewed 2026-09-30)
 Four compact tables built only from stored data: (1) SEO page audit: per crawled page, title / H1 / schema status and keep / update / review; (2) content evidence: depth (word count), proof (outbound source links, tables), freshness (visible last-updated date), GSC impressions, and the computed priority, for the user's own pages; competitor columns appear only for competitor URLs the user approved under [A7]; (3) GEO answer coverage: each approved prompt, the best-matching page on the site (from captured engine search queries, else title/heading token overlap, labelled), who was cited (your site / other site / none / not run), and the gap (covered / improve / create page / check); (4) GEO citation evidence: per page of the site, API-sampled citation counts, prompts, providers, what was cited alongside, and a next step (compare / add proof). Speed claims from such mockups are not evidence; latency comes from the [A5] harness.
+
+[A23] JEV SEO WORKFLOWS (reference: Prefer, "Jev for SEO: 10 workflows you can actually use", 2026-09-22)
+Of its ten classification workflows, search intent, cannibalization, and AI visibility are already covered. Add:
+- Redirect map tool (on demand, not a daily recommendation): old URLs (paste or CSV, max 500 per request) mapped to new URLs (provided, or the latest crawl's 2xx URLs). Exact path and normalized-slug matches first; otherwise a deterministic shortlist (top 5 by slug/title token similarity) and one Jev Choice per old URL over that shortlist plus "none". Act tier = auto, Flag = review, none or Drop = no_match; uncertain matches are never redirected blindly. Export a CSV in Shopify's URL-redirect import format ("Redirect from,Redirect to", paths). Budgeted and rate-limited; without Jev, deterministic matches only and everything else is review.
+- New Jev questions for the SEO pipeline: internal link opportunity (Noul per source to target pair, prefiltered by topic overlap and low target inlinks), thin content (Noul confirming the word-count rule, to avoid flagging short but useful product pages), page action (Choice keep / update / merge / remove / insufficient_context; "remove" always needs human review), schema-content match (Noul; plus a deterministic Offer-price vs visible-price check), title/meta alignment with the page's top GSC query (Choice aligned / weak / mismatched / insufficient_context), and topic coverage (Choice covered / partial / missing against GSC and engine queries; competitor pages only when approved).
+Throughput claims in the reference are not evidence; measure with the [A5] harness.
 
 DELIVERY PROCESS
 First create CLAUDE.md, docs/architecture.md, docs/provider-contracts.md, docs/limits-and-costs.md, and a TASKS.md checklist. Explain the proposed first vertical slice and any essential blockers. Then implement in small milestones; do not spend the whole response merely planning.

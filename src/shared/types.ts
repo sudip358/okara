@@ -630,3 +630,32 @@ export interface CoverageResponse<T> {
   completeness: Completeness | null;
   labels: string[];
 }
+
+// ------------------------------------------------------------------ redirect map tool [A23]
+export interface RedirectMapRequest {
+  oldUrls: string[]; // max 500 per request
+  /** New URLs to map onto; when omitted, the latest crawl's 2xx URLs are used. */
+  newUrls?: string[];
+  useJev?: boolean; // default true when TypeSafe is configured
+}
+
+export interface RedirectMapRow {
+  from: string;
+  to: string | null;
+  method: "exact_path" | "normalized_slug" | "jev" | "none";
+  confidence: number | null; // Jev Choice confidence only; null for deterministic matches
+  tier: Tier | null;
+  status: "auto" | "review" | "no_match"; // auto = exact/normalized or Jev act tier; review = flag tier or ambiguous; no_match = none chosen
+  candidates: Array<{ url: string; score: number }>; // deterministic shortlist shown to the reviewer
+  note: string | null;
+}
+
+export interface RedirectMapResult {
+  state: CapabilityState;
+  generatedAt: string;
+  rows: RedirectMapRow[];
+  counts: { auto: number; review: number; noMatch: number };
+  /** Shopify URL Redirects import format: "Redirect from,Redirect to" (paths, not absolute URLs). */
+  shopifyCsv: string;
+  labels: string[];
+}

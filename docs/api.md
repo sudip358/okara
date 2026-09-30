@@ -43,6 +43,7 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | GET | /projects/:pid/seo/content-evidence | coverage | `CoverageResponse<ContentEvidenceRow>` |
 | GET | /projects/:pid/geo/answer-coverage | coverage | `CoverageResponse<AnswerCoverageRow>` |
 | GET | /projects/:pid/geo/citation-evidence | coverage | `CoverageResponse<CitationEvidenceRow>` |
+| POST | /projects/:pid/seo/redirect-map | redirects | body `RedirectMapRequest` → `RedirectMapResult` [A23] (user-triggered; budgeted; rate-limited) |
 | GET | /projects/:pid/pages | seo-crawl | `PageRow[]` |
 | PATCH | /projects/:pid/pages/:pageId | seo-crawl | body `{pageType}` (user correction) |
 | GET | /projects/:pid/recommendations?agent=&status= | runtime | `Recommendation[]` |
