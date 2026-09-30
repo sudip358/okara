@@ -464,3 +464,49 @@ export interface AttentionFeed {
   }>;
   recentEvents: RunEvent[];
 }
+
+// ------------------------------------------------------------------ SEO and GEO readiness checklists [A21]
+export type ChecklistKind = "seo" | "geo";
+export type ChecklistSection =
+  // SEO
+  | "technical" | "on_page" | "quick_wins" | "seo_content" | "links"
+  // GEO
+  | "access" | "content" | "structure" | "mentions" | "trust" | "tracking";
+/**
+ * met / not_met / partial: measured from stored data (crawl, GSC, GEO observations, decisions).
+ * manual: cannot be measured; the user confirms it (checked + note).
+ * not_connected: needs a data source that is not connected (analytics, keyword/backlink/SERP data, CWV field data).
+ * not_applicable: does not apply to this site type. unknown: no data yet (e.g. no crawl).
+ */
+export type ChecklistStatus = "met" | "not_met" | "partial" | "manual" | "not_connected" | "not_applicable" | "unknown";
+
+export interface ChecklistItem {
+  id: string; // stable, e.g. "geo.access.ai_search_bots_allowed", "seo.technical.canonical_tags"
+  section: ChecklistSection;
+  label: string;
+  status: ChecklistStatus;
+  method: "measured" | "heuristic" | "manual";
+  summary: string; // what was checked, with counts, e.g. "3 of 4 AI search crawlers allowed"
+  evidence: Array<{ label: string; url?: string | null; detail?: string | null }>;
+  completeness: Completeness | null;
+  guidance: string; // what to do; never promises rankings or citations
+  caveat: string | null; // e.g. "IndexNow is used by Bing and other participating engines, not Google."
+  links: Array<{ label: string; to: string }>; // in-app deep links, e.g. SEO audit, GEO results
+  manual: { checked: boolean; note: string | null; updatedAt: string | null; updatedBy: string | null } | null;
+  /**
+   * Reference tier from Okara's "SEO tactics, ranked by impact" graphic (S highest .. D lowest). An external
+   * opinion used only for ordering and display, labelled as such; never a measured impact or a promise.
+   */
+  tacticTier: "S" | "A" | "B" | "C" | "D" | null;
+}
+
+export interface Checklist {
+  kind: ChecklistKind;
+  state: CapabilityState;
+  checklistVersion: string;
+  generatedAt: string;
+  sources: { crawlRunId: string | null; crawledAt: string | null; gscSyncedAt: string | null; geoObservations: number };
+  counts: Record<ChecklistStatus, number>;
+  items: ChecklistItem[];
+  disclaimer: string; // "Practices, not guarantees..."
+}

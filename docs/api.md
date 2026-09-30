@@ -58,4 +58,6 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | GET | /projects/:pid/geo/displacements | geo-analysis | `DisplacementSummary[]` |
 | GET | /projects/:pid/geo/search-queries | geo-analysis | `SearchQuerySummary[]` |
 | POST | /projects/:pid/geo/import | geo-analysis | body `{promptText, surface, answer, citations[]}` manual import |
+| GET | /projects/:pid/checklists/:kind | checklists | `Checklist` for kind `seo` or `geo` [A21] |
+| PUT | /projects/:pid/checklists/:kind/:itemId | checklists | body `{checked, note?}` for manual items; returns `ChecklistItem` |
 | POST | /demo/seed | platform-projects | DEMO_MODE only, never production: creates a labelled demo project with fixture data |

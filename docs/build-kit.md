@@ -6,7 +6,7 @@ Resources were checked on September 30, 2026. Re-check current official API cont
 
 | Section | Contents | Origin |
 |---|---|---|
-| 1 | Master implementation prompt | Original kit, completed and amended (amendments marked `[A1]`–`[A20]`) |
+| 1 | Master implementation prompt | Original kit, completed and amended (amendments marked `[A1]`–`[A21]`) |
 | 2 | Reusable prompts, decision definitions, and output schemas | Drafted for this kit; validate against fixtures before use |
 | 3 | Reference review (Okara video, Ryze video, Okara dashboard, two open-source Jev SEO repos) | Review notes: what was adopted, what was rejected, and why |
 | 4 | Resources | Official documentation links, verified reachable on September 30, 2026 |
@@ -197,6 +197,18 @@ Each GEO provider lane shows: provider, exact model ID, grounding/search mode, p
 [A11] NO PROJECTIONS
 No projected traffic, revenue, ranking, or citation values anywhere in the UI. Outcomes appear only as measured post-change comparisons from a real source (GSC, analytics, GEO cohort) after a stated window.
 
+[A21] SEO AND GEO READINESS CHECKLISTS (reference: Okara's "SEO checklist" and "GEO checklist" graphics, reviewed 2026-09-30)
+Show two per-project checklists. SEO: Technical, On-page, Quick wins, Content, Links. GEO: Access, Content, Structure, Mentions, Trust, Tracking. Each item is measured from stored data where possible and labelled by method:
+- measured: robots.txt access for AI answer/search crawlers ([A19]), noindex/canonical findings, key text in HTML (pages skipped as js_rendered), login walls (401/403 or login redirects on crawled pages), sitemap present and advertised, schema by page type, author and visible last-updated date on articles, outbound source links, comparison tables, internal links to key pages, approved prompt count, providers enabled, share-of-voice tracking, GSC connected.
+- heuristic: question-style H2s, how-to/best-of/comparison page coverage, stale pages by visible date, pricing visibility (Offer price on product pages; a /pricing page on SaaS sites).
+- data-driven mentions: from GEO citations and displacements, list the Reddit/forum threads, listicles, review sites, YouTube videos, and publishers that AI answers already cite for the user's prompts. These are manual-action lists; never automate posting, reviews, or outreach, and never suggest fabricated reviews or quotes.
+- manual: original research, first-hand experience, follow-up coverage, self-contained sections, screenshots/demos/customer quotes, consistent brand and founder info, checking CDN/WAF rules, Bing Webmaster Tools reports. The user checks these off with an optional note (stored with who and when).
+- not_connected: AI referral and signup tracking and GA4 (analytics), Core Web Vitals (field data), competitor keywords and volume/KD (keyword data source), backlink gap and unlinked mentions (backlink data), "People also ask" (SERP data), index coverage (URL Inspection). Never scrape Google results to fill these.
+- SEO measured examples: GSC connected, sitemap submitted (GSC sitemaps API when connected), robots/noindex, canonicals, JS-only text, broken links and 4xx/redirect chains in crawled coverage, orphan pages within coverage, breadcrumbs (BreadcrumbList), schema by page type, title length (a guideline; Google truncates by pixel width), unique meta descriptions, heading structure, image alt text, internal links, cannibalization and thin/overlapping pages ([A15]), author and dateModified, high-impression low-CTR pages, page-2 (positions 11-20) pages, and declining pages from GSC.
+Caveats shown inline: IndexNow is used by Bing and other participating engines, not Google; the app never crawls as another company's bot user-agent to test CDN blocking; re-running prompts "in ChatGPT, Claude, Gemini" is API-sampled here, and consumer-app answers come only from labelled manual imports. The page carries a disclaimer: these are practices that make pages easier to crawl, understand, and cite; none guarantees inclusion or citation. Unchecked or failing items may feed proposal candidates, with the checklist item as evidence.
+SEO items carry an optional reference tier (S-D) from Okara's "SEO tactics, ranked by impact" graphic, shown as "Reference tier (external opinion)" and used only to order items within a section. It never enters the recommendation priority formula, which stays computed from the project's own metrics, severity, reach, and effort. Where the reference conflicts with the project's data (for example it ranks title tweaks D, while a high-impression, low-CTR page in GSC is a measured opportunity), the data wins and the UI says why.
+
+
 DELIVERY PROCESS
 First create CLAUDE.md, docs/architecture.md, docs/provider-contracts.md, docs/limits-and-costs.md, and a TASKS.md checklist. Explain the proposed first vertical slice and any essential blockers. Then implement in small milestones; do not spend the whole response merely planning.
 Milestone 1: scaffold, D1 migrations, local labelled fixtures, tenancy/auth skeleton, onboarding, and deterministic audit slice.
@@ -225,6 +237,7 @@ ACCEPTANCE TESTS
 - [A9] Ten product URLs sharing one missing-Offer issue produce one template recommendation, not ten page recommendations.
 - [A10] A draft containing a certification or numeric spec absent from evidence is rejected by the validator; missing facts appear as "[confirm: ...]".
 - [A11] No UI route renders a projected outcome value.
+- [A21] Both checklists mark AI-search crawler access, noindex/canonical, JS-only text, and login walls as measured from the latest crawl; manual items persist per project with user and time; analytics items show not_connected; no item claims to guarantee citation.
 - [A5] The benchmark harness produces latency p50/p95, cost per run, and evaluator agreement for the labelled set; no speed/cost claim exists without it.
 - [A13] A Choice answer below the Flag threshold renders with "Check this yourself" and the runner-up; below Drop, no Jev value is shown. A Noul answer never reads a confidence field. Changing question text without bumping question_version fails the snapshot test.
 - [A14] A crawled page containing "ignore previous instructions" text is marked tainted and excluded from writer context; with Jev unreachable, it is also marked tainted.
