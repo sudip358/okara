@@ -7,10 +7,13 @@
  *      from metrics, never counted as absences).
  *   2. Deterministic detection on the response body only (detect.ts): alias spans per brand, citation
  *      hosts, ordered-list rank, English recommendation cues, rule-based source types.
- *   3. One Jev systemOne call (when a DecisionProvider is configured) batching: [A14] injection
- *      preflight on the sanitized answer, adjudication of ambiguous spans, recommendation status for
- *      brands whose cues are unclear, passage sentiment per mentioned brand, and source type for
- *      citations no rule matched. The provider itself reserves budget and records provider_calls.
+ *   3. Jev (when a DecisionProvider is configured), one systemOne call per input state:
+ *      a. the sanitized answer: [A14] injection preflight, adjudication of ambiguous spans,
+ *         recommendation status for brands whose cues are unclear, and source type for citations no
+ *         rule matched;
+ *      b. only after (a) succeeded: passage sentiment per brand with a confirmed mention. Its state is
+ *         the brand passage only (build-kit 2.1: never the whole answer).
+ *      The provider itself reserves budget and records provider_calls.
  *   4. Code decides with tierFor(): Act/Flag answers are used, Drop answers fall back to deterministic
  *      values or 'unknown'.
  *   5. Persist brand rows, citations, displacements, decision records (one per question), evidence.
@@ -28,7 +31,7 @@
  */
 import type { RecommendationStatusInAnswer, Sentiment, SourceType } from "@shared/types";
 import type { RunContext } from "../runs/context";
-import type { DecisionAnswer, DecisionQuestion, DecisionResult } from "../providers/types";
+import type { DecisionQuestion, DecisionResult } from "../providers/types";
 import { DEFAULT_NOUL_BANDS, POLICY_VERSION, QUESTION_POLICY, tierFor } from "../runs/policy";
 import { hashJson } from "../lib/hash";
 import { newId } from "../lib/ids";
@@ -274,7 +277,11 @@ export async function analyzeObservation(ctx: RunContext, observationId: string)
     preCue.set(b.key, recommendationCues(spanSentences(text, spans), spans.some((s) => onListLine(text, s.start))));
   }
 
-  // ---------------------------------------------------------------- Jev batch
+  // ---------------------------------------------------------------- Jev call 1: the shared answer state
+  // Preflight, adjudication, recommendation status, and source types read the same state (the
+  // sanitized answer), so they are batched in one systemOne call. Brand sentiment has a different
+  // input state (the brand passage only, never the whole answer; build-kit 2.1), so it is a second
+  // call below, asked only for brands whose mention is confirmed once adjudication is known.
   const asked: AskedQuestion[] = [];
   const adjudicationKeys = new Map<BrandSpan, string>();
   const state: Record<string, unknown> = {
@@ -284,7 +291,6 @@ export async function analyzeObservation(ctx: RunContext, observationId: string)
   };
   const spansState: Record<string, unknown> = {};
   const mentionsState: Record<string, unknown> = {};
-  const passagesState: Record<string, unknown> = {};
   const citationsState: Record<string, unknown> = {};
   const sanitized = sanitizeUntrusted(text, RAW_TEXT_FOR_JEV);
 
@@ -312,8 +318,6 @@ export async function analyzeObservation(ctx: RunContext, observationId: string)
         mentionsState[ref] = spans.slice(0, 5).map((s) => s.text);
         asked.push({ key: `rec_${ref}`, id: GEO_QUESTION_IDS.recommendationStatus, question: geoQuestion(GEO_QUESTION_IDS.recommendationStatus, ref) });
       }
-      passagesState[ref] = sanitizeUntrusted(passageAround(text, spans[0]!.start).text, 1200);
-      asked.push({ key: `sent_${ref}`, id: GEO_QUESTION_IDS.brandSentiment, question: geoQuestion(GEO_QUESTION_IDS.brandSentiment, ref) });
     }
     let sq = 0;
     citations.forEach((c, i) => {
@@ -325,7 +329,6 @@ export async function analyzeObservation(ctx: RunContext, observationId: string)
     });
     state.spans = spansState;
     state.mentions = mentionsState;
-    state.passages = passagesState;
     state.citations = citationsState;
   }
 
@@ -342,12 +345,12 @@ export async function analyzeObservation(ctx: RunContext, observationId: string)
       decisionStatus = e instanceof BudgetExceededError ? "budget" : "unreachable";
     }
   }
-  const answer = (key: string): DecisionAnswer | undefined => result?.answers[key];
-  const choiceIf = (key: string, id: GeoQuestionId): string | null => {
-    const a = answer(key);
+  const choiceFrom = (res: DecisionResult | null, key: string, id: GeoQuestionId): string | null => {
+    const a = res?.answers[key];
     if (!a || a.type !== "choice") return null;
     return usable(tierFor(id, a)) ? a.choice : null;
   };
+  const choiceIf = (key: string, id: GeoQuestionId): string | null => choiceFrom(result, key, id);
 
   // ---------------------------------------------------------------- [A14] preflight outcome
   let tainted = false;
@@ -358,7 +361,7 @@ export async function analyzeObservation(ctx: RunContext, observationId: string)
     tainted = true;
     preflightNote = `preflight ${decisionStatus === "budget" ? "skipped: budget exhausted" : "unreachable"}; treated as tainted`;
   } else {
-    const a = answer("injection_risk");
+    const a = result.answers["injection_risk"];
     const noBand = QUESTION_POLICY[GEO_QUESTION_IDS.injectionRisk]?.noul?.no ?? DEFAULT_NOUL_BANDS.no;
     if (!a || a.type !== "noul") {
       tainted = true;
@@ -369,31 +372,70 @@ export async function analyzeObservation(ctx: RunContext, observationId: string)
     }
   }
 
-  // ---------------------------------------------------------------- brands
-  const analyzed: AnalyzedBrand[] = brands.map((b) => {
-    const ref = refOf.get(b.key)!;
-    const all = spansByBrand.get(b.key) ?? [];
-    let usedJev = false;
-    let unresolved = 0;
-    const kept: AnalyzedBrand["spans"] = [];
-    const confirmed: BrandSpan[] = [];
-    for (const s of all) {
+  // ---------------------------------------------------------------- confirmed mentions (after adjudication)
+  interface ResolvedSpans {
+    kept: AnalyzedBrand["spans"];
+    confirmed: BrandSpan[];
+    adjudicatedByJev: boolean;
+    unresolved: number;
+  }
+  const resolved = new Map<string, ResolvedSpans>();
+  for (const b of brands) {
+    const r: ResolvedSpans = { kept: [], confirmed: [], adjudicatedByJev: false, unresolved: 0 };
+    for (const s of spansByBrand.get(b.key) ?? []) {
       if (!s.ambiguous) {
-        confirmed.push(s);
-        kept.push({ start: s.start, end: s.end, text: s.text });
+        r.confirmed.push(s);
+        r.kept.push({ start: s.start, end: s.end, text: s.text });
         continue;
       }
       const key = adjudicationKeys.get(s);
       const verdict = key ? choiceIf(key, GEO_QUESTION_IDS.mentionAdjudication) : null;
-      if (verdict) usedJev = true;
+      if (verdict) r.adjudicatedByJev = true;
       if (verdict === "tracked_brand") {
-        confirmed.push(s);
-        kept.push({ start: s.start, end: s.end, text: s.text, ambiguous: true, adjudication: verdict });
+        r.confirmed.push(s);
+        r.kept.push({ start: s.start, end: s.end, text: s.text, ambiguous: true, adjudication: verdict });
       } else {
-        if (!verdict) unresolved++;
-        kept.push({ start: s.start, end: s.end, text: s.text, ambiguous: true, adjudication: verdict ?? "unresolved" });
+        if (!verdict) r.unresolved++;
+        r.kept.push({ start: s.start, end: s.end, text: s.text, ambiguous: true, adjudication: verdict ?? "unresolved" });
       }
     }
+    resolved.set(b.key, r);
+  }
+
+  // ---------------------------------------------------------------- Jev call 2: passage sentiment
+  // State = brand names + the passage around each confirmed mention. Skipped when call 1 failed
+  // (Jev unreachable or out of budget): sentiment is then 'unknown', never guessed.
+  const sentimentAsked: AskedQuestion[] = [];
+  const sentimentState: { brands: Record<string, { name: string }>; passages: Record<string, string> } = { brands: {}, passages: {} };
+  let sentimentResult: DecisionResult | null = null;
+  let sentimentNote: string | null = null;
+  if (ctx.decisions && result) {
+    for (const b of brands) {
+      const r = resolved.get(b.key)!;
+      if (r.confirmed.length === 0 || sentimentAsked.length >= MAX_BRAND_QUESTIONS) continue;
+      const ref = refOf.get(b.key)!;
+      sentimentState.brands[ref] = { name: b.name };
+      sentimentState.passages[ref] = sanitizeUntrusted(passageAround(text, r.confirmed[0]!.start).text, 1200);
+      sentimentAsked.push({ key: `sent_${ref}`, id: GEO_QUESTION_IDS.brandSentiment, question: geoQuestion(GEO_QUESTION_IDS.brandSentiment, ref) });
+    }
+    if (sentimentAsked.length > 0) {
+      try {
+        sentimentResult = await ctx.decisions.decide({
+          purpose: "geo.brand_sentiment",
+          state: sentimentState,
+          questions: Object.fromEntries(sentimentAsked.map((q) => [q.key, q.question])),
+        });
+      } catch (e) {
+        sentimentNote = `sentiment unavailable (${e instanceof BudgetExceededError ? "budget exhausted" : "Jev unreachable"})`;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- brands
+  const analyzed: AnalyzedBrand[] = brands.map((b) => {
+    const ref = refOf.get(b.key)!;
+    const { kept, confirmed, adjudicatedByJev, unresolved } = resolved.get(b.key)!;
+    let usedJev = adjudicatedByJev;
     const mentioned = confirmed.length > 0;
     const cited = citations.some((c) => c.brandKey === b.key);
     let recommendationStatus: RecommendationStatusInAnswer = "not_mentioned";
@@ -409,7 +451,7 @@ export async function analyzeObservation(ctx: RunContext, observationId: string)
           usedJev = true;
         } else recommendationStatus = "unknown";
       }
-      const s = choiceIf(`sent_${ref}`, GEO_QUESTION_IDS.brandSentiment);
+      const s = choiceFrom(sentimentResult, `sent_${ref}`, GEO_QUESTION_IDS.brandSentiment);
       if (s) usedJev = true;
       sentiment = (s as Sentiment | null) ?? "unknown";
       listRank = listRankFor(listItems, confirmed);
@@ -418,6 +460,7 @@ export async function analyzeObservation(ctx: RunContext, observationId: string)
       sentiment = "unknown";
     }
     const notes = [preflightNote];
+    if (mentioned && sentimentNote) notes.push(sentimentNote);
     if (unresolved > 0) notes.push(`${unresolved} ambiguous span(s) unresolved (alias collision)`);
     return {
       brandKey: b.key,
@@ -484,19 +527,26 @@ export async function analyzeObservation(ctx: RunContext, observationId: string)
       newId("gdis"), ws, pid, obs.id, d.entity.slice(0, 300), d.url, d.sourceType, d.span, now,
     ]);
   }
-  if (ctx.decisions && asked.length > 0) {
-    const stateHash = await hashJson(state);
-    for (const q of asked) {
-      const a = answer(q.key);
-      const tier = result ? tierFor(q.id, a) : "drop";
-      const reason = !result || !a ? "decision_unavailable" : tier === "drop" ? "insufficient_evidence" : null;
-      stmts.push([
-        `INSERT INTO decision_records (id, workspace_id, project_id, run_id, agent, candidate_key, question_id, question_version, policy_version, provider, model, state_hash, answer_json, tier, outcome, reason_code, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        newId("dec"), ws, pid, ctx.runId, "geo", `obs:${obs.id}:${q.key}`, q.id, await geoQuestionVersion(q.id), POLICY_VERSION,
-        result?.provider ?? ctx.decisions.name, result?.model ?? null, stateHash, a ? JSON.stringify(a) : null, tier,
-        tier === "drop" ? "rejected" : "selected", reason, now,
-      ]);
+  if (ctx.decisions) {
+    const calls: Array<{ questions: AskedQuestion[]; state: unknown; res: DecisionResult | null }> = [
+      { questions: asked, state, res: result },
+      { questions: sentimentAsked, state: sentimentState, res: sentimentResult },
+    ];
+    for (const call of calls) {
+      if (call.questions.length === 0) continue;
+      const stateHash = await hashJson(call.state);
+      for (const q of call.questions) {
+        const a = call.res?.answers[q.key];
+        const tier = call.res ? tierFor(q.id, a) : "drop";
+        const reason = !call.res || !a ? "decision_unavailable" : tier === "drop" ? "insufficient_evidence" : null;
+        stmts.push([
+          `INSERT INTO decision_records (id, workspace_id, project_id, run_id, agent, candidate_key, question_id, question_version, policy_version, provider, model, state_hash, answer_json, tier, outcome, reason_code, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          newId("dec"), ws, pid, ctx.runId, "geo", `obs:${obs.id}:${q.key}`, q.id, await geoQuestionVersion(q.id), POLICY_VERSION,
+          call.res?.provider ?? ctx.decisions.name, call.res?.model ?? null, stateHash, a ? JSON.stringify(a) : null, tier,
+          tier === "drop" ? "rejected" : "selected", reason, now,
+        ]);
+      }
     }
   }
   await ctx.db.batch(stmts);
