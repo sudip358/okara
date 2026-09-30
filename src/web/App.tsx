@@ -28,6 +28,7 @@ const router = createBrowserRouter([
           { index: true, lazy: page(() => import("./pages/Overview"), "OverviewPage") },
           { path: "seo", lazy: page(() => import("./pages/seo/SeoAuditPage"), "SeoAuditPage") },
           { path: "internal-links", lazy: page(() => import("./pages/links/InternalLinksPage"), "InternalLinksPage") },
+          { path: "draft-check", lazy: page(() => import("./pages/draft-check/DraftCheckPage"), "DraftCheckPage") },
           { path: "redirects", lazy: page(() => import("./pages/redirects/RedirectMapPage"), "RedirectMapPage") },
           { path: "recommendations", lazy: page(() => import("./pages/recommendations/RecommendationsPage"), "RecommendationsPage") },
           { path: "recommendations/:recId", lazy: page(() => import("./pages/recommendations/RecommendationDetailPage"), "RecommendationDetailPage") },

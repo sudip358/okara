@@ -11,6 +11,7 @@ const NAV: Array<{ to: string; label: string; end?: boolean; group?: string }> =
   { to: "checklists", label: "Checklists" },
   { to: "seo", label: "SEO audit", group: "SEO" },
   { to: "internal-links", label: "Internal links" },
+  { to: "draft-check", label: "Draft check" },
   { to: "redirects", label: "Redirects" },
   { to: "recommendations", label: "Recommendations" },
   { to: "geo/prompts", label: "GEO prompts", group: "GEO" },
