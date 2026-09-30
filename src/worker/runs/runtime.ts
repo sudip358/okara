@@ -24,6 +24,11 @@ import { createCallRecorder } from "./calls";
 import type { RunContext, RunLogger } from "./context";
 
 // ------------------------------------------------------------------ outbound allowlist
+/**
+ * Provider API hosts reachable from runs, plus the configured WRITER_BASE_URL host. Nothing else:
+ * crawling uses crawlFetch (SSRF guard), and DNS-over-HTTPS verification runs in its own route with
+ * its own fetch, not in agent runs.
+ */
 export const API_HOST_ALLOWLIST: readonly string[] = [
   "api.typesafe.ai",
   "generativelanguage.googleapis.com",
@@ -32,7 +37,6 @@ export const API_HOST_ALLOWLIST: readonly string[] = [
   "oauth2.googleapis.com",
   "www.googleapis.com",
   "searchconsole.googleapis.com",
-  "cloudflare-dns.com",
 ];
 
 export class OutboundBlockedError extends Error {}
@@ -162,10 +166,10 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
   const geoProviders: GeoProvider[] = [];
   // Model ids come only from configuration; both a key and a valid model id are required.
   if (geminiKey && env.GEMINI_MODEL && geminiConfigured(env, geminiKey)) {
-    geoProviders.push(createGeminiProvider({ apiKey: geminiKey, model: env.GEMINI_MODEL, fetchImpl: apiFetch }));
+    geoProviders.push(createGeminiProvider({ apiKey: geminiKey, model: env.GEMINI_MODEL.trim(), fetchImpl: apiFetch, now: clock }));
   }
   if (perplexityKey && env.PERPLEXITY_MODEL && perplexityConfigured(env, perplexityKey)) {
-    geoProviders.push(createPerplexityProvider({ apiKey: perplexityKey, model: env.PERPLEXITY_MODEL, fetchImpl: apiFetch }));
+    geoProviders.push(createPerplexityProvider({ apiKey: perplexityKey, model: env.PERPLEXITY_MODEL.trim(), fetchImpl: apiFetch, now: clock }));
   }
 
   let gsc: RunContext["gsc"] = null;

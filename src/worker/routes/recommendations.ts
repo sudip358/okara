@@ -95,15 +95,33 @@ interface RecRow {
   updated_at: string;
 }
 
-/** Only real provider field names reach the UI (it prints keys verbatim). */
+/**
+ * Only real TypeSafe response field names reach the UI (it prints keys verbatim): Choice `choice` +
+ * `confidence`, Score `score` + `confidence`, Noul `noul` (no confidence). Keys may be qualified by the
+ * question id, as the SEO agent stores them ("seo.action_choice.confidence"); bare keys stored next to a
+ * `question` id (GEO: {question, score, confidence}) are qualified with it. Derived or invented keys
+ * (runner_up, priority, ...) are dropped; the runner-up is derived in the UI from the stored answer.
+ */
 export const DECISION_FIELD_NAMES: ReadonlySet<string> = new Set(["choice", "confidence", "score", "noul"]);
+const QUESTION_ID_RE = /^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+$/;
 
 export function decisionFields(json: string | null): { fields: Record<string, number | string> | null; provider: string | null } {
   const raw = parseJson<Record<string, unknown> | null>(json, null);
-  if (!raw || typeof raw !== "object") return { fields: null, provider: null };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { fields: null, provider: null };
+  const qRaw = typeof raw.question === "string" ? raw.question : typeof raw.questionId === "string" ? raw.questionId : null;
+  const question = qRaw && QUESTION_ID_RE.test(qRaw) ? qRaw : null;
   const fields: Record<string, number | string> = {};
   for (const [k, v] of Object.entries(raw)) {
-    if (DECISION_FIELD_NAMES.has(k) && (typeof v === "number" || typeof v === "string")) fields[k] = v;
+    if (typeof v !== "number" && typeof v !== "string") continue;
+    if (typeof v === "number" && !Number.isFinite(v)) continue;
+    const dot = k.lastIndexOf(".");
+    const name = dot >= 0 ? k.slice(dot + 1) : k;
+    if (!DECISION_FIELD_NAMES.has(name)) continue;
+    if (dot >= 0) {
+      if (QUESTION_ID_RE.test(k.slice(0, dot))) fields[k] = v;
+    } else {
+      fields[question ? `${question}.${k}` : k] = v;
+    }
   }
   return { fields: Object.keys(fields).length ? fields : null, provider: typeof raw.provider === "string" ? raw.provider : null };
 }

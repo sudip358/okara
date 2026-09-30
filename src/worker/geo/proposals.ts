@@ -19,9 +19,14 @@
  * llms.txt, IndexNow, or any change guarantees inclusion, and never predict citation likelihood.
  * [A7] side-by-side is only possible for a cited URL the user approved for a single fetch; no such
  * snapshot mechanism exists yet, so page-change proposals are verified only when our target page has a
- * crawl snapshot, otherwise verified=false with "review required".
+ * crawl snapshot (cited as 'crawl' evidence with observable attributes only, and passed to the writer
+ * as PAGE_EVIDENCE), otherwise verified=false with "review required". The writer can never upgrade
+ * verification.
+ * Selection: eligible candidates in priority order until the day's remaining slots are filled; a
+ * candidate without observation evidence is rejected (insufficient_evidence) and frees its slot.
  * Every candidate gets a decision record: selected, or rejected with duplicate | low_fit |
- * decision_unavailable | budget | daily_cap | validation_failed (draft only).
+ * decision_unavailable | budget | daily_cap | insufficient_evidence; a writer draft that was not used
+ * gets a `<dedupKey>:draft` record (validation_failed, or the writer failure reason).
  */
 import type { EvidenceBullet, EvidenceSource, Level, SourceType, Tier } from "@shared/types";
 import type { RunContext } from "../runs/context";
@@ -32,6 +37,7 @@ import { newId } from "../lib/ids";
 import { iso } from "../lib/time";
 import { parseJson } from "../lib/db";
 import { BudgetExceededError } from "../lib/errors";
+import { createEvidence, EVIDENCE_TEXT_MAX } from "../recommendations/evidence";
 import { isDuplicate, remainingToday, saveRecommendation, type RecommendationDraft } from "../recommendations/store";
 import { validateDraft } from "../writing/validate";
 import { GEO_WRITER_SYSTEM } from "../writing/prompts";
@@ -340,6 +346,63 @@ export async function buildCandidates(input: Awaited<ReturnType<typeof loadInput
   return out;
 }
 
+interface SnapshotAttributesRow {
+  id: string;
+  fetched_at: string;
+  word_count: number | null;
+  first_paragraph: string | null;
+  author: string | null;
+  last_updated: string | null;
+  outbound_citations: number | null;
+  table_count: number | null;
+  jsonld_types_json: string;
+}
+
+const JSONLD_TYPE = /^[A-Za-z][A-Za-z0-9:_-]{0,60}$/;
+
+/**
+ * Crawl evidence for OUR target page (latest usable snapshot), as observable attributes only ([A7]
+ * list): first paragraph present, named author, visible last-updated date, outbound source links,
+ * tables, word count, structured data types. No page prose is copied, so nothing from the page can
+ * reach the writer as text. Returns null when the page has not been crawled.
+ */
+async function crawlPageEvidence(ctx: RunContext, url: string): Promise<EvidenceLite | null> {
+  const s = await ctx.db.first<SnapshotAttributesRow>(
+    `SELECT s.id, s.fetched_at, s.word_count, s.first_paragraph, s.author, s.last_updated, s.outbound_citations, s.table_count, s.jsonld_types_json
+       FROM page_snapshots s JOIN pages p ON p.id = s.page_id AND p.workspace_id = s.workspace_id
+      WHERE s.workspace_id = ? AND s.project_id = ? AND p.url = ? AND s.skipped_reason IS NULL
+      ORDER BY s.fetched_at DESC LIMIT 1`,
+    ctx.project.workspaceId,
+    ctx.project.id,
+    url,
+  );
+  if (!s) return null;
+  const types = parseJson<unknown[]>(s.jsonld_types_json, [])
+    .filter((t): t is string => typeof t === "string" && JSONLD_TYPE.test(t))
+    .slice(0, 10);
+  const present = (v: string | null) => (v && v.trim() ? "present" : "absent");
+  const count = (n: number | null) => (n === null ? "unknown" : String(n));
+  const day = s.fetched_at.slice(0, 10);
+  const data = {
+    kind: "page_attributes",
+    url,
+    snapshotId: s.id,
+    fetchedAt: s.fetched_at,
+    firstParagraph: present(s.first_paragraph),
+    namedAuthor: present(s.author),
+    visibleLastUpdated: present(s.last_updated),
+    outboundSourceLinks: s.outbound_citations,
+    tables: s.table_count,
+    wordCount: s.word_count,
+    structuredDataTypes: types,
+  };
+  const text =
+    `Crawled ${url} on ${day}: first paragraph ${data.firstParagraph}; named author ${data.namedAuthor}; visible last-updated date ${data.visibleLastUpdated}; ` +
+    `outbound source links ${count(s.outbound_citations)}; tables ${count(s.table_count)}; word count ${count(s.word_count)}; structured data types: ${types.join(", ") || "none"}.`;
+  const id = await createEvidence(ctx, { source: "crawl", refId: s.id, window: day, text, data });
+  return { id, ref_id: s.id, source: "crawl", text: text.slice(0, EVIDENCE_TEXT_MAX), data_json: JSON.stringify(data), tainted: 0, window: day };
+}
+
 function ageDays(now: Date, at: string): number {
   const t = Date.parse(at);
   return Number.isFinite(t) ? Math.max(0, (now.getTime() - t) / 86400_000) : PROPOSAL_WINDOW_DAYS;
@@ -459,7 +522,13 @@ async function writerDraft(ctx: RunContext, c: GeoCandidate, evidence: EvidenceL
   const input = {
     OBSERVATIONS: observations,
     EVIDENCE: usable.map((e) => ({ id: e.id, source: e.source, window: e.window, text: e.text })),
-    PAGE_EVIDENCE: [],
+    PAGE_EVIDENCE: usable
+      .filter((e) => e.source === "crawl")
+      .map((e) => {
+        const d = parseJson<Record<string, unknown>>(e.data_json, {});
+        const { kind: _kind, url, ...attributes } = d;
+        return { id: e.id, url, attributes };
+      }),
     CONTEXT_DOCS: positioning ? [{ id: `ctx_positioning_v${positioning.version}`, kind: "positioning", version: positioning.version, excerpt: positioning.content.slice(0, 1500) }] : [],
     PROPOSAL: { issue_type: c.issueType, summary: c.summary, scope: c.scope, target: c.target, verified },
   };
@@ -596,33 +665,29 @@ export async function generateGeoProposals(ctx: RunContext): Promise<GeoProposal
   }
   eligible.sort((a, b) => b.priority - a.priority);
 
+  // Highest priority first; a candidate rejected for missing evidence frees its slot for the next one.
   let created = 0;
-  const selectedTarget = eligible.slice(0, remaining);
-  for (const c of eligible.slice(remaining)) {
-    record(c.dedupKey, "rejected", "daily_cap", c.fit, jevMeta);
-    rejected++;
-  }
-  for (const c of selectedTarget) {
+  for (const c of eligible) {
+    if (created >= remaining) {
+      record(c.dedupKey, "rejected", "daily_cap", c.fit, jevMeta);
+      rejected++;
+      continue;
+    }
     const obsIds = new Set(c.observations.map((o) => o.id));
     const ev = inputs.evidence.filter((e) => obsIds.has(e.ref_id));
     const summaries = ev.filter((e) => parseJson<{ kind?: string }>(e.data_json, {}).kind === "summary").slice(0, 6);
     const passages = ev.filter((e) => parseJson<{ kind?: string }>(e.data_json, {}).kind === "passage").slice(0, 2);
-    const evidence = [...summaries, ...passages];
-    if (evidence.length === 0) {
+    const observationEvidence = [...summaries, ...passages];
+    if (observationEvidence.length === 0) {
       record(c.dedupKey, "rejected", "insufficient_evidence", c.fit, jevMeta);
       rejected++;
       continue;
     }
-    let verified = false;
-    if (c.target.kind === "url" && c.target.url) {
-      const snap = await ctx.db.first(
-        `SELECT s.id FROM page_snapshots s JOIN pages p ON p.id = s.page_id WHERE s.workspace_id = ? AND s.project_id = ? AND p.url = ? AND s.skipped_reason IS NULL LIMIT 1`,
-        ws,
-        pid,
-        c.target.url,
-      );
-      verified = snap !== null;
-    }
+    // verified = our own target page has a usable crawl snapshot, cited as crawl evidence. A cited
+    // third-party page is never fetched here ([A7] requires the user's approval of that single URL).
+    const page = c.target.kind === "url" && c.target.url ? await crawlPageEvidence(ctx, c.target.url) : null;
+    const verified = page !== null;
+    const evidence = page ? [page, ...observationEvidence] : observationEvidence;
     const w = await writerDraft(ctx, c, evidence, verified, inputs.positioning);
     if (w.failure && ctx.writer) {
       const reason = /writer (call failed|budget)/.test(w.failure) ? (w.failure.includes("budget") ? "budget" : "decision_unavailable") : w.failure === "all evidence tainted" ? "insufficient_evidence" : "validation_failed";

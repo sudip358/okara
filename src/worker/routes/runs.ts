@@ -21,7 +21,7 @@ import { loadProjectLimits } from "../runs/budget";
 import { releaseRunLock } from "../runs/locks";
 import type { OrchestrateDeps } from "../runs/orchestrate";
 import type { RunRow } from "../runs/runtime";
-import { claimAndLock, createRun, startRun, toRunSummary } from "../runs/runs-service";
+import { claimAndLock, createManualRun, startRun, toRunSummary } from "../runs/runs-service";
 
 export const MANUAL_RUNS_PER_PROJECT_PER_DAY = 3;
 
@@ -121,30 +121,21 @@ export function createRunRoutes(deps: RunRouteDeps = {}) {
     const agent = parsed.data.agent;
     if (project.is_demo === 1) throw new HttpError(409, "demo_project", "Demo projects use fixture data; runs are disabled.");
 
-    const day = utcDay(now);
-    const used = await db.first<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM agent_runs
-        WHERE workspace_id = ? AND project_id = ? AND trigger = 'manual' AND substr(created_at, 1, 10) = ?`,
-      project.workspace_id,
-      project.id,
-      day,
-    );
+    // Same project + agent within the same minute (double submit) returns the existing run.
     const key = `${project.id}:${agent}:manual:${Math.floor(now.getTime() / 60000)}`;
-    const dup = await db.first<RunRow>("SELECT * FROM agent_runs WHERE idempotency_key = ? AND project_id = ?", key, project.id);
-    if (dup) return c.json({ data: toRunSummary(dup) });
-    if ((used?.n ?? 0) >= MANUAL_RUNS_PER_PROJECT_PER_DAY) {
-      throw new HttpError(429, "quota_exceeded", `Manual run limit reached (${MANUAL_RUNS_PER_PROJECT_PER_DAY} per project per day). Scheduled runs continue daily.`);
-    }
-
-    const { runId, created } = await createRun(db, {
+    const result = await createManualRun(db, {
       workspaceId: project.workspace_id,
       projectId: project.id,
       agent,
-      trigger: "manual",
       idempotencyKey: key,
       createdBy: user.id,
       now,
+      perDay: MANUAL_RUNS_PER_PROJECT_PER_DAY,
     });
+    if (result.quotaExceeded || !result.runId) {
+      throw new HttpError(429, "quota_exceeded", `Manual run limit reached (${MANUAL_RUNS_PER_PROJECT_PER_DAY} per project per UTC day). Scheduled runs continue daily.`);
+    }
+    const { runId, created } = result;
     const ref = { id: runId, projectId: project.id, agent };
     if (created) {
       const claim = await claimAndLock(db, ref, now, Boolean(c.env.AGENT_RUN));

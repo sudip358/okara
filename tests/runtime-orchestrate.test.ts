@@ -212,6 +212,34 @@ describe("scheduler", () => {
     expect(await currentLockHolder(db, projectId, "seo", FIXED_NOW)).not.toBeNull();
   });
 
+  it("never schedules demo projects or projects with scheduling disabled", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const demo = await seedProject(env, u.workspaceId, { is_demo: 1 });
+    const off = await seedProject(env, u.workspaceId, { schedule_enabled: 0 });
+    const r = await dispatchDueRuns(env, FIXED_NOW, { deps: deps(env, { id: demo, workspaceId: u.workspaceId }, {}) });
+    expect(r).toMatchObject({ created: 0, started: 0 });
+    const n = await new Db(env.DB).first<{ n: number }>("SELECT COUNT(*) AS n FROM agent_runs WHERE project_id IN (?, ?)", demo, off);
+    expect(n?.n).toBe(0);
+  });
+
+  it("marks a dispatched run that never started as failed once its lock has expired", async () => {
+    const { env, db, projectId } = await setup();
+    const created: unknown[] = [];
+    const wfEnv = { ...env, AGENT_RUN: { create: async (o: unknown) => (created.push(o), {}) } as unknown as Workflow };
+    await dispatchDueRuns(wfEnv, FIXED_NOW);
+    expect(created).toHaveLength(2);
+    // The Workflow instances never ran. One hour later the runs are still pending (locks live).
+    await dispatchDueRuns(wfEnv, new Date(FIXED_NOW.getTime() + 30 * 60_000));
+    expect((await db.all<{ status: string }>("SELECT status FROM agent_runs")).every((r) => r.status === "pending")).toBe(true);
+    // Past 2 x lock TTL with no live lock: failed with an honest error, and the lock can be taken again.
+    const later = new Date(FIXED_NOW.getTime() + 3 * 3600_000);
+    await dispatchDueRuns(wfEnv, later);
+    const rows = await db.all<{ status: string; error: string | null }>("SELECT status, error FROM agent_runs");
+    expect(rows.every((r) => r.status === "failed" && (r.error ?? "").includes("never started"))).toBe(true);
+    expect(await acquireRunLock(db, projectId, "seo", "run_next", later)).toBe(true);
+  });
+
   it("a locked project+agent is retried on a later tick", async () => {
     const { env, db, u, projectId } = await setup();
     await acquireRunLock(db, projectId, "seo", "run_manual", FIXED_NOW, 600);

@@ -95,6 +95,27 @@ describe("runs routes", () => {
     expect(over.json.error.code).toBe("quota_exceeded");
   });
 
+  it("the manual-run quota holds under concurrent requests for different agents", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const pid = await seedProject(env, u.workspaceId);
+    const db = new Db(env.DB);
+    for (let i = 1; i <= 2; i++) {
+      await db.insert("agent_runs", { id: newId("run"), workspace_id: u.workspaceId, project_id: pid, agent: "seo", trigger: "manual", idempotency_key: `prev-${i}`, status: "completed", created_at: `2026-09-30T0${i}:00:00.000Z` });
+    }
+    const { call } = makeApp(env, u.userId);
+    const [a, b] = await Promise.all([call("POST", `/projects/${pid}/runs`, { agent: "seo" }), call("POST", `/projects/${pid}/runs`, { agent: "geo" })]);
+    expect([a.status, b.status].sort()).toEqual([201, 429]);
+    const n = await db.first<{ n: number }>("SELECT COUNT(*) AS n FROM agent_runs WHERE trigger = 'manual'");
+    expect(n?.n).toBe(3);
+    // Scheduled runs never count against the manual quota.
+    const other = await seedProject(env, u.workspaceId);
+    for (const k of ["a", "b", "c"]) {
+      await db.insert("agent_runs", { id: newId("run"), workspace_id: u.workspaceId, project_id: other, agent: "seo", trigger: "schedule", idempotency_key: `${other}:${k}`, status: "completed", created_at: FIXED_NOW.toISOString() });
+    }
+    expect((await call("POST", `/projects/${other}/runs`, { agent: "seo" })).status).toBe(201);
+  });
+
   it("rejects a manual run while another run holds the lock, without consuming quota", async () => {
     const env = createTestEnv();
     const u = await seedUser(env);
@@ -246,6 +267,35 @@ describe("recommendation routes", () => {
     expect(detail.json.data.evidence.map((e: any) => e.id)).toEqual([evId]);
   });
 
+  it("keeps question-qualified provider fields (SEO) and qualifies bare ones with their question (GEO)", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const pid = await seedProject(env, u.workspaceId);
+    const seoFields = {
+      "seo.action_choice.choice": "rewrite_title_meta",
+      "seo.action_choice.confidence": 0.84,
+      "seo.action_choice.runner_up": "add_section",
+      "seo.query_page_relevance.noul": 0.91,
+      "seo.issue_severity.score": 3.2,
+      "seo.priority": 7,
+    };
+    const { id: seoId } = await seedRec(env, u.workspaceId, pid, { decision_label: "flag", decision_score_json: JSON.stringify(seoFields) });
+    const { id: geoId } = await seedRec(env, u.workspaceId, pid, { agent: "geo", decision_score_json: JSON.stringify({ question: "geo.proposal_fit", score: 3, confidence: 0.72 }) });
+    const { call } = makeApp(env, u.userId);
+    const seo = (await call("GET", `/recommendations/${seoId}`)).json.data;
+    expect(seo.decision.tier).toBe("flag");
+    expect(seo.decision.fields).toEqual({
+      "seo.action_choice.choice": "rewrite_title_meta",
+      "seo.action_choice.confidence": 0.84,
+      "seo.query_page_relevance.noul": 0.91,
+      "seo.issue_severity.score": 3.2,
+    });
+    const geo = (await call("GET", `/recommendations/${geoId}`)).json.data;
+    expect(geo.decision.fields).toEqual({ "geo.proposal_fit.score": 3, "geo.proposal_fit.confidence": 0.72 });
+    // A Noul answer never shows a confidence field unless the provider stored one for a Choice/Score.
+    expect(Object.keys(seo.decision.fields).some((k: string) => k.startsWith("seo.query_page_relevance.") && k.endsWith(".confidence"))).toBe(false);
+  });
+
   it("[A18] feedback creates a labelled row", async () => {
     const env = createTestEnv();
     const u = await seedUser(env);
@@ -286,6 +336,14 @@ describe("recommendation routes", () => {
     expect(seo).toMatchObject({ newToday: 1, openApprovals: 2, state: "ready", zeroStateMessage: null });
     const geo = r.json.data.agents.find((a: any) => a.agent === "geo");
     expect(geo).toMatchObject({ newToday: 0, state: "ready", zeroStateMessage: ZERO_STATE_MESSAGE });
+    // Recent run events carry the run's agent for the [SEO]/[GEO] run log.
+    const db = new Db(env.DB);
+    const runId = newId("run");
+    await db.insert("agent_runs", { id: runId, workspace_id: u.workspaceId, project_id: pid, agent: "geo", trigger: "schedule", idempotency_key: "att-k", status: "completed", created_at: FIXED_NOW.toISOString() });
+    await db.insert("run_events", { id: newId("evt"), workspace_id: u.workspaceId, project_id: pid, run_id: runId, step: "geo.batch", status: "completed", message: "5 prompts", created_at: FIXED_NOW.toISOString() });
+    const r2 = await call("GET", `/projects/${pid}/attention`);
+    expect(r2.json.data.recentEvents[0]).toMatchObject({ runId, agent: "geo", step: "geo.batch", status: "completed" });
+    expect(r2.json.data.agents.find((a: any) => a.agent === "geo").lastRun).toMatchObject({ id: runId, status: "completed" });
     const demo = await seedProject(env, u.workspaceId, { is_demo: 1 });
     const d = await call("GET", `/projects/${demo}/attention`);
     expect(d.json.data.agents.every((a: any) => a.state === "demo")).toBe(true);

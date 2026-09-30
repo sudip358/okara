@@ -52,6 +52,53 @@ export async function createRun(db: Db, input: CreateRunInput): Promise<{ runId:
 }
 
 /**
+ * Manual run with an atomic per-project daily quota: one conditional INSERT ... SELECT whose WHERE
+ * counts today's manual runs, so concurrent requests (e.g. seo and geo at once) cannot exceed the quota.
+ * Returns the existing run for a repeated idempotency key; `quotaExceeded` when the insert was refused.
+ */
+export async function createManualRun(
+  db: Db,
+  input: Omit<CreateRunInput, "trigger"> & { perDay: number },
+): Promise<{ runId: string | null; created: boolean; quotaExceeded: boolean }> {
+  const existing = await db.first<{ id: string }>(
+    "SELECT id FROM agent_runs WHERE idempotency_key = ? AND workspace_id = ? AND project_id = ?",
+    input.idempotencyKey,
+    input.workspaceId,
+    input.projectId,
+  );
+  if (existing) return { runId: existing.id, created: false, quotaExceeded: false };
+  const id = newId("run");
+  const nowIso = iso(input.now);
+  const r = await db.run(
+    `INSERT OR IGNORE INTO agent_runs (id, workspace_id, project_id, agent, trigger, idempotency_key, status, policy_version, created_by, created_at)
+     SELECT ?, ?, ?, ?, 'manual', ?, 'pending', ?, ?, ?
+      WHERE (SELECT COUNT(*) FROM agent_runs
+              WHERE workspace_id = ? AND project_id = ? AND trigger = 'manual' AND substr(created_at, 1, 10) = ?) < ?`,
+    id,
+    input.workspaceId,
+    input.projectId,
+    input.agent,
+    input.idempotencyKey,
+    POLICY_VERSION,
+    input.createdBy,
+    nowIso,
+    input.workspaceId,
+    input.projectId,
+    nowIso.slice(0, 10),
+    input.perDay,
+  );
+  if (r.changes === 1) return { runId: id, created: true, quotaExceeded: false };
+  const dup = await db.first<{ id: string }>(
+    "SELECT id FROM agent_runs WHERE idempotency_key = ? AND workspace_id = ? AND project_id = ?",
+    input.idempotencyKey,
+    input.workspaceId,
+    input.projectId,
+  );
+  if (dup) return { runId: dup.id, created: false, quotaExceeded: false };
+  return { runId: null, created: false, quotaExceeded: true };
+}
+
+/**
  * Atomically claim a pending run for dispatch and take the project+agent lock. Returns false when
  * another dispatcher already claimed it, or when another run holds the lock (claim is undone so a
  * later tick can retry).

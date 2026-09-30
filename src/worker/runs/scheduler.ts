@@ -4,8 +4,9 @@
  *   idempotency_key = `${projectId}:${agent}:${YYYY-MM-DD}` -> INSERT OR IGNORE, so a duplicate tick
  *   can never create a second run. The pending run is then atomically claimed, locked, and started
  *   as a Workflow instance (or inline when the AGENT_RUN binding is absent, e.g. tests/dev).
- * Also sweeps stale work: pending schedule runs from earlier days (never started) and 'running'
- * runs whose lock has expired are marked failed so history stays honest.
+ * Also sweeps stale work: pending schedule runs from earlier days (never started), dispatched runs
+ * that never started, and 'running' runs whose lock has expired are marked failed so history stays
+ * honest.
  */
 import type { AgentKind } from "@shared/types";
 import type { Env } from "../env";
@@ -88,6 +89,15 @@ async function sweepStale(db: Db, now: Date): Promise<void> {
     today,
   );
   const cutoff = iso(addSeconds(now, -2 * LOCK_TTL_SECONDS));
+  // Claimed for dispatch (workflow_instance_id set) but never started, and its lock has expired.
+  await db.run(
+    `UPDATE agent_runs SET status = 'failed', error = 'Dispatched but never started before its lock expired.', finished_at = ?
+      WHERE status = 'pending' AND workflow_instance_id IS NOT NULL AND started_at IS NULL AND created_at < ?
+        AND NOT EXISTS (SELECT 1 FROM run_locks l WHERE l.run_id = agent_runs.id AND l.expires_at > ?)`,
+    iso(now),
+    cutoff,
+    iso(now),
+  );
   await db.run(
     `UPDATE agent_runs SET status = 'failed', error = 'Run did not finish before its lock expired.', finished_at = ?
       WHERE status = 'running' AND started_at IS NOT NULL AND started_at < ?

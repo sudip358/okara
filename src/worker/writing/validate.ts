@@ -3,6 +3,9 @@
  *
  * Errors (draft is rejected):
  *  - a cited evidence id (argument or inline "[ev_...]" reference) that is not in `evidence`
+ *  - a rule id (e.g. SEO-TITLE-MISSING, ECOM-..., AI-...) or decision id (dec_...) referenced in the text
+ *    that the writer was never given: known ids are those appearing in any supplied evidence (text or
+ *    data) plus `opts.knownRuleIds` / `opts.knownDecisionIds`
  *  - a number / percentage / money amount / dimension in the text that does not appear in the text
  *    or data of the cited evidence (1,234 == 1234; 12.5% == 12.50; $1,299.00 == 1299)
  *  - a certification / spec term (UL, ETL, CSA, CE, damp/wet rating, IP44/IP65, dimmable, lumens,
@@ -28,9 +31,20 @@ export interface ValidationResult {
   confirmPlaceholders: string[];
 }
 
-export const VALIDATOR_VERSION = "validator-2026-09-30.1";
+export interface ValidateOptions {
+  /** Rule ids the caller knows exist (e.g. the rule registry); ids in supplied evidence are always known. */
+  knownRuleIds?: Iterable<string>;
+  /** Decision record ids the writer was given; ids in supplied evidence are always known. */
+  knownDecisionIds?: Iterable<string>;
+}
+
+export const VALIDATOR_VERSION = "validator-2026-09-30.2";
 
 const PLACEHOLDER_RE = /\[confirm:\s*([^\]]*)\]/gi;
+/** Rule registry id shape (src/worker/seo/rules/registry.ts): uppercase prefix + dash-separated segments. */
+const RULE_ID_RE = /(?<![A-Za-z0-9_-])(?:SEO|ECOM|AI|GEO)-[A-Z0-9]+(?:-[A-Z0-9]+)*(?![A-Za-z0-9_-])/g;
+/** Decision record ids (lib/ids.ts newId("dec")): lowercase base32 suffix. */
+const DECISION_ID_RE = /\bdec_[a-z0-9]+\b/g;
 const EVIDENCE_REF_RE = /\[\s*((?:ev_[A-Za-z0-9_-]+)(?:\s*[,;]\s*ev_[A-Za-z0-9_-]+)*)\s*\]/g;
 const URL_RE = /\bhttps?:\/\/[^\s<>"'\])]+/gi;
 const DATE_RE = /\b\d{4}-\d{2}-\d{2}\b/g;
@@ -84,7 +98,7 @@ const GUARANTEE_RULES: GuaranteeRule[] = [
 
 const NEGATIONS = /\b(?:not|no|never|cannot|can't|doesn't|don't|won't|without)\b(?:\s+\w+){0,2}\s*$/i;
 
-export function validateDraft(textFields: string[], citedEvidenceIds: string[], evidence: ValidationEvidence[]): ValidationResult {
+export function validateDraft(textFields: string[], citedEvidenceIds: string[], evidence: ValidationEvidence[], opts: ValidateOptions = {}): ValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
   const confirmPlaceholders: string[] = [];
@@ -133,6 +147,18 @@ export function validateDraft(textFields: string[], citedEvidenceIds: string[], 
 
   // 4. Text to check: remove placeholders and evidence refs.
   let checkText = fullText.replace(PLACEHOLDER_RE, " ").replace(EVIDENCE_REF_RE, " ");
+
+  // Rule and decision ids [A17]: known only if supplied to the writer (any evidence) or by the caller.
+  const supplied = evidence.map((e) => `${e.text ?? ""}\n${e.data !== undefined && e.data !== null ? flattenData(e.data) : ""}`).join("\n");
+  const knownRules = new Set<string>([...(opts.knownRuleIds ?? []), ...(supplied.match(RULE_ID_RE) ?? [])]);
+  const knownDecisions = new Set<string>([...(opts.knownDecisionIds ?? []), ...(supplied.match(DECISION_ID_RE) ?? [])]);
+  for (const id of new Set(checkText.match(RULE_ID_RE) ?? [])) {
+    if (!knownRules.has(id)) errors.push(`Unknown rule id referenced in text: ${id}`);
+  }
+  for (const id of new Set(checkText.match(DECISION_ID_RE) ?? [])) {
+    if (!knownDecisions.has(id)) errors.push(`Unknown decision id referenced in text: ${id}`);
+  }
+  checkText = checkText.replace(RULE_ID_RE, " ").replace(DECISION_ID_RE, " ");
 
   // URLs: must appear in evidence (warning); removed before number checks.
   for (const url of checkText.match(URL_RE) ?? []) {

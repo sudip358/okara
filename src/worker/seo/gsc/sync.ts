@@ -8,10 +8,17 @@
  *       startRow, stopping at the project row cap (project_limits.gsc_rows). Hitting the cap while a
  *       full page was returned marks the sync truncated.
  *
+ * The ['page'] slice (a small share of the row budget) is an addition to the ['query','page'] slice:
+ * page rows include traffic from anonymized queries, so per-page heuristics (declining pages,
+ * internal links) do not have to sum query rows, which would undercount.
+ *
  * Limitations recorded on every sync: pagination does not guarantee complete query data (Google
  * omits anonymized queries and applies its own row limits), so slices never sum to property totals.
  * Quota/429 errors stop further requests immediately (no retry storm); what was fetched is kept and
- * the sync is 'partial' (or 'failed' if nothing usable was fetched).
+ * the sync is 'partial' (or 'failed' if nothing usable was fetched). `truncated` means the row cap
+ * was reached while Google was still returning full pages, so more rows may exist.
+ * Budget: `gsc_rows` is reserved at the project row cap and settled to the slice rows actually
+ * imported (the few totals/daily rows are not counted against the cap).
  */
 import type { RunContext } from "../../runs/context";
 import type { GscQueryRequest, GscRow } from "../../providers/types";
@@ -76,7 +83,7 @@ export async function syncGsc(ctx: RunContext, opts: SyncOptions = {}): Promise<
 
   let reservation: string | null = null;
   try {
-    reservation = rowCap > 0 ? await ctx.budget.reserve("gsc_rows", rowCap) : null;
+      reservation = rowCap > 0 ? await ctx.budget.reserve("gsc_rows", rowCap) : null;
   } catch (e) {
     if (e instanceof BudgetExceededError) {
       const note = "GSC row budget for today is used up; sync skipped.";
@@ -146,6 +153,7 @@ export async function syncGsc(ctx: RunContext, opts: SyncOptions = {}): Promise<
     insertedRows.length = 0;
   };
 
+  try {
   for (const which of ["current", "previous"] as const) {
     const w = windows[which];
     // (a) property totals
@@ -215,13 +223,20 @@ export async function syncGsc(ctx: RunContext, opts: SyncOptions = {}): Promise<
     if (outcome.kind !== "ok") break;
   }
   await flush();
+  } catch (e) {
+    // Unexpected failure (e.g. storage): keep what was committed and finalize the sync row below,
+    // so it never stays 'running' and the row budget is still settled.
+    insertedRows.length = 0;
+    outcome = { kind: "stopped", reason: "error", message: `GSC import failed: ${safeMessage(e)}` };
+  }
 
   // Status
   const haveCurrentTotals = totals.current !== null;
   const noData = outcome.kind === "ok" && (!totals.current || totals.current.impressions === 0) && totalRows === 0;
   let status: GscSyncSummary["status"];
   if (noData) status = "no_data";
-  else if (outcome.kind === "ok") status = totals.previous ? "completed" : "partial";
+  // A missing previous window is not an import failure (new properties have no history); it is noted.
+  else if (outcome.kind === "ok") status = "completed";
   else status = haveCurrentTotals ? "partial" : "failed";
 
   const notes: string[] = [];

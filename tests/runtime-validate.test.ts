@@ -112,6 +112,31 @@ describe("validateDraft [A10]/[A17]", () => {
     expect(validateDraft(["The page has 42 words [ev_crawl1]."], ["ev_crawl1"], ev).ok).toBe(true);
   });
 
+  it("[A17] rejects rule ids and decision ids the writer was never given", () => {
+    const withRule: ValidationEvidence[] = [
+      ...ev,
+      { id: "ev_rule", text: "Rule SEO-TITLE-MISSING (major) on https://shop.example.com/a: no <title>.", data: { ruleId: "SEO-TITLE-MISSING", decision: "dec_abc234" } },
+    ];
+    const ok = validateDraft(["Fix SEO-TITLE-MISSING on the page (see decision dec_abc234) [ev_rule]."], ["ev_rule"], withRule);
+    expect(ok.errors).toEqual([]);
+    const bad = validateDraft(["Also fix SEO-CANONICAL-MISSING and ECOM-MADE-UP per dec_zzz999 [ev_rule]."], ["ev_rule"], withRule);
+    expect(bad.ok).toBe(false);
+    expect(bad.errors).toContain("Unknown rule id referenced in text: SEO-CANONICAL-MISSING");
+    expect(bad.errors).toContain("Unknown rule id referenced in text: ECOM-MADE-UP");
+    expect(bad.errors).toContain("Unknown decision id referenced in text: dec_zzz999");
+    // Caller-supplied known ids (e.g. the rule registry) are accepted.
+    const reg = validateDraft(["Also check SEO-CANONICAL-MISSING [ev_rule]."], ["ev_rule"], withRule, { knownRuleIds: ["SEO-CANONICAL-MISSING"] });
+    expect(reg.errors).toEqual([]);
+    // Digits inside rule ids (SEO-H1-MISSING, SEO-STATUS-4XX) are not treated as invented numbers.
+    const digits = validateDraft(["See SEO-H1-MISSING and SEO-STATUS-4XX [ev_rule]."], ["ev_rule"], withRule, { knownRuleIds: ["SEO-H1-MISSING", "SEO-STATUS-4XX"] });
+    expect(digits.errors).toEqual([]);
+  });
+
+  it("does not mistake ordinary words for rule ids", () => {
+    const r = validateDraft(["Make the SEO title match the query; AI answers cite pages [ev_gsc1]."], ["ev_gsc1"], ev);
+    expect(r.errors).toEqual([]);
+  });
+
   it("warns on URLs that are not in cited evidence", () => {
     const r = validateDraft(["Link from https://other.example.com/page [ev_crawl1]."], ["ev_crawl1"], ev);
     expect(r.warnings.join()).toContain("URL not found");
