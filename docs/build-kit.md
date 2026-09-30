@@ -293,6 +293,8 @@ Jev returns typed answers, not text. Response fields per the TypeSafe docs:
 
 Code builds the input state (compact JSON with evidence IDs). Jev answers the questions. Code computes priority and routes the result.
 
+**Owner direction (2026-09-30): prefer Noul (yes/no) questions.** Use a Noul whenever the decision is binary (should this link exist, is this query from a buyer, does the title match the query, does the opening answer the query directly, does the page cover topic N, is this content outdated, is this query about the business). Use Choice only for genuinely categorical labels (search intent, page action, source type, link role) and Score only where ordered levels add real information. Many Nouls can be asked in one call; code combines them (e.g. per-topic Nouls aggregated into covered / partial / missing). Noul answers are tiered by the probability bands in `runs/policy.ts` and calibrated with the [A5] evaluation set.
+
 Authoring rules (taken from working open-source Jev integrations; see section 3.4):
 - **Name state fields and point at them in the question text** (for example "Given `page` and `target_query`…"). Questions can reference state by path.
 - **Write every Choice option, Score level, and Noul true/false criterion as a full descriptive sentence**, not a bare label. Descriptive levels ("Minutes. A handful of edits to headings…") are what make the answer calibrated and auditable.
