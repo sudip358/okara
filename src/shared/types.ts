@@ -181,6 +181,12 @@ export interface SeoOverview {
   limitations: string[];
   /** First-party demand curve from GSC impressions (not market search volume). null when no query data. */
   demandCurve?: DemandCurve | null;
+  /** Brand vs non-brand split of current-window query data (deterministic alias matching). [A23] */
+  brandSplit?: {
+    method: string;
+    brand: { queries: number; clicks: number; impressions: number; ctr: Ratio };
+    nonBrand: { queries: number; clicks: number; impressions: number; ctr: Ratio };
+  } | null;
 }
 
 export type DemandSegment = "head" | "middle" | "long_tail";
@@ -696,5 +702,53 @@ export interface LinkSuggestionReport {
   suggestions: LinkSuggestion[];
   genericAnchors: Array<{ sourceUrl: string; targetUrl: string; anchor: string }>;
   completeness: Completeness | null;
+  labels: string[];
+}
+
+// ------------------------------------------------------------------ SEO views from [A23]/[A25]
+export interface BuyerQueryRow {
+  query: string;
+  intent: "transactional" | "commercial_investigation";
+  intentTier: Tier;
+  impressions: number;
+  clicks: number;
+  position: number | null;
+  topPage: string | null;
+  segment: DemandSegment | null;
+}
+
+export interface TranslationOpportunityRow {
+  country: string; // ISO 3166-1 alpha-3 as returned by GSC
+  impressions: number;
+  clicks: number;
+  shareOfImpressions: Ratio;
+  topPages: string[];
+  servedLanguage: boolean | null; // hreflang/lang for that market detected on crawled pages; null = unknown
+  note: string;
+}
+
+// ------------------------------------------------------------------ draft / page quality check [A23]
+export interface DraftCheckRequest {
+  targetQuery: string;
+  /** Either an existing crawled page or pasted draft text. */
+  pageId?: string;
+  draftText?: string; // max 60,000 chars
+  title?: string;
+  metaDescription?: string;
+}
+
+export interface DraftCheckFlag {
+  kind: "unsupported_claim" | "fabricated_testimonial" | "filler" | "guarantee_language";
+  text: string; // exact excerpt, plain text
+  method: "rule" | "jev";
+  noul: number | null;
+}
+
+export interface DraftCheckResult {
+  state: CapabilityState;
+  verdict: "pass" | "fail" | "needs_review";
+  checklist: Checklist; // kind "page" items evaluated against the draft
+  flags: DraftCheckFlag[];
+  jevUsed: boolean;
   labels: string[];
 }
