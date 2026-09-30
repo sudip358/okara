@@ -376,7 +376,9 @@ const onPage: ItemDef[] = [
       if (!ctx.hasGsc) return noGsc(ctx, guidance, "heuristic");
       if (!ctx.hasCrawl) return noCrawl(ctx, guidance, "heuristic");
       const top = ctx.topQueryByPage();
+      // Home pages mostly get brand/navigational queries, so they are not checked here.
       const checked = ctx.analyzable().flatMap((s) => {
+        if (s.pageType === "home") return [];
         const q = top.get(normalizeUrlKey(s.url));
         if (!q?.query) return [];
         const cov = coverage(q.query, tokenSet(s.firstParagraph));
@@ -389,7 +391,7 @@ const onPage: ItemDef[] = [
         summary:
           checked.length === 0
             ? "No crawled page has a matching top Search Console query yet."
-            : `${checked.length - miss.length} of ${checked.length} pages mention most words of their top GSC query in the first paragraph.`,
+            : `${checked.length - miss.length} of ${checked.length} non-home pages mention most words of their top GSC query in the first paragraph.`,
         evidence: urlEvidence(miss.map((c) => ({ url: c.s.url, detail: `top query "${c.query}": ${pct(c.cov)} of its words in the first paragraph` })), "Opening misses query"),
         completeness: ctx.gscCompleteness(),
         guidance,
@@ -470,7 +472,7 @@ const quickWins: ItemDef[] = [
       const long = ctx.analyzable().filter((s) => (s.title?.trim().length ?? 0) > THRESHOLDS.titleMax);
       return manualItem(
         ctx.hasCrawl
-          ? `Run the site: search yourself. From the crawl, ${plural(long.length, "title")} exceed ${THRESHOLDS.titleMax} characters and are likely candidates for truncation.`
+          ? `Run the site: search yourself. From the crawl, ${plural(long.length, "title")} over ${THRESHOLDS.titleMax} characters ${long.length === 1 ? "is a likely truncation candidate" : "are likely truncation candidates"}.`
           : "Run the site: search yourself; no crawl yet to suggest likely truncated titles.",
         "Search site:yourdomain in Google, note titles that are cut off or rewritten, and shorten or clarify them.",
         {
@@ -520,7 +522,7 @@ const quickWins: ItemDef[] = [
     evaluate(ctx) {
       const questions = [...new Set(ctx.qpCurrent().filter((r) => isQuestionQuery(r.query!)).map((r) => r.query!))];
       return notConnected(
-        `"People also ask" needs SERP data, which is not connected. As a first-party alternative, ${plural(questions.length, "question-form query", "question-form queries")} appear in your Search Console data.`,
+        `"People also ask" needs SERP data, which is not connected. As a first-party alternative, your Search Console data has ${plural(questions.length, "question-form query", "question-form queries")}.`,
         "Answer recurring questions on the most relevant page (a short heading plus a direct answer). Check live results yourself.",
         {
           evidence: questions.slice(0, 5).map((q) => ({ label: "GSC question query", url: null, detail: q })),
