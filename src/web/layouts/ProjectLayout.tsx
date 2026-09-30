@@ -8,6 +8,7 @@ import { Badge, DemoBanner, EmptyState, ErrorState, LoadingState, buttonClass, c
 
 const NAV: Array<{ to: string; label: string; end?: boolean; group?: string }> = [
   { to: "", label: "Overview", end: true },
+  { to: "checklists", label: "Checklists" },
   { to: "seo", label: "SEO audit", group: "SEO" },
   { to: "recommendations", label: "Recommendations" },
   { to: "geo/prompts", label: "GEO prompts", group: "GEO" },

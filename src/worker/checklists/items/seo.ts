@@ -415,7 +415,7 @@ const onPage: ItemDef[] = [
       const withImages = pages.filter((s) => (s.imagesTotal ?? 0) > 0);
       const badPages = withImages.filter((s) => (s.imagesMissingAlt ?? 0) > 0);
       return {
-        status: withImages.length === 0 ? "not_applicable" : ratioStatus(badPages.length, withImages.length),
+        status: withImages.length === 0 ? "not_applicable" : ratioStatus(missing, images),
         method: "measured",
         summary: `${missing} of ${images} images lack an alt attribute, on ${badPages.length} of ${withImages.length} pages with images.`,
         evidence: urlEvidence(badPages.map((s) => ({ url: s.url, detail: `${s.imagesMissingAlt} of ${s.imagesTotal} images without alt` })), "Missing alt"),

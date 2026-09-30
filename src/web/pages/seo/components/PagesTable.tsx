@@ -1,8 +1,10 @@
 /** Crawled pages with page type + classification method and a user correction control. */
 import { useState } from "react";
+import { Link } from "react-router";
 import type { PageRow, PageType } from "@shared/types";
 import { api, errorMessage } from "@web/lib/api";
 import { formatDateTime, formatNumber } from "@web/lib/format";
+import { projectPath } from "@web/lib/project-context";
 import { Badge, Card, EmptyState, TBody, TD, TH, THead, TR, Table, inputClass } from "@web/components/ui";
 import { PAGE_TYPES, PAGE_TYPE_LABEL } from "../lib";
 
@@ -41,6 +43,9 @@ export function PagesTable({ projectId, pages, onChanged }: { projectId: string;
               <TH>Page type</TH>
               <TH>Method</TH>
               <TH>Crawled</TH>
+              <TH>
+                <span className="sr-only">On-page checklist</span>
+              </TH>
             </TR>
           </THead>
           <TBody>
@@ -86,6 +91,11 @@ export function PagesTable({ projectId, pages, onChanged }: { projectId: string;
                 </TD>
                 <TD className="whitespace-nowrap text-xs text-zinc-600 dark:text-zinc-400">{p.pageTypeMethod}</TD>
                 <TD className="whitespace-nowrap text-xs text-zinc-600 dark:text-zinc-400">{formatDateTime(p.lastCrawledAt)}</TD>
+                <TD className="whitespace-nowrap text-xs">
+                  <Link to={projectPath(projectId, `pages/${encodeURIComponent(p.id)}/checklist`)} className="text-sky-800 underline dark:text-sky-300" aria-label={`On-page checklist for ${p.url}`}>
+                    Checklist
+                  </Link>
+                </TD>
               </TR>
             ))}
           </TBody>
