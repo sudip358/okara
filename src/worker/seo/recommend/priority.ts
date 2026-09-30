@@ -19,6 +19,9 @@
  *
  * With equal severity, reach makes a site-wide issue outrank a single-page one [A16]; a critical
  * finding outranks a cosmetic one through the severity term.
+ *
+ * Inputs are the project's own measurements only. The checklist's external "SEO tactics" reference
+ * tier (S-D) [A21] never enters this formula, and no projected traffic or ranking value does [A11].
  */
 import type { Level, Severity, Tier } from "@shared/types";
 

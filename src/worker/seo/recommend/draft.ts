@@ -208,7 +208,7 @@ const ACTION_TEXT: Record<ActionChoice, (target: string) => string> = {
   fix_structured_data: (t) => `Fix the structured data on ${t} so the reported properties are present and valid; [confirm: values for any missing required properties].`,
   fix_canonical_or_indexing: (t) => `Fix the canonical/indexing signals reported for ${t} so the intended URL is indexable and self-consistent; [confirm: the intended canonical URL and whether it should be indexed].`,
   consolidate_duplicate: (t) => `Review ${t} for consolidation: merge the overlapping content into the stronger URL and redirect or canonicalize the other; [confirm: which URL to keep].`,
-  new_page_candidate: (t) => `Review whether a new page is warranted for the search demand in the evidence${t === "the site" ? "" : ` (related: ${t})`}; a human must confirm scope before any drafting; [confirm: whether a page on this topic is wanted].`,
+  new_page_candidate: (t) => `Review whether a new page is needed for the search demand in the evidence${t === "the site" ? "" : ` (related: ${t})`}; a human must confirm scope before any drafting; [confirm: whether a page on this topic is wanted].`,
   no_action: () => "No change recommended.",
 };
 

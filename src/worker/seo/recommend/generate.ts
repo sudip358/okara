@@ -6,6 +6,18 @@
  *
  * Without Jev (ctx.decisions null): technical candidates are ranked deterministically; content
  * opportunities are rejected with reason 'decision_unavailable' — rankings are never faked.
+ *
+ * Dedup key = hash(project, url | template | site, issue type, evidence identity). The evidence
+ * identity is the stable part of the evidence (rule + group, or query + page), not its metric
+ * values, so a rerun with fresh numbers still matches an open/dismissed/implemented recommendation.
+ *
+ * Drafting: the writer (SEO_WRITER_SYSTEM + recommendation.v1 schema) output is zod-parsed and run
+ * through validateDraft; a failing draft is rejected 'validation_failed' and never saved. If the
+ * writer is not configured or cannot be reached, a deterministic template drafts from evidence
+ * (writer provider null). Draft attempts per run are capped (paid calls).
+ *
+ * The card's decision fields are the headline question's answer under the provider's real field
+ * names (choice/confidence, score/confidence, noul); every raw answer is on decision_records.
  */
 import type { Tier } from "@shared/types";
 import { BudgetExceededError } from "../../lib/errors";
@@ -45,10 +57,13 @@ export interface GenerateOptions {
   maxJudged?: number;
   /** Technical candidates whose severity is asked of Jev per run; the rest stay deterministic. */
   maxTechnicalJudged?: number;
+  /** Drafts attempted per run (writer calls are paid); the rest are rejected 'budget'. */
+  maxDraftAttempts?: number;
 }
 
 export const DEFAULT_MAX_JUDGED = 6;
 export const DEFAULT_MAX_TECHNICAL_JUDGED = 3;
+export const DEFAULT_MAX_DRAFT_ATTEMPTS = 6;
 export const NO_NEW_OPPORTUNITIES = "No new verified opportunities.";
 
 interface Pending {
@@ -218,12 +233,15 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
 
   // 4. Draft, validate, save the top `remaining`.
   let created = 0;
+  let attempts = 0;
+  const maxAttempts = opts.maxDraftAttempts ?? DEFAULT_MAX_DRAFT_ATTEMPTS;
   const contextDocs = pillarContext(inputs);
   for (const p of ranked) {
-    if (created >= remaining) {
+    if (created >= remaining || attempts >= maxAttempts) {
       await reject(p, "budget", p.evaluation!.tier);
       continue;
     }
+    attempts++;
     if (await ctx.isCancelled()) {
       await reject(p, "out_of_scope", p.evaluation!.tier);
       continue;
