@@ -474,12 +474,14 @@ export interface AttentionFeed {
 }
 
 // ------------------------------------------------------------------ SEO and GEO readiness checklists [A21]
-export type ChecklistKind = "seo" | "geo";
+export type ChecklistKind = "seo" | "geo" | "page";
 export type ChecklistSection =
   // SEO
   | "technical" | "on_page" | "quick_wins" | "seo_content" | "links"
   // GEO
-  | "access" | "content" | "structure" | "mentions" | "trust" | "tracking";
+  | "access" | "content" | "structure" | "mentions" | "trust" | "tracking"
+  // Page (on-page checklist for one URL)
+  | "before_write" | "while_write" | "details" | "publish_check";
 /**
  * met / not_met / partial: measured from stored data (crawl, GSC, GEO observations, decisions).
  * manual: cannot be measured; the user confirms it (checked + note).
@@ -510,6 +512,8 @@ export interface ChecklistItem {
 
 export interface Checklist {
   kind: ChecklistKind;
+  /** Set for kind "page": the page being checked. */
+  page?: { id: string; url: string; pageType: PageType; snapshotAt: string | null; topQuery: string | null } | null;
   state: CapabilityState;
   checklistVersion: string;
   generatedAt: string;
