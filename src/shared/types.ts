@@ -179,6 +179,39 @@ export interface SeoOverview {
   completeness: Completeness;
   visitsRevenue: { state: "not_connected" };
   limitations: string[];
+  /** First-party demand curve from GSC impressions (not market search volume). null when no query data. */
+  demandCurve?: DemandCurve | null;
+}
+
+export type DemandSegment = "head" | "middle" | "long_tail";
+
+/**
+ * The site's own query demand curve: queries ranked by GSC impressions in the current window.
+ * Segments are cut by cumulative share of impressions (versioned method), so they describe where
+ * this site is already visible, not total market demand. Search volume and difficulty need a separate,
+ * explicitly enabled keyword data source.
+ */
+export interface DemandCurve {
+  source: "api" | "csv_import" | "demo";
+  window: DateWindow | null;
+  basis: "first_party_impressions";
+  methodVersion: string;
+  segmentation: string; // e.g. "Head: top queries up to 50% of impressions; middle: next 30%; long tail: remaining 20%"
+  totalQueries: number;
+  truncated: boolean;
+  segments: Array<{
+    segment: DemandSegment;
+    queryCount: number;
+    impressions: number;
+    clicks: number;
+    ctr: Ratio;
+    shareOfImpressions: Ratio;
+    medianWords: number | null;
+    strongIntentShare: Ratio; // queries with commercial/transactional modifiers (heuristic list, versioned)
+    examples: string[]; // up to 5 queries, plain text
+  }>;
+  points: Array<{ rank: number; impressions: number }>; // downsampled, <= 200 points, for a log-scale chart
+  note: string;
 }
 
 export interface AuditFinding {
