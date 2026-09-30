@@ -18,6 +18,7 @@ import { seoRoutes } from "./routes/seo";
 import { geoRoutes } from "./routes/geo";
 import { checklistRoutes } from "./routes/checklists";
 import { robotsRoutes } from "./routes/robots";
+import { coverageRoutes } from "./routes/coverage";
 import { recommendationRoutes } from "./routes/recommendations";
 import { runRoutes } from "./routes/runs";
 import { demoRoutes } from "./routes/demo";
@@ -55,6 +56,7 @@ export function createApp() {
   app.route("/", geoRoutes);
   app.route("/", checklistRoutes);
   app.route("/", robotsRoutes);
+  app.route("/", coverageRoutes);
   app.route("/", recommendationRoutes);
   app.route("/", runRoutes);
   app.route("/", demoRoutes);

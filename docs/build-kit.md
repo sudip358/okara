@@ -6,7 +6,7 @@ Resources were checked on September 30, 2026. Re-check current official API cont
 
 | Section | Contents | Origin |
 |---|---|---|
-| 1 | Master implementation prompt | Original kit, completed and amended (amendments marked `[A1]`–`[A21]`) |
+| 1 | Master implementation prompt | Original kit, completed and amended (amendments marked `[A1]`–`[A22]`) |
 | 2 | Reusable prompts, decision definitions, and output schemas | Drafted for this kit; validate against fixtures before use |
 | 3 | Reference review (Okara video, Ryze video, Okara dashboard, two open-source Jev SEO repos) | Review notes: what was adopted, what was rejected, and why |
 | 4 | Resources | Official documentation links, verified reachable on September 30, 2026 |
@@ -211,6 +211,9 @@ Caveats shown inline: IndexNow is used by Bing and other participating engines, 
 Per-page on-page checklist (reference: Okara "On-page SEO checklist", 16 items in four phases): Before you write (match search intent; cover the topic fully; unique angle or original information; first-hand experience or evidence), While you write (answer the main question early; clear main heading and descriptive subheadings; relevant terms and entities used naturally; important information in crawlable text), The details (clear descriptive title; meta description that earns the click; short descriptive URL; descriptive alt text on informative images), Publish and check (relevant internal links with descriptive anchor text; credible sources where claims need support; crawlability, indexability and canonical; structured data, mobile UX and Core Web Vitals). Measure per URL from its latest snapshot, its GSC queries, and Jev intent-fit decisions where available; originality, experience, and topic completeness stay manual or Jev-flagged with "Check this yourself"; Core Web Vitals is not_connected.
 SEO items carry an optional reference tier (S-D) from Okara's "SEO tactics, ranked by impact" graphic, shown as "Reference tier (external opinion)" and used only to order items within a section. It never enters the recommendation priority formula, which stays computed from the project's own metrics, severity, reach, and effort. Where the reference conflicts with the project's data (for example it ranks title tweaks D, while a high-impression, low-CTR page in GSC is a measured opportunity), the data wins and the UI says why.
 
+
+[A22] COVERAGE VIEWS (reference: a "Jev × SEO + GEO" 4-panel concept labelled "illustrative data, not a live Jev run", reviewed 2026-09-30)
+Four compact tables built only from stored data: (1) SEO page audit: per crawled page, title / H1 / schema status and keep / update / review; (2) content evidence: depth (word count), proof (outbound source links, tables), freshness (visible last-updated date), GSC impressions, and the computed priority, for the user's own pages; competitor columns appear only for competitor URLs the user approved under [A7]; (3) GEO answer coverage: each approved prompt, the best-matching page on the site (from captured engine search queries, else title/heading token overlap, labelled), who was cited (your site / other site / none / not run), and the gap (covered / improve / create page / check); (4) GEO citation evidence: per page of the site, API-sampled citation counts, prompts, providers, what was cited alongside, and a next step (compare / add proof). Speed claims from such mockups are not evidence; latency comes from the [A5] harness.
 
 DELIVERY PROCESS
 First create CLAUDE.md, docs/architecture.md, docs/provider-contracts.md, docs/limits-and-costs.md, and a TASKS.md checklist. Explain the proposed first vertical slice and any essential blockers. Then implement in small milestones; do not spend the whole response merely planning.

@@ -569,3 +569,64 @@ export interface RobotsSuggestion {
   warnings: string[]; // e.g. platform-managed robots (Shopify robots.txt.liquid), CDN/WAF bot blocking overrides robots.txt
   notes: string[];
 }
+
+// ------------------------------------------------------------------ coverage views (reference: "Jev × SEO + GEO" 4-panel concept)
+export type AuditCellStatus = "ok" | "review" | "missing" | "not_applicable" | "unknown";
+
+/** SEO · Page audit: one row per crawled page, derived from the latest snapshot + findings. */
+export interface PageAuditRow {
+  pageId: string;
+  url: string;
+  pageType: PageType;
+  title: { status: AuditCellStatus; detail: string | null };
+  h1: { status: AuditCellStatus; detail: string | null };
+  schema: { status: AuditCellStatus; types: string[]; detail: string | null };
+  action: "keep" | "update" | "review"; // keep = no open findings on this page
+  findingsCount: number;
+}
+
+/** SEO · Content evidence: depth / proof / freshness of YOUR pages (competitor pages only when user-approved). */
+export interface ContentEvidenceRow {
+  pageId: string;
+  url: string;
+  pageType: PageType;
+  depth: { wordCount: number | null; status: AuditCellStatus };
+  proof: { outboundCitations: number | null; tables: number | null; status: "present" | "missing" | "unknown" };
+  freshness: { lastUpdated: string | null; ageDays: number | null; status: AuditCellStatus };
+  gsc: { impressions: number | null; clicks: number | null; window: DateWindow | null };
+  priority: { value: number | null; label: "high" | "medium" | "low" | null; version: string | null; basis: string };
+}
+
+/** GEO · Answer coverage: approved prompts mapped to your best page and to who got cited. */
+export interface AnswerCoverageRow {
+  promptId: string;
+  text: string;
+  promptType: "discovery" | "reputation";
+  matchedPage: { url: string; method: "engine_search_query" | "title_heading_overlap"; score: number } | null;
+  aiSource: "your_site" | "other_site" | "none" | "not_run";
+  topOtherSource: { host: string; sourceType: SourceType; url: string | null } | null;
+  gap: "covered" | "improve" | "create_page" | "check";
+  providersRun: number;
+  basis: string; // how the match and gap were determined
+}
+
+/** GEO · Citation evidence: per page of your site, how AI answers cited it. */
+export interface CitationEvidenceRow {
+  url: string;
+  pageId: string | null;
+  citedCount: number;
+  citedInPrompts: string[];
+  providers: string[];
+  lastCitedAt: string | null;
+  citedAlongside: Array<{ host: string; sourceType: SourceType }>;
+  nextStep: "compare" | "add_proof" | "none";
+  reason: string;
+}
+
+export interface CoverageResponse<T> {
+  state: CapabilityState;
+  generatedAt: string;
+  rows: T[];
+  completeness: Completeness | null;
+  labels: string[];
+}

@@ -39,6 +39,10 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | POST | /projects/:pid/seo/import-csv | seo-analysis | body `{csv, window:'current'|'previous', start, end}`; labelled `csv_import` |
 | GET | /projects/:pid/seo/audit | seo-crawl | `SeoAudit` |
 | GET | /projects/:pid/seo/robots-suggestion?allowTraining=true|false | robots-advisor | `RobotsSuggestion` (fetches live robots.txt of the verified host through the SSRF guard; rate-limited) |
+| GET | /projects/:pid/seo/page-audit | coverage | `CoverageResponse<PageAuditRow>` |
+| GET | /projects/:pid/seo/content-evidence | coverage | `CoverageResponse<ContentEvidenceRow>` |
+| GET | /projects/:pid/geo/answer-coverage | coverage | `CoverageResponse<AnswerCoverageRow>` |
+| GET | /projects/:pid/geo/citation-evidence | coverage | `CoverageResponse<CitationEvidenceRow>` |
 | GET | /projects/:pid/pages | seo-crawl | `PageRow[]` |
 | PATCH | /projects/:pid/pages/:pageId | seo-crawl | body `{pageType}` (user correction) |
 | GET | /projects/:pid/recommendations?agent=&status= | runtime | `Recommendation[]` |
