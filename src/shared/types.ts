@@ -205,9 +205,17 @@ export interface SeoAudit {
   limitations: string[];
 }
 
+/**
+ * search_engine: classic search crawlers whose index also feeds AI features (e.g. Googlebot, Bingbot).
+ * answer_search: AI answer/search crawlers (e.g. OAI-SearchBot, Claude-SearchBot, PerplexityBot).
+ * user_fetch: fetches made on a user's request (e.g. ChatGPT-User); vendors may not apply robots.txt to these.
+ * training: model-training crawlers or opt-out tokens (e.g. GPTBot, ClaudeBot, Google-Extended). Blocking is a business choice.
+ */
+export type CrawlerPurpose = "search_engine" | "answer_search" | "user_fetch" | "training";
+
 export interface AiCrawlerAccess {
   llmsTxt: { present: boolean; notes: string[] };
-  crawlers: Array<{ token: string; vendor: string; purpose: "answer_search" | "training"; allowed: boolean | null; sourceUrl: string }>;
+  crawlers: Array<{ token: string; vendor: string; purpose: CrawlerPurpose; allowed: boolean | null; sourceUrl: string; note?: string | null }>;
   advisory: string[];
 }
 
@@ -509,4 +517,18 @@ export interface Checklist {
   counts: Record<ChecklistStatus, number>;
   items: ChecklistItem[];
   disclaimer: string; // "Practices, not guarantees..."
+}
+
+// ------------------------------------------------------------------ robots.txt advisor [A19]
+export interface RobotsSuggestion {
+  state: CapabilityState;
+  fetchedAt: string | null;
+  currentRobotsTxt: string | null; // plain text, capped; render as text only
+  policy: { allowTraining: boolean };
+  /** Groups to add or replace. Existing rules for "*" are copied into every named group (RFC 9309 group selection). */
+  suggestedRobotsTxt: string | null;
+  preservedRules: string[]; // rules carried over from the current "*" group
+  changes: Array<{ token: string; purpose: CrawlerPurpose; before: "allowed" | "blocked" | "partial" | "no_group"; after: "allowed" | "blocked" | "unchanged" }>;
+  warnings: string[]; // e.g. platform-managed robots (Shopify robots.txt.liquid), CDN/WAF bot blocking overrides robots.txt
+  notes: string[];
 }

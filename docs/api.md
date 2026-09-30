@@ -38,6 +38,7 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | GET | /projects/:pid/seo/overview | seo-analysis | `SeoOverview` |
 | POST | /projects/:pid/seo/import-csv | seo-analysis | body `{csv, window:'current'|'previous', start, end}`; labelled `csv_import` |
 | GET | /projects/:pid/seo/audit | seo-crawl | `SeoAudit` |
+| GET | /projects/:pid/seo/robots-suggestion?allowTraining=true|false | robots-advisor | `RobotsSuggestion` (fetches live robots.txt of the verified host through the SSRF guard; rate-limited) |
 | GET | /projects/:pid/pages | seo-crawl | `PageRow[]` |
 | PATCH | /projects/:pid/pages/:pageId | seo-crawl | body `{pageType}` (user correction) |
 | GET | /projects/:pid/recommendations?agent=&status= | runtime | `Recommendation[]` |
