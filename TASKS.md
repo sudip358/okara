@@ -9,7 +9,7 @@ Spec: `docs/build-kit.md`. API contract: `docs/api.md` + `src/shared/types.ts`. 
 | foundation (lead) | migrations, src/shared/types.ts, src/worker/{env,app,index}.ts, lib/{db,ids,hash,time,errors,crypto}.ts, platform/{access,session,credentials}.ts, recommendations/{evidence,store}.ts, runs/{context,policy}.ts, providers/types.ts, tests/helpers | — |
 | platform-auth | platform/{security,oidc,rate-limit}.ts, routes/{auth,credentials}.ts, tests/platform-auth*.test.ts | /auth/*, /me, /workspaces/:wid/credentials/* |
 | platform-projects | routes/{projects,integrations,demo}.ts, platform/{projects,gsc-oauth,verification,export}.ts, demo/*, tests/platform-projects*.test.ts | projects, context, verification, limits, integrations, GSC OAuth, demo seed |
-| seo-crawl | seo/crawl/**, seo/rules/**, seo/ssrf.ts, routes/seo.ts (audit/pages handlers only; exports `seoCrawlRoutes`), tests/seo-crawl*.test.ts | `runCrawl` |
+| seo-crawl | seo/crawl/**, seo/rules/**, seo/ssrf.ts, routes/seo-audit.ts (exports `seoCrawlRoutes`), tests/seo-crawl*.test.ts | `runCrawl` |
 | seo-analysis | seo/gsc/**, seo/recommend/**, seo/questions.ts, routes/seo-overview.ts (exports `seoOverviewRoutes`), tests/seo-analysis*.test.ts | `syncGsc`, `generateSeoRecommendations` |
 | geo-providers | providers/{gemini,perplexity,rates}.ts, geo/batch.ts, tests/geo-providers*.test.ts, tests/fixtures/geo/* | `runGeoBatch` |
 | geo-analysis | geo/{analyze,detect,source-type,metrics,proposals,prompts,manual-import,questions}.ts, routes/geo.ts, tests/geo-analysis*.test.ts | `analyzeObservation`, `generateGeoProposals`, /geo/* |
