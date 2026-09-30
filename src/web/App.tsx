@@ -5,20 +5,12 @@ import { AppLayout } from "./layouts/AppLayout";
 import { ProjectLayout } from "./layouts/ProjectLayout";
 import { SignInPage } from "./pages/SignIn";
 import { HomeRedirect, ProjectsPage } from "./pages/Projects";
-import { OnboardingPage } from "./pages/Onboarding";
-import { OverviewPage } from "./pages/Overview";
-import { IntegrationsPage } from "./pages/Integrations";
-import { UsagePage } from "./pages/Usage";
-import { SettingsPage } from "./pages/Settings";
-import { RunHistoryPage } from "./pages/RunHistory";
-import { RunDetailPage } from "./pages/RunDetail";
 import { NotFoundPage } from "./pages/NotFound";
-import { SeoAuditPage } from "./pages/seo/SeoAuditPage";
-import { RecommendationsPage } from "./pages/recommendations/RecommendationsPage";
-import { RecommendationDetailPage } from "./pages/recommendations/RecommendationDetailPage";
-import { GeoPromptsPage } from "./pages/geo/GeoPromptsPage";
-import { GeoResultsPage } from "./pages/geo/GeoResultsPage";
-import { CompetitorsPage } from "./pages/geo/CompetitorsPage";
+
+/** Route-level code splitting: each page loads on first visit. */
+function page<M extends Record<string, unknown>>(load: () => Promise<M>, name: keyof M & string) {
+  return async () => ({ Component: (await load())[name] as React.ComponentType });
+}
 
 const router = createBrowserRouter([
   { path: "/signin", element: <SignInPage /> },
@@ -28,24 +20,24 @@ const router = createBrowserRouter([
     children: [
       { index: true, element: <HomeRedirect /> },
       { path: "projects", element: <ProjectsPage /> },
-      { path: "projects/new", element: <OnboardingPage /> },
+      { path: "projects/new", lazy: page(() => import("./pages/Onboarding"), "OnboardingPage") },
       {
         path: "projects/:projectId",
         element: <ProjectLayout />,
         children: [
-          { index: true, element: <OverviewPage /> },
-          { path: "seo", element: <SeoAuditPage /> },
-          { path: "recommendations", element: <RecommendationsPage /> },
-          { path: "recommendations/:recId", element: <RecommendationDetailPage /> },
+          { index: true, lazy: page(() => import("./pages/Overview"), "OverviewPage") },
+          { path: "seo", lazy: page(() => import("./pages/seo/SeoAuditPage"), "SeoAuditPage") },
+          { path: "recommendations", lazy: page(() => import("./pages/recommendations/RecommendationsPage"), "RecommendationsPage") },
+          { path: "recommendations/:recId", lazy: page(() => import("./pages/recommendations/RecommendationDetailPage"), "RecommendationDetailPage") },
           { path: "geo", element: <Navigate to="results" replace /> },
-          { path: "geo/prompts", element: <GeoPromptsPage /> },
-          { path: "geo/results", element: <GeoResultsPage /> },
-          { path: "competitors", element: <CompetitorsPage /> },
-          { path: "runs", element: <RunHistoryPage /> },
-          { path: "runs/:runId", element: <RunDetailPage /> },
-          { path: "integrations", element: <IntegrationsPage /> },
-          { path: "usage", element: <UsagePage /> },
-          { path: "settings", element: <SettingsPage /> },
+          { path: "geo/prompts", lazy: page(() => import("./pages/geo/GeoPromptsPage"), "GeoPromptsPage") },
+          { path: "geo/results", lazy: page(() => import("./pages/geo/GeoResultsPage"), "GeoResultsPage") },
+          { path: "competitors", lazy: page(() => import("./pages/geo/CompetitorsPage"), "CompetitorsPage") },
+          { path: "runs", lazy: page(() => import("./pages/RunHistory"), "RunHistoryPage") },
+          { path: "runs/:runId", lazy: page(() => import("./pages/RunDetail"), "RunDetailPage") },
+          { path: "integrations", lazy: page(() => import("./pages/Integrations"), "IntegrationsPage") },
+          { path: "usage", lazy: page(() => import("./pages/Usage"), "UsagePage") },
+          { path: "settings", lazy: page(() => import("./pages/Settings"), "SettingsPage") },
           { path: "*", element: <NotFoundPage embedded /> },
         ],
       },

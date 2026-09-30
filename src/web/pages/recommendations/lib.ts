@@ -76,7 +76,6 @@ export function answerSummary(answer: unknown): string {
   if (answer === null || answer === undefined) return "No answer stored";
   if (!isRecord(answer)) return String(answer);
   const parts: string[] = [];
-  if (typeof answer.type === "string") parts.push(String(answer.type));
   if ("choice" in answer && answer.choice !== undefined) parts.push(`choice ${String(answer.choice)}`);
   if ("score" in answer && typeof answer.score === "number") parts.push(`score ${formatFieldValue(answer.score)}`);
   if ("confidence" in answer && typeof answer.confidence === "number") parts.push(`confidence ${formatFieldValue(answer.confidence)}`);

@@ -400,6 +400,7 @@ export interface SearchQuerySummary {
   gscMatch: "ranking" | "impressions_weak_position" | "no_matching_page" | "unknown";
   gscImpressions: number | null;
   gscPosition: number | null;
+  gscWindow?: DateWindow | null;
 }
 
 // ------------------------------------------------------------------ runs, usage

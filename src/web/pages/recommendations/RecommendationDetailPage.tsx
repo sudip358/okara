@@ -40,6 +40,7 @@ import {
 } from "./components/parts";
 import { StatusActions } from "./components/StatusActions";
 import { DisagreeControl } from "./components/DisagreeControl";
+import { reasonLabel } from "@web/components/DecisionLog";
 import { STATUS_LABEL, answerSummary, humanize, runnerUpFromAnswer, showsJevValue } from "./lib";
 
 export function RecommendationDetailPage() {
@@ -383,7 +384,7 @@ function DecisionsTable({ decisions }: { decisions: DecisionRecord[] }) {
               </TD>
               <TD className="whitespace-nowrap text-xs">
                 <Badge tone={d.outcome === "selected" ? "success" : "neutral"}>{d.outcome === "selected" ? "Selected" : "Rejected"}</Badge>
-                {d.reasonCode && <p className="mt-0.5 text-zinc-500 dark:text-zinc-400">{humanize(d.reasonCode)}</p>}
+                {d.reasonCode && <p className="mt-0.5 text-zinc-500 dark:text-zinc-400">{reasonLabel(d.reasonCode)}</p>}
               </TD>
               <TD>
                 <DisagreeControl decision={d} />
