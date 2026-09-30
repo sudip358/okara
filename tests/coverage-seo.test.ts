@@ -181,6 +181,12 @@ describe("coverage: SEO page audit", () => {
     const failed = await setup();
     await seedCrawl(failed, [{ path: "/a" }], [], { status: "failed" });
     expect((await pageAudit(failed)).json.data.state).toBe("error");
+    // An older completed crawl is still shown, labelled, when the newest one failed.
+    await seedCrawl(failed, [{ path: "/b" }], [], { status: "completed", startedAt: "2026-09-01T00:00:00.000Z" });
+    const older = (await pageAudit(failed)).json.data;
+    expect(older.state).toBe("ready");
+    expect(older.rows.map((r) => r.url)).toEqual([U("/b")]);
+    expect(older.labels.some((l) => l.includes("A newer crawl failed"))).toBe(true);
 
     for (const path of ["seo/page-audit", "seo/content-evidence", "geo/answer-coverage", "geo/citation-evidence"]) {
       const r = await s.callOther(`/projects/${s.pid}/${path}`);

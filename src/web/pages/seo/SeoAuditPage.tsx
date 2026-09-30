@@ -24,6 +24,8 @@ import { AiCrawlerPanel } from "./components/AiCrawlerPanel";
 import { RobotsAdvisor } from "./components/RobotsAdvisor";
 import { PagesTable } from "./components/PagesTable";
 import { CsvImportPanel } from "./components/CsvImportPanel";
+import { PageAuditTable } from "./components/PageAuditTable";
+import { ContentEvidenceTable } from "./components/ContentEvidenceTable";
 
 export function SeoAuditPage() {
   const { projectId = "" } = useParams();
@@ -106,6 +108,9 @@ export function SeoAuditPage() {
           <AiCrawlerPanel access={a.aiCrawlerAccess} />
         </>
       ) : null}
+
+      {projectId ? <PageAuditTable projectId={projectId} /> : null}
+      {projectId ? <ContentEvidenceTable projectId={projectId} /> : null}
 
       {projectId ? <RobotsAdvisor projectId={projectId} /> : null}
 

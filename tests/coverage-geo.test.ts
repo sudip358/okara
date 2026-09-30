@@ -134,7 +134,7 @@ describe("coverage: GEO answer coverage", () => {
     const tables = byText(d.rows, P.tables);
     expect(tables.matchedPage).toBeNull();
     expect(tables.aiSource).toBe("other_site"); // the older cohort's self citation is ignored
-    expect(tables.topOtherSource).toEqual({ host: "nytimes.com", sourceType: "publisher", url: "https://www.nytimes.com/wirecutter/reviews/best-dining-tables" });
+    expect(tables.topOtherSource).toEqual({ host: "nytimes.com", sourceType: "publisher", url: "https://www.nytimes.com/wirecutter/reviews/best-dining-tables/" }); // as the provider gave it
     expect(tables.gap).toBe("create_page");
 
     const clean = byText(d.rows, P.clean);

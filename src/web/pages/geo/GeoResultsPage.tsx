@@ -15,6 +15,8 @@ import { TrendChart } from "./components/TrendChart";
 import { PromptMatrix } from "./components/PromptMatrix";
 import { ObservationDrawer } from "./components/ObservationDrawer";
 import { ManualImportForm } from "./components/ManualImportForm";
+import { AnswerCoverageTable } from "./components/AnswerCoverageTable";
+import { CitationEvidenceTable } from "./components/CitationEvidenceTable";
 
 export function GeoResultsPage() {
   const { projectId = "" } = useParams();
@@ -90,6 +92,9 @@ export function GeoResultsPage() {
           <Card title="Prompt × engine results" description="Select a cell to read the raw answer, citations, and search queries.">
             <PromptMatrix results={data} onOpen={(id, title) => setDrawer({ id, title })} />
           </Card>
+
+          <AnswerCoverageTable projectId={projectId} />
+          <CitationEvidenceTable projectId={projectId} />
         </>
       ) : null}
 
