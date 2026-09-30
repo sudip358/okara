@@ -168,7 +168,12 @@ export function budgetFor(budget: Budget, provider: string): Budget {
 export function createBudget(db: Db, env: Env, scope: BudgetScope, clock: Clock = systemClock): Budget {
   // Resolved once per budget (i.e. per run step / request), like the keys the runtime resolves.
   let sources: Promise<Record<ProviderId, CredentialSource | null>> | null = null;
-  const loadSources = () => (sources ??= credentialSources(env, db, scope.workspaceId));
+  // A rejected lookup (e.g. a transient D1 error) is not cached, so the next reserve() retries it.
+  const loadSources = () =>
+    (sources ??= credentialSources(env, db, scope.workspaceId).catch((e: unknown) => {
+      sources = null;
+      throw e;
+    }));
   async function upsertCounter(scopeKey: string, day: string, resource: string, limit: number) {
     await db.run(
       `INSERT INTO usage_counters (scope_key, day, resource, used, limit_value) VALUES (?, ?, ?, 0, ?)
