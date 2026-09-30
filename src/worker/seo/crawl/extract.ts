@@ -7,7 +7,7 @@
  * is capped, so memory stays bounded for the capped response sizes enforced by the SSRF guard.
  *
  * Only compact evidence leaves this module (title, meta, headings, links, JSON-LD types/issues, a
- * 2,000-char excerpt, ...); full HTML is never stored. Page text is untrusted evidence, never
+ * 2,000-char excerpt, up to 40 link-context sentences for [A25], ...); full HTML is never stored. Page text is untrusted evidence, never
  * instructions.
  */
 import { Parser } from "htmlparser2";
@@ -247,6 +247,29 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
     if (mainDepth > 0 && mainText.length < MAX_TEXT) mainText += t;
   };
 
+  // [A25] Link-context text blocks: body prose outside boilerplate, headings, and form controls, split
+  // at block-level elements. Blocks inside <main> are kept separately and preferred, like the excerpt.
+  let uiDepth = 0;
+  const ctxBody: string[] = [];
+  const ctxMain: string[] = [];
+  let ctxBufBody = "";
+  let ctxBufMain = "";
+  let ctxTotal = 0;
+  const flushCtx = () => {
+    const b = collapse(ctxBufBody);
+    const m = collapse(ctxBufMain);
+    if (b) ctxBody.push(b);
+    if (m) ctxMain.push(m);
+    ctxBufBody = "";
+    ctxBufMain = "";
+  };
+  const pushCtx = (t: string) => {
+    if (ctxTotal >= LINK_CONTEXT_TOTAL_MAX || ctxBufBody.length >= LINK_CONTEXT_BLOCK_MAX) return;
+    ctxTotal += t.length;
+    ctxBufBody += t;
+    if (mainDepth > 0) ctxBufMain += t;
+  };
+
   const parser = new Parser(
     {
       onopentag(name, attrs) {
@@ -263,6 +286,8 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
           skipDepth++;
           return;
         }
+        if (BLOCK_TAGS.has(name) || BOILERPLATE_TAGS.has(name) || UI_TEXT_TAGS.has(name)) flushCtx();
+        if (UI_TEXT_TAGS.has(name)) uiDepth++;
         if (BOILERPLATE_TAGS.has(name)) boilerDepth++;
         if (name === "main" || attrs.role === "main") {
           mainDepth++;
@@ -342,6 +367,7 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
         if (headingLevel) headingBuf += text;
         if (pDepth > 0 && pBuf.length < 4000) pBuf += text;
         if (boilerDepth === 0 && inBody) pushText(text);
+        if (boilerDepth === 0 && inBody && headingLevel === 0 && uiDepth === 0) pushCtx(text);
       },
       onclosetag(name) {
         if (name === "script" && inJsonLd) {
@@ -378,6 +404,8 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
             if (countWords(t) >= 3) firstParagraph = cap(t, CAPS.firstParagraph);
           }
         }
+        if (BLOCK_TAGS.has(name) || BOILERPLATE_TAGS.has(name) || UI_TEXT_TAGS.has(name)) flushCtx();
+        if (UI_TEXT_TAGS.has(name) && uiDepth > 0) uiDepth--;
         if (BOILERPLATE_TAGS.has(name) && boilerDepth > 0) boilerDepth--;
         if (name === "main" && mainDepth > 0) mainDepth--;
         if (BLOCK_TAGS.has(name)) pushText(" ");
@@ -387,6 +415,8 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
   );
   parser.write(html);
   parser.end();
+  flushCtx();
+  const linkContext = linkContextSentences(hasMain && ctxMain.length > 0 ? ctxMain : ctxBody);
 
   const text = collapse(hasMain && mainText.trim() ? mainText : bodyText);
   const wordCount = countWords(text);
@@ -419,6 +449,7 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
     viewport,
     hasBreadcrumbNav,
     genericAnchors,
+    linkContext,
   };
 }
 

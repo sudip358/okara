@@ -16,7 +16,7 @@ import { insertStatement, parseJson } from "../../lib/db";
 import { assertCrawlableUrl, CrawlFetchError, guardedFetch, type CrawlFetchErrorCode } from "../ssrf";
 import { CRAWLER_UA_TOKEN, crawlerUserAgent, fetchRobots, robotsAllows, robotsCrawlDelay, selectGroup, type RobotsState } from "./robots";
 import { collectSitemapUrls } from "./sitemap";
-import { extractPage, type ExtractedPage, type JsonLdIssue } from "./extract";
+import { extractPage, LINK_CONTEXT_MIN_WORDS, type ExtractedPage, type JsonLdIssue } from "./extract";
 import { classifyPageType } from "./page-type";
 import { normalizeUrlKey, runRules, RULESET_VERSION, type RuleSnapshot } from "../rules/registry";
 import { checkLlmsTxt, evaluateAiCrawlerAccess } from "../rules/ai-crawlers";
@@ -264,6 +264,7 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
         viewport_meta: x?.viewport ?? null,
         breadcrumb_nav: x ? (x.hasBreadcrumbNav ? 1 : 0) : null,
         generic_anchors_json: x ? JSON.stringify(x.genericAnchors) : null,
+        link_context_json: JSON.stringify(x?.linkContext ?? []),
         fetched_at: fetchedAt,
       });
       if (data.skippedReason) skipCounts[data.skippedReason] = (skipCounts[data.skippedReason] ?? 0) + 1;
@@ -305,6 +306,11 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
       );
       // Snapshots taken before the [A21] extraction fields existed are re-extracted instead of reused.
       if (!row || row.images_total === null || row.images_total === undefined) return null;
+      // [A25] Snapshots without link-context sentences (taken before they were extracted) are re-extracted
+      // when the page has enough words to contain a sentence; a page with no qualifying sentence is cheap
+      // to re-parse.
+      const linkContext = parseJson<unknown[]>(row.link_context_json, []).filter((s): s is string => typeof s === "string");
+      if (linkContext.length === 0 && Number(row.word_count ?? 0) >= LINK_CONTEXT_MIN_WORDS) return null;
       return {
         title: (row.title as string | null) ?? null,
         metaDescription: (row.meta_description as string | null) ?? null,
@@ -331,6 +337,7 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
         viewport: (row.viewport_meta as string | null) ?? null,
         hasBreadcrumbNav: Number(row.breadcrumb_nav ?? 0) === 1,
         genericAnchors: parseJson<Array<{ href: string; text: string }>>(row.generic_anchors_json, []),
+        linkContext,
       };
     };
 
