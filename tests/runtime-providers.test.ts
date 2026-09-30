@@ -183,6 +183,24 @@ describe("writers", () => {
     expect(calls[0]).toMatchObject({ status: "error", inputTokens: 5 });
   });
 
+  it("Anthropic (SDK): retries 429 through our metering loop, never retries 400", async () => {
+    const ok = { model: "m", content: [{ type: "text", text: '{"ok":true}' }], stop_reason: "end_turn", usage: { input_tokens: 9, output_tokens: 3 } };
+    const { f, seen } = fakeFetch([() => json({ type: "error", error: { type: "rate_limit_error", message: "slow down" } }, 429, { "request-id": "req_429" }), () => json(ok, 200, { "request-id": "req_ok" })]);
+    const { calls, rec } = recorder();
+    const w = createWriter({ WRITER_PROVIDER: "anthropic", WRITER_MODEL: "m" }, "k", f, { calls: rec, sleep: async () => {} })!;
+    await expect(w.write(req)).resolves.toMatchObject({ output: { ok: true } });
+    expect(seen).toHaveLength(2); // SDK retries disabled; exactly our two attempts
+    expect(calls.map((c) => c.status)).toEqual(["error", "ok"]);
+    expect(calls[0]).toMatchObject({ requestId: "req_429" });
+
+    const bad = fakeFetch([() => json({ type: "error", error: { type: "invalid_request_error", message: "bad" } }, 400)]);
+    const r2 = recorder();
+    const w2 = createWriter({ WRITER_PROVIDER: "anthropic", WRITER_MODEL: "m" }, "k", bad.f, { calls: r2.rec, sleep: async () => {} })!;
+    await expect(w2.write(req)).rejects.toBeTruthy();
+    expect(bad.seen).toHaveLength(1);
+    expect(JSON.stringify(r2.calls)).not.toContain("k\"");
+  });
+
   it("OpenAI-compatible: json_schema response_format, retries 429 then succeeds", async () => {
     const { f, seen } = fakeFetch([
       () => json({ error: { message: "rate limited" } }, 429),

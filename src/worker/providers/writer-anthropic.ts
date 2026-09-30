@@ -1,5 +1,7 @@
 /**
- * Anthropic Messages API writing provider (raw fetch; no SDK dependency in the Worker bundle).
+ * Anthropic Messages API writing provider, via the official SDK (@anthropic-ai/sdk).
+ * The SDK's own retries are disabled (maxRetries: 0) so every attempt passes through our
+ * metering loop and is counted against the budget and provider_calls.
  *
  * Contract (https://docs.claude.com/en/api/messages):
  *   POST https://api.anthropic.com/v1/messages
@@ -14,9 +16,11 @@
  * outputs do not accept are stripped (toProviderSchema) and enforced client-side with zod by callers.
  * The model id comes only from WRITER_MODEL; there is no default.
  */
+import Anthropic from "@anthropic-ai/sdk";
 import type { WritingProvider, WritingRequest, WritingResult } from "./types";
 import { toProviderSchema } from "../writing/schemas";
-import { requestJson } from "../writing/http";
+import { backoffMs, ProviderHttpError } from "../writing/http";
+import { redact } from "../runs/calls";
 import { estimateTokens, metered, WRITER_MAX_RETRIES, WRITER_TIMEOUT_MS, WriterOutputError, type WriterHooks } from "../writing/metering";
 
 export const ANTHROPIC_API_BASE = "https://api.anthropic.com";
@@ -64,11 +68,6 @@ export function parseAnthropicResponse(body: MessagesResponse, fallbackModel: st
 }
 
 export function createAnthropicWriter(cfg: AnthropicWriterConfig): WritingProvider {
-  const headers = {
-    "x-api-key": cfg.apiKey,
-    "anthropic-version": ANTHROPIC_VERSION,
-    "content-type": "application/json",
-  };
   const maxRetries = cfg.maxRetries ?? WRITER_MAX_RETRIES;
   return {
     name: "anthropic",
@@ -85,19 +84,53 @@ export function createAnthropicWriter(cfg: AnthropicWriterConfig): WritingProvid
           maxRetries,
         },
         async (onAttempt) => {
-          const r = await requestJson({
-            fetchImpl: cfg.fetchImpl,
-            url: `${ANTHROPIC_API_BASE}/v1/messages`,
-            headers,
-            body,
-            timeoutMs: cfg.timeoutMs ?? WRITER_TIMEOUT_MS,
-            maxRetries,
-            requestIdHeader: "request-id",
-            onAttempt,
-            sleep: cfg.sleep,
+          const client = new Anthropic({
+            apiKey: cfg.apiKey,
+            // Call fetch without a receiver: workerd rejects the platform fetch invoked as obj.fetch().
+            fetch: (input, init) => cfg.fetchImpl(input as RequestInfo, init as RequestInit),
+            maxRetries: 0,
+            timeout: cfg.timeoutMs ?? WRITER_TIMEOUT_MS,
           });
-          const parsed = parseAnthropicResponse((r.json ?? {}) as MessagesResponse, cfg.model);
-          return { result: parsed.result, failure: parsed.failure, requestId: r.requestId, latencyMs: r.latencyMs };
+          const sleep = cfg.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+          let last: ProviderHttpError | null = null;
+          for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            const started = Date.now();
+            let retryAfter: string | null = null;
+            try {
+              const { data, request_id } = await client.messages
+                .create(body as unknown as Anthropic.MessageCreateParamsNonStreaming)
+                .withResponse();
+              const latencyMs = Date.now() - started;
+              const requestId = request_id ?? null;
+              await onAttempt({ attempt, ok: true, status: 200, timedOut: false, outcomeUnknown: false, requestId, latencyMs, error: null });
+              const parsed = parseAnthropicResponse(data as unknown as MessagesResponse, cfg.model);
+              return { result: parsed.result, failure: parsed.failure, requestId, latencyMs };
+            } catch (e) {
+              const latencyMs = Date.now() - started;
+              if (e instanceof Anthropic.APIUserAbortError) throw new ProviderHttpError("Request cancelled.", null, false, null, true);
+              if (e instanceof Anthropic.APIConnectionError) {
+                // Includes APIConnectionTimeoutError: the request may have been processed.
+                const timedOut = e instanceof Anthropic.APIConnectionTimeoutError;
+                const msg = timedOut ? `Timed out after ${cfg.timeoutMs ?? WRITER_TIMEOUT_MS} ms.` : `Connection error: ${redact(e.message)}`;
+                await onAttempt({ attempt, ok: false, status: null, timedOut, outcomeUnknown: true, requestId: null, latencyMs, error: msg });
+                last = new ProviderHttpError(msg, null, timedOut, null, true);
+              } else if (e instanceof Anthropic.APIError) {
+                const status = typeof e.status === "number" ? e.status : null;
+                const requestId = e.requestID ?? null;
+                retryAfter = e.headers?.get("retry-after") ?? null;
+                const msg = `HTTP ${status ?? "error"}: ${redact(e.message).slice(0, 300)}`;
+                await onAttempt({ attempt, ok: false, status, timedOut: false, outcomeUnknown: false, requestId, latencyMs, error: msg });
+                last = new ProviderHttpError(msg, status, false, requestId, false);
+                // Retry only rate limits, overload, timeouts, and server errors (never 400/401/403/404).
+                const retryable = e instanceof Anthropic.RateLimitError || e instanceof Anthropic.InternalServerError || status === 408 || status === 529;
+                if (!retryable) throw last;
+              } else {
+                throw e;
+              }
+            }
+            if (attempt < maxRetries) await sleep(backoffMs(attempt, retryAfter));
+          }
+          throw last ?? new ProviderHttpError("Request failed.", null, false, null, false);
         },
       );
     },

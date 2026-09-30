@@ -32,7 +32,7 @@ only when options are omitted, and refuses browser runtimes only.
 
 ## Anthropic Messages — writer (`WRITER_PROVIDER=anthropic`)
 
-Implemented in `src/worker/providers/writer-anthropic.ts` (raw fetch).
+Implemented in `src/worker/providers/writer-anthropic.ts` with the official `@anthropic-ai/sdk` (`client.messages.create(...).withResponse()`, `maxRetries: 0` so every attempt is metered by our own loop; retries only 408/429/5xx/529 and connection errors; typed SDK error classes, never message matching).
 
 | Item | Contract |
 |---|---|
