@@ -28,6 +28,8 @@ import { versionFor } from "../questions";
 export const QUERY_BATCH_QUESTIONS = 50;
 export const QUERY_CACHE_DAYS = 7;
 export const QUERY_KEY_MAX = 300;
+/** Keys per cache lookup: D1 allows 100 bound parameters per query and the lookup binds 5 more. */
+const CACHE_LOOKUP_CHUNK = 90;
 
 export interface QueryBatchDeps {
   db: Db;
@@ -106,8 +108,8 @@ export async function judgeQueries(
   const since = iso(new Date(deps.now.getTime() - QUERY_CACHE_DAYS * 86400_000));
   const keys = [...unique.keys()];
   const hits = new Map<string, Map<string, { answer: DecisionAnswer | null; provider: string; model: string }>>();
-  for (let i = 0; i < keys.length; i += 100) {
-    const chunk = keys.slice(i, i + 100);
+  for (let i = 0; i < keys.length; i += CACHE_LOOKUP_CHUNK) {
+    const chunk = keys.slice(i, i + CACHE_LOOKUP_CHUNK);
     for (const s of opts.specs) {
       const rows = await deps.db.all<{ candidate_key: string; answer_json: string | null; provider: string | null; model: string | null }>(
         `SELECT candidate_key, answer_json, provider, model FROM decision_records
