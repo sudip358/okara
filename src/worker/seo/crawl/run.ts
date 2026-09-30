@@ -15,7 +15,7 @@ import { iso } from "../../lib/time";
 import { insertStatement, parseJson } from "../../lib/db";
 import { assertCrawlableUrl, CrawlFetchError, guardedFetch, type CrawlFetchErrorCode } from "../ssrf";
 import { CRAWLER_UA_TOKEN, crawlerUserAgent, fetchRobots, robotsAllows, robotsCrawlDelay, selectGroup, type RobotsState } from "./robots";
-import { collectSitemapUrls } from "./sitemap";
+import { collectSitemapUrls, SITEMAP_MAX_URLS, type SitemapResult } from "./sitemap";
 import { extractPage, LINK_CONTEXT_MIN_WORDS, type ExtractedPage, type JsonLdIssue } from "./extract";
 import { classifyPageType } from "./page-type";
 import { normalizeUrlKey, runRules, RULESET_VERSION, type RuleSnapshot } from "../rules/registry";
@@ -151,7 +151,7 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
     const sitemapCandidates = robots.parsed.sitemaps.length > 0 ? robots.parsed.sitemaps : [`https://${host}/sitemap.xml`];
     const sitemap =
       robots.status === "unreachable"
-        ? { urls: [] as string[], source: new Map<string, string>(), fetched: [] as string[], refused: [] as Array<{ url: string; reason: string }>, notes: ["Sitemaps not read because robots.txt disallows all."] }
+        ? { urls: [] as string[], source: new Map<string, string>(), entries: [] as SitemapResult["entries"], fetched: [] as string[], refused: [] as SitemapResult["refused"], notes: ["Sitemaps not read because robots.txt disallows all."] }
         : await collectSitemapUrls(ctx.crawlFetch, { verifiedHost: host, sitemapUrls: sitemapCandidates, userAgent: ua, timeoutMs: opts.pageTimeoutMs });
     notes.push(...sitemap.notes);
     if (sitemap.refused.length) notes.push(`${sitemap.refused.length} sitemap entr${sitemap.refused.length === 1 ? "y" : "ies"} refused by the SSRF/host guard.`);
@@ -443,6 +443,9 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
       verifiedHost: host,
       snapshots,
       sitemapUrls: sitemap.urls,
+      sitemapEntries: sitemap.entries,
+      sitemapRefused: sitemap.refused,
+      now: ctx.clock(),
       robots,
       aiCrawlerAccess,
     });
@@ -478,7 +481,8 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
         crawlDelay: delaySec,
         sitemaps: robots.parsed.sitemaps.slice(0, 10),
       },
-      sitemap: { fetched: sitemap.fetched, urlCount: sitemap.urls.length, refused: sitemap.refused.slice(0, 20) },
+      // entries: [{url, lastmod|null}] for the sitemap health rules (at most SITEMAP_MAX_URLS, same order as read).
+      sitemap: { fetched: sitemap.fetched, urlCount: sitemap.urls.length, refused: sitemap.refused.slice(0, 20), entries: sitemap.entries.slice(0, SITEMAP_MAX_URLS) },
       aiCrawlerAccess,
       rulesetVersion: RULESET_VERSION,
     };

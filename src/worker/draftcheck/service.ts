@@ -146,9 +146,7 @@ function draftSubject(input: DraftCheckInput, project: ProjectRow, now: Date): S
     note,
     `Drafts are evaluated as an ${DRAFT_PAGE_TYPE} page. URL, inbound links, HTTP status, indexability, canonical, structured data, and Core Web Vitals are checked after publishing: pick the crawled page here once it is live.`,
   ];
-  if (input.title?.trim() === undefined || !input.title?.trim()) {
-    if (!title) labels.push("No title was given; enter the planned title tag to check it.");
-  }
+  if (!title) labels.push("No title was given; enter the planned title tag to check it.");
   return {
     mode: "draft",
     ctx: { sig: new Signals(data), page: { id: "draft", url, pageType: DRAFT_PAGE_TYPE }, snap, queries: [targetRow(input.targetQuery, url)], intent: null },

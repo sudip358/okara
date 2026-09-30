@@ -81,9 +81,9 @@ describe("draft check page: verdict, flags, labels", () => {
     ];
     const groups = groupFlags(flags);
     expect(groups.map((g) => g.kind)).toEqual(["unsupported_claim", "filler"]);
-    expect(groups[0].label).toBe("Unsupported claim");
-    expect(groups[0].flags[0].text).toBe("Best lamp <b>ever</b>");
-    expect(groups[1].flags.map((f) => f.text)).toEqual(["In today's world", "It goes without saying"]);
+    expect(groups[0]!.label).toBe("Unsupported claim");
+    expect(groups[0]!.flags[0]!.text).toBe("Best lamp <b>ever</b>");
+    expect(groups[1]!.flags.map((f) => f.text)).toEqual(["In today's world", "It goes without saying"]);
     expect(groupFlags([])).toEqual([]);
   });
 
@@ -122,10 +122,10 @@ describe("draft check page: read-only checklist and pages", () => {
       items: [item("a", { checked: false, note: null, updatedAt: null, updatedBy: null }), item("b", null)],
     } as unknown as Checklist;
     const ro = readOnlyChecklist(c);
-    expect(ro.items[0].manual).toBeNull();
-    expect(ro.items[0].status).toBe("manual");
+    expect(ro.items[0]!.manual).toBeNull();
+    expect(ro.items[0]!.status).toBe("manual");
     expect(ro.items[1]).toBe(c.items[1]);
-    expect(c.items[0].manual).not.toBeNull();
+    expect(c.items[0]!.manual).not.toBeNull();
   });
 
   it("labels and sorts crawled pages with URL and page type", () => {

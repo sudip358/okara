@@ -123,6 +123,31 @@ const CASES: Record<string, { positive: RuleInput; negative: RuleInput }> = {
     positive: input([snap("/")], { aiCrawlerAccess: aiAccess("User-agent: OAI-SearchBot\nDisallow: /") }),
     negative: input([snap("/")], { aiCrawlerAccess: aiAccess("User-agent: GPTBot\nDisallow: /\n\nUser-agent: ClaudeBot\nDisallow: /\n\nUser-agent: Google-Extended\nDisallow: /") }),
   },
+  // [A25] Sitemap health (more cases in tests/sitemap-health.test.ts).
+  "SEO-SITEMAP-URL-ERROR": {
+    positive: input([snap("/"), snap("/gone", { statusCode: 404 })], { sitemapUrls: [U("/gone")] }),
+    negative: input([snap("/"), snap("/gone", { statusCode: 404 })], { sitemapUrls: [U("/")] }),
+  },
+  "SEO-SITEMAP-URL-REDIRECT": {
+    positive: input([snap("/old", { statusCode: 301, finalUrl: U("/new") }), snap("/new")], { sitemapUrls: [U("/old")] }),
+    negative: input([snap("/old", { statusCode: 301, finalUrl: U("/new") }), snap("/new")], { sitemapUrls: [U("/new")] }),
+  },
+  "SEO-SITEMAP-URL-NOINDEX": {
+    positive: input([snap("/a", { robotsMeta: "noindex, follow" })], { sitemapUrls: [U("/a")] }),
+    negative: input([snap("/a", { robotsMeta: "index, follow" })], { sitemapUrls: [U("/a")] }),
+  },
+  "SEO-SITEMAP-URL-NONCANONICAL": {
+    positive: input([snap("/a?ref=nav", { canonical: U("/a") }), snap("/a")], { sitemapUrls: [U("/a?ref=nav")] }),
+    negative: input([snap("/a?ref=nav", { canonical: U("/a") }), snap("/a")], { sitemapUrls: [U("/a")] }),
+  },
+  "SEO-SITEMAP-LASTMOD-INVALID": {
+    positive: input([snap("/")], { sitemapUrls: [U("/")], sitemapEntries: [{ url: U("/"), lastmod: "30/09/2026" }], now: new Date("2026-09-30T12:00:00Z") }),
+    negative: input([snap("/")], { sitemapUrls: [U("/")], sitemapEntries: [{ url: U("/"), lastmod: "2026-09-01" }], now: new Date("2026-09-30T12:00:00Z") }),
+  },
+  "SEO-SITEMAP-OFFHOST": {
+    positive: input([snap("/")], { sitemapRefused: [{ url: "https://other.example/x", reason: "Host is not the verified host.", kind: "page" }] }),
+    negative: input([snap("/")], { sitemapRefused: [{ url: "https://other.example/sitemap.xml", reason: "Host is not the verified host.", kind: "sitemap" }] }),
+  },
 };
 
 describe("seo-crawl rule registry [A16]", () => {

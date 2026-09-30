@@ -16,8 +16,9 @@ import { FLAGGED_PURPOSES } from "./ai-crawlers";
 import { templateName } from "../crawl/page-type";
 import type { JsonLdIssue } from "../crawl/extract";
 import { countWords } from "../crawl/extract";
+import { SITEMAP_HEALTH_RULES } from "./sitemap-health";
 
-export const RULESET_VERSION = "2026-09-30.2";
+export const RULESET_VERSION = "2026-09-30.3";
 /** Minimum URLs of one page type sharing an issue before findings are labelled with a template. */
 export const TEMPLATE_MIN_URLS = 3;
 
@@ -50,6 +51,12 @@ export interface RuleInput {
   sitemapUrls: string[];
   robots: RobotsState | null;
   aiCrawlerAccess: AiCrawlerAccess | null;
+  /** Sitemap URLs with their raw <lastmod> text (null = absent); omitted = not recorded (sitemap health). */
+  sitemapEntries?: Array<{ url: string; lastmod: string | null }>;
+  /** Sitemap entries refused by the SSRF/host guard; kind "page" = a listed URL, "sitemap" = a sitemap file. */
+  sitemapRefused?: Array<{ url: string; reason: string; kind?: "page" | "sitemap" }>;
+  /** Evaluation time (the crawl clock); omitted = rules that compare dates skip that comparison. */
+  now?: Date;
 }
 
 export interface RuleContext extends RuleInput {
@@ -547,6 +554,8 @@ export const RULES: readonly Rule[] = [
           evidence: { token: c.token, vendor: c.vendor, purpose: c.purpose, sourceUrl: c.sourceUrl },
         })),
   },
+  // [A25] Sitemap health (sitemap-health.ts): URL error/redirect/noindex/non-canonical, lastmod, off-host.
+  ...SITEMAP_HEALTH_RULES,
 ];
 
 export const RULES_BY_ID: ReadonlyMap<string, Rule> = new Map(RULES.map((r) => [r.id, r]));
