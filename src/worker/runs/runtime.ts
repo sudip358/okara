@@ -103,7 +103,7 @@ export function createRunLogger(db: Db, run: { id: string; workspaceId: string; 
   return {
     async event(step, status, message) {
       await db.insert("run_events", {
-        id: newId("rev"),
+        id: newId("evt"),
         workspace_id: run.workspaceId,
         project_id: run.projectId,
         run_id: run.id,

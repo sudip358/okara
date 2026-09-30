@@ -35,8 +35,8 @@
  * The request never mentions the project's brand: only the raw prompt plus a neutral locale instruction.
  */
 import type { Env } from "../env";
-import type { GeoCitation, GeoProvider } from "./types";
-import { neutralInstruction, resolveCost, safeLocaleToken, sendJson, type GeoAnswerWithOutcome } from "./rates";
+import type { GeoCitation } from "./types";
+import { neutralInstruction, resolveCost, safeLocaleToken, sendJson, type GeoAnswerWithOutcome, type GeoProviderAdapter } from "./rates";
 
 export const PERPLEXITY_API_BASE = "https://api.perplexity.ai";
 export const PERPLEXITY_GROUNDING_MODE = "perplexity_web_search";
@@ -48,6 +48,8 @@ export interface PerplexityProviderConfig {
   fetchImpl: typeof fetch;
   maxOutputTokens?: number;
   timeoutMs?: number;
+  /** Clock for selecting the dated rate window (defaults to now). */
+  now?: () => Date;
 }
 
 /** Agent API model ids are provider/model, e.g. "perplexity/sonar". */
@@ -168,7 +170,7 @@ export function parsePerplexityResponse(body: unknown): ParsedPerplexity {
 
 // ------------------------------------------------------------------ provider
 
-export function createPerplexityProvider(config: PerplexityProviderConfig): GeoProvider & { readonly samplingOptions: Record<string, unknown>; ask(prompt: string, opts: { locale: string; language: string; signal?: AbortSignal }): Promise<GeoAnswerWithOutcome> } {
+export function createPerplexityProvider(config: PerplexityProviderConfig): GeoProviderAdapter {
   const model = config.model.trim();
   const maxOutputTokens = config.maxOutputTokens ?? PERPLEXITY_DEFAULT_MAX_OUTPUT_TOKENS;
   const samplingOptions = { maxOutputTokens, tools: ["web_search"] };
@@ -219,7 +221,7 @@ export function createPerplexityProvider(config: PerplexityProviderConfig): GeoP
       }
       const p = parsePerplexityResponse(res.body);
       const answeredModel = p.model ?? model;
-      const cost = resolveCost("perplexity", answeredModel, p.usage, p.actualCostUsd, { grounded: p.grounded });
+      const cost = resolveCost("perplexity", answeredModel, p.usage, p.actualCostUsd, { grounded: p.grounded, at: (config.now ?? (() => new Date()))() });
       return {
         ...base(),
         model: answeredModel,

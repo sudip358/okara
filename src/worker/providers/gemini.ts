@@ -38,8 +38,8 @@
  * The request never mentions the project's brand: only the raw prompt plus a neutral locale instruction.
  */
 import type { Env } from "../env";
-import type { GeoCitation, GeoProvider } from "./types";
-import { neutralInstruction, resolveCost, sendJson, type GeoAnswerWithOutcome } from "./rates";
+import type { GeoCitation } from "./types";
+import { neutralInstruction, resolveCost, sendJson, type GeoAnswerWithOutcome, type GeoProviderAdapter } from "./rates";
 
 export const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 export const GEMINI_GROUNDING_MODE = "google_search";
@@ -54,6 +54,8 @@ export interface GeminiProviderConfig {
   fetchImpl: typeof fetch;
   maxOutputTokens?: number;
   timeoutMs?: number;
+  /** Clock for selecting the dated rate window (defaults to now). */
+  now?: () => Date;
 }
 
 /** Model ids go into the URL path: allow only plain ids like "gemini-3.8-flash" (optionally "models/..."). */
@@ -198,7 +200,7 @@ export function parseGeminiResponse(body: unknown): ParsedGemini {
 
 // ------------------------------------------------------------------ provider
 
-export function createGeminiProvider(config: GeminiProviderConfig): GeoProvider & { readonly samplingOptions: Record<string, unknown>; ask(prompt: string, opts: { locale: string; language: string; signal?: AbortSignal }): Promise<GeoAnswerWithOutcome> } {
+export function createGeminiProvider(config: GeminiProviderConfig): GeoProviderAdapter {
   const model = config.model.trim().replace(/^models\//, "");
   const maxOutputTokens = config.maxOutputTokens ?? GEMINI_DEFAULT_MAX_OUTPUT_TOKENS;
   const samplingOptions = { maxOutputTokens };
@@ -247,7 +249,7 @@ export function createGeminiProvider(config: GeminiProviderConfig): GeoProvider 
         return { ...base(), status: "failed", outcome: res.outcome, error: res.error, latencyMs: res.latencyMs };
       }
       const p = parseGeminiResponse(res.body);
-      const cost = resolveCost("gemini", model, p.usage, null, { grounded: p.grounded });
+      const cost = resolveCost("gemini", model, p.usage, null, { grounded: p.grounded, at: (config.now ?? (() => new Date()))() });
       return {
         ...base(),
         status: p.status,

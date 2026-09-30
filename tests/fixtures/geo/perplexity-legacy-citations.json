@@ -1,0 +1,13 @@
+{
+  "_fixture": "CONSTRUCTED fixture (not a captured provider response). A completed response that carries only the legacy top-level `citations` array (removed from the current contract) and no search_results output item. The adapter must NOT treat it as grounded or parse citations from it.",
+  "id": "resp_pplx_legacy",
+  "object": "response",
+  "created_at": 1790769600,
+  "status": "completed",
+  "model": "perplexity/sonar",
+  "citations": ["https://brassco.example/pulls", "https://www.designroundup.example/best-cabinet-pulls"],
+  "output": [
+    { "type": "message", "id": "msg_1", "status": "completed", "role": "assistant", "content": [{ "type": "output_text", "text": "Brass Co is a well-known maker [1]." }] }
+  ],
+  "usage": { "input_tokens": 300, "output_tokens": 40, "total_tokens": 340 }
+}

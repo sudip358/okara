@@ -207,6 +207,7 @@ export function assertCrawlableUrl(input: string | URL, verifiedHost: string): U
   }
   if (cls.kind === "name" && isLocalName(host)) throw new CrawlFetchError("blocked_url", "Local hostnames are refused.");
   if (host !== allowed) throw new CrawlFetchError("blocked_url", "Host is not the verified host.");
+  if (cls.kind === "name") url.hostname = host; // canonical form: lowercase, no trailing dot
   url.hash = "";
   return url;
 }
@@ -250,7 +251,8 @@ export interface GuardedResponse {
   /** Decoded body for readable 2xx responses; '' otherwise (body cancelled, never read). */
   body: string;
   bytes: number;
-  redirects: string[];
+  /** Each followed hop: the redirect status and the validated target. */
+  redirects: Array<{ status: number; to: string }>;
   truncated: boolean;
 }
 
@@ -289,7 +291,7 @@ export async function guardedFetch(fetchImpl: typeof fetch, url: string, opts: G
 
   try {
     let current = assertCrawlableUrl(url, opts.verifiedHost);
-    const redirects: string[] = [];
+    const redirects: Array<{ status: number; to: string }> = [];
     for (let hop = 0; ; hop++) {
       let res: Response;
       try {
@@ -322,7 +324,7 @@ export async function guardedFetch(fetchImpl: typeof fetch, url: string, opts: G
         } catch (e) {
           throw new CrawlFetchError("redirect_offsite", `Redirect hop ${hop + 1} refused: ${(e as Error).message}`);
         }
-        redirects.push(next.toString());
+        redirects.push({ status: res.status, to: next.toString() });
         current = next;
         continue;
       }

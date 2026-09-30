@@ -1,0 +1,13 @@
+{
+  "_fixture": "CONSTRUCTED fixture (not a captured provider response). Shape from https://ai.google.dev/api/generate-content, checked 2026-09-30. The model answered without searching: no groundingMetadata.",
+  "candidates": [
+    {
+      "content": { "role": "model", "parts": [{ "text": "Solid brass pulls are available from many hardware makers; look for forged construction." }] },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": { "promptTokenCount": 19, "candidatesTokenCount": 25, "totalTokenCount": 44 },
+  "modelVersion": "gemini-3.8-flash",
+  "responseId": "resp-gemini-ungrounded-002"
+}

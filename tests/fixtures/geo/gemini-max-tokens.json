@@ -1,0 +1,15 @@
+{
+  "_fixture": "CONSTRUCTED fixture (not a captured provider response). Shape from https://ai.google.dev/api/generate-content (FinishReason MAX_TOKENS), checked 2026-09-30.",
+  "candidates": [
+    {
+      "content": { "role": "model", "parts": [{ "text": "The leading makers of solid brass cabinet hardware are" }] },
+      "finishReason": "MAX_TOKENS",
+      "groundingMetadata": {
+        "webSearchQueries": ["solid brass cabinet hardware makers"],
+        "groundingChunks": [{ "web": { "uri": "https://www.hardwareforum.example/thread/42", "title": "Forum: who makes real brass pulls?" } }]
+      }
+    }
+  ],
+  "usageMetadata": { "promptTokenCount": 18, "candidatesTokenCount": 4096, "totalTokenCount": 4114 },
+  "responseId": "resp-gemini-maxtok-004"
+}

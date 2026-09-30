@@ -1,0 +1,925 @@
+/**
+ * Deterministic candidate shortlist (pure: CandidateInputs -> Candidate[]). All thresholds are
+ * configurable heuristics, not promises of ranking gains; CANDIDATE_RULES_VERSION changes whenever a
+ * default or rule changes. Candidates carry their metrics and evidence specs; generate.ts turns
+ * evidence specs into evidence rows.
+ *
+ * Kinds:
+ *  weak_ctr             page/query rows with impressions >= minImpressions whose CTR is below
+ *                       ctrBelowMedianFactor x the project median CTR of the same position bucket
+ *                       (1-3, 4-10, 11-20; all devices combined) -> title/meta candidate (one per page)
+ *  striking_distance    queries with (impression-weighted) position 4-20 and impressions >= min
+ *  declining            pages whose clicks fell >= 30% vs the previous window, previous clicks >= 20
+ *  query_page_mismatch  a query's top page differs from the crawled page whose title/H1 best matches it
+ *  coverage_gap         GSC queries for a page whose words are mostly absent from its title/headings/excerpt
+ *  internal_link        high-impression page with <= maxInlinks internal inlinks among crawled pages
+ *  engine_query  [A6]   GEO engine search queries matched against GSC and crawled pages:
+ *                       reinforce | improve | no_matching_page (human review; never auto-verified)
+ *  technical     [A9]   audit findings; >= templateMinUrls URLs sharing rule + page type (or template)
+ *                       -> ONE template-scope candidate; else page-scope
+ *  duplicate     [A15]  title-token prefilter (>= 2 shared non-stopword tokens AND >= 50% of the
+ *                       shorter title) OR GSC queries where both URLs received impressions; <= 40 pairs
+ */
+import type { EvidenceSource, Level, PageType, Scope, Severity } from "@shared/types";
+import type { RecommendationDraft } from "../../recommendations/store";
+import { pageMetrics, weightedPosition, type EntityMetrics, type SliceRow } from "../gsc/aggregate";
+import { windowLabel } from "../gsc/windows";
+import type { ActionChoice } from "../questions";
+import type { CandidateInputs, PageInfo } from "./inputs";
+import { SEVERITY_WEIGHT, type PriorityInputs } from "./priority";
+import { clip, coverage, fmtInt, fmtPct, fmtPos, normalizeUrl, queryKey, sharedCount, tokenSet } from "./text";
+
+export const CANDIDATE_RULES_VERSION = "seo-candidates-2026-09-30.1";
+
+export interface CandidateConfig {
+  minImpressions: number;
+  medianMinImpressions: number;
+  ctrBucketMinRows: number;
+  ctrBelowMedianFactor: number;
+  strikingMinPosition: number;
+  strikingMaxPosition: number;
+  decliningMinPrevClicks: number;
+  decliningMinDrop: number;
+  matchMinCoverage: number;
+  mismatchMargin: number;
+  coverageGapMinQueryImpressions: number;
+  coverageGapMaxCoverage: number;
+  internalLinkMinImpressions: number;
+  internalLinkMaxInlinks: number;
+  internalLinkMinCrawled: number;
+  engineReinforceMaxPosition: number;
+  maxEngineQueries: number;
+  templateMinUrls: number;
+  technicalMinSeverity: Severity;
+  duplicateMinSharedTokens: number;
+  duplicateMinShorterShare: number;
+  maxDuplicatePairs: number;
+  maxPerKind: number;
+}
+
+export const DEFAULT_CANDIDATE_CONFIG: CandidateConfig = {
+  minImpressions: 100,
+  medianMinImpressions: 20,
+  ctrBucketMinRows: 3,
+  ctrBelowMedianFactor: 0.8,
+  strikingMinPosition: 4,
+  strikingMaxPosition: 20,
+  decliningMinPrevClicks: 20,
+  decliningMinDrop: 0.3,
+  matchMinCoverage: 0.6,
+  mismatchMargin: 0.2,
+  coverageGapMinQueryImpressions: 50,
+  coverageGapMaxCoverage: 0.5,
+  internalLinkMinImpressions: 200,
+  internalLinkMaxInlinks: 1,
+  internalLinkMinCrawled: 3,
+  engineReinforceMaxPosition: 10,
+  maxEngineQueries: 10,
+  templateMinUrls: 3,
+  technicalMinSeverity: "minor",
+  duplicateMinSharedTokens: 2,
+  duplicateMinShorterShare: 0.5,
+  maxDuplicatePairs: 40,
+  maxPerKind: 10,
+};
+
+export type CandidateKind =
+  | "weak_ctr"
+  | "striking_distance"
+  | "declining"
+  | "query_page_mismatch"
+  | "coverage_gap"
+  | "internal_link"
+  | "engine_query"
+  | "technical"
+  | "duplicate";
+
+export interface EvidenceSpec {
+  source: EvidenceSource;
+  refId: string | null;
+  window: string | null;
+  text: string;
+  data: unknown;
+  tainted?: boolean;
+}
+
+export interface Candidate {
+  /** Readable, stable key (decision_records.candidate_key). */
+  key: string;
+  kind: CandidateKind;
+  issueType: string;
+  /** Content opportunities need Jev; technical findings do not. */
+  jevDependent: boolean;
+  scope: Scope;
+  target: RecommendationDraft["target"];
+  trigger: string;
+  issue: string;
+  query: string | null;
+  page: PageInfo | null;
+  pageB: PageInfo | null;
+  sharedQueries: string[];
+  pageType: PageType | null;
+  severity: Severity | null;
+  metrics: Record<string, number | string | null>;
+  priority: PriorityInputs;
+  defaultAction: ActionChoice | null;
+  evidence: EvidenceSpec[];
+  /** Stable identity for the dedup key (not metrics, so reruns match). */
+  identity: unknown;
+  engineMatch: "reinforce" | "improve" | "no_matching_page" | null;
+  wantsIntent: boolean;
+  wantsPillar: boolean;
+  /** Crawl evidence exists for the target. */
+  verified: boolean;
+  /** Human review required regardless of Jev tier (tier capped at flag). */
+  reviewRequired: boolean;
+  limitations: string;
+}
+
+const SEVERITY_RANK: Record<Severity, number> = { advisory: 0, minor: 1, moderate: 2, major: 3, critical: 4 };
+const TEMPLATE_PAGE_TYPES = new Set<PageType>(["product", "collection", "article"]);
+
+export function positionBucket(position: number): "1-3" | "4-10" | "11-20" | null {
+  const p = Math.round(position);
+  if (p < 1) return null;
+  if (p <= 3) return "1-3";
+  if (p <= 10) return "4-10";
+  if (p <= 20) return "11-20";
+  return null;
+}
+
+export function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const s = [...values].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
+}
+
+const rowCtr = (r: { clicks: number; impressions: number }) => (r.impressions > 0 ? r.clicks / r.impressions : 0);
+
+export function buildCandidates(inputs: CandidateInputs, config: Partial<CandidateConfig> = {}): Candidate[] {
+  const cfg = { ...DEFAULT_CANDIDATE_CONFIG, ...config };
+  const b = new Builder(inputs, cfg);
+  const out: Candidate[] = [];
+  const cap = (list: Candidate[]) => list.slice(0, cfg.maxPerKind);
+  const weak = b.weakCtr();
+  out.push(...cap(weak));
+  out.push(...cap(b.strikingDistance(new Set(weak.map((c) => `${c.query}|${c.page?.norm ?? c.target.url}`)))));
+  out.push(...cap(b.declining()));
+  out.push(...cap(b.queryPageMismatch()));
+  out.push(...cap(b.coverageGap()));
+  out.push(...cap(b.internalLinks()));
+  out.push(...b.engineQueries());
+  out.push(...b.technical());
+  out.push(...b.duplicates());
+  return out;
+}
+
+class Builder {
+  readonly pagesByNorm = new Map<string, PageInfo>();
+  readonly cur: SliceRow[];
+  readonly qp: SliceRow[];
+  readonly win: string | null;
+  readonly prevWin: string | null;
+  readonly gscSource: EvidenceSource;
+  readonly gscLabel: string;
+  readonly totalImpr: number | null;
+  readonly totalClicks: number | null;
+  readonly pageMetricsCur: Map<string, EntityMetrics>;
+  readonly pageMetricsPrev: Map<string, EntityMetrics>;
+
+  constructor(readonly inp: CandidateInputs, readonly cfg: CandidateConfig) {
+    for (const p of inp.pages) this.pagesByNorm.set(p.norm, p);
+    this.cur = inp.rows.filter((r) => r.window === "current");
+    this.qp = this.cur.filter((r) => r.query && r.page);
+    this.win = inp.sync ? windowLabel(inp.sync.current) : null;
+    this.prevWin = inp.sync ? windowLabel(inp.sync.previous) : null;
+    this.gscSource = inp.sync?.source === "csv_import" ? "manual_import" : "gsc";
+    this.gscLabel = inp.sync?.source === "csv_import" ? "GSC CSV import" : inp.sync?.source === "demo" ? "GSC (demo data)" : "GSC";
+    // Denominators: property totals when present; otherwise the current slice sum (ranking signal only, never displayed).
+    const t = inp.sync?.totals.current;
+    const sliceImpr = this.cur.reduce((s, r) => s + (r.query && r.page ? r.impressions : 0), 0);
+    const sliceClicks = this.cur.reduce((s, r) => s + (r.query && r.page ? r.clicks : 0), 0);
+    this.totalImpr = t ? t.impressions : sliceImpr > 0 ? sliceImpr : null;
+    this.totalClicks = t ? t.clicks : sliceClicks > 0 ? sliceClicks : null;
+    this.pageMetricsCur = pageMetrics(inp.rows, "current", normalizeUrl);
+    this.pageMetricsPrev = pageMetrics(inp.rows, "previous", normalizeUrl);
+  }
+
+  // ---------------------------------------------------------------- evidence helpers
+  gscRowEvidence(rows: SliceRow[], label: string): EvidenceSpec {
+    const lines = rows.slice(0, 5).map((r) => {
+      const who = r.query && r.page ? `query "${clip(r.query, 80)}" on ${r.page}` : r.query ? `query "${clip(r.query, 80)}"` : `page ${r.page}`;
+      return `${who}: ${fmtInt(r.impressions)} impressions, ${fmtInt(r.clicks)} clicks, CTR ${fmtPct(rowCtr(r))}, average position ${fmtPos(r.position)}`;
+    });
+    return {
+      source: this.gscSource,
+      refId: this.inp.sync?.id ?? null,
+      window: this.win,
+      text: `${this.gscLabel} ${this.win} (${label}): ${lines.join("; ")}.`,
+      data: { rows: rows.slice(0, 5).map((r) => ({ query: r.query, page: r.page, clicks: r.clicks, impressions: r.impressions, position: r.position })) },
+    };
+  }
+
+  pageMetricEvidence(url: string, m: EntityMetrics, which: "current" | "previous"): EvidenceSpec {
+    const w = which === "current" ? this.win : this.prevWin;
+    const basis = m.basis === "page_rows" ? "page totals" : "sum of query/page rows, a lower bound";
+    return {
+      source: this.gscSource,
+      refId: this.inp.sync?.id ?? null,
+      window: w,
+      text: `${this.gscLabel} ${w} (${which} window, ${basis}): page ${url}: ${fmtInt(m.impressions)} impressions, ${fmtInt(m.clicks)} clicks, CTR ${fmtPct(m.ctr.value)}.`,
+      data: { page: url, window: which, clicks: m.clicks, impressions: m.impressions, basis: m.basis },
+    };
+  }
+
+  crawlEvidence(p: PageInfo, extra = ""): EvidenceSpec {
+    const parts = [`title "${clip(p.title, 120) || "(none)"}"`, `H1 "${clip(p.h1, 120) || "(none)"}"`];
+    if (p.metaDescription !== null) parts.push(`meta description "${clip(p.metaDescription, 160)}"`);
+    return {
+      source: "crawl",
+      refId: p.snapshotId,
+      window: p.fetchedAt.slice(0, 10),
+      text: `Crawled ${p.url} (${p.pageType}) on ${p.fetchedAt.slice(0, 10)}: ${parts.join("; ")}${extra ? `; ${extra}` : ""}.`,
+      data: { url: p.url, pageType: p.pageType, title: p.title, h1: p.h1, metaDescription: p.metaDescription },
+      tainted: p.tainted,
+    };
+  }
+
+  ruleEvidence(rule: string, text: string, data: unknown, refId: string | null = null): EvidenceSpec {
+    return { source: "rule", refId, window: this.win, text: `Rule ${rule} (${CANDIDATE_RULES_VERSION}): ${text}`, data };
+  }
+
+  gscLimitations(extra = ""): string {
+    const trunc = this.inp.sync?.truncated ? " Rows were truncated at the project row cap." : "";
+    return `${this.gscLabel} data for ${this.win}; anonymized queries are excluded and all devices are combined.${trunc}${extra ? ` ${extra}` : ""} Heuristic candidate; no ranking or traffic change is promised.`.slice(0, 400);
+  }
+
+  priorityFor(impressions: number | null, clicks: number | null, effort: Level, severity: number | null = null, reach: number | null = null): PriorityInputs {
+    return { impressions, clicks, totalImpressions: this.totalImpr, totalClicks: this.totalClicks, severity, reach, effort };
+  }
+
+  bestMatchingPage(query: string): { page: PageInfo; score: number } | null {
+    const q = tokenSet(query);
+    let best: { page: PageInfo; score: number } | null = null;
+    for (const p of this.inp.pages) {
+      const score = coverage(q, tokenSet(`${p.title ?? ""} ${p.h1 ?? ""}`));
+      if (!best || score > best.score) best = { page: p, score };
+    }
+    return best;
+  }
+
+  base(kind: CandidateKind, partial: Partial<Candidate> & Pick<Candidate, "key" | "issueType" | "trigger" | "issue" | "evidence" | "identity" | "priority">): Candidate {
+    return {
+      kind,
+      jevDependent: kind !== "technical",
+      scope: "page",
+      target: { kind: "url" },
+      query: null,
+      page: null,
+      pageB: null,
+      sharedQueries: [],
+      pageType: partial.page?.pageType ?? null,
+      severity: null,
+      metrics: {},
+      defaultAction: null,
+      engineMatch: null,
+      wantsIntent: false,
+      wantsPillar: false,
+      verified: !!partial.page,
+      reviewRequired: false,
+      limitations: this.gscLimitations(),
+      ...partial,
+    };
+  }
+
+  // ---------------------------------------------------------------- weak_ctr
+  weakCtr(): Candidate[] {
+    if (!this.inp.sync) return [];
+    const units = this.qp.length ? this.qp : this.cur.filter((r) => r.page && !r.query);
+    const byBucket = new Map<string, number[]>();
+    for (const r of units) {
+      const bkt = positionBucket(r.position);
+      if (!bkt || r.impressions < this.cfg.medianMinImpressions) continue;
+      const list = byBucket.get(bkt) ?? [];
+      list.push(rowCtr(r));
+      byBucket.set(bkt, list);
+    }
+    const medians = new Map<string, { median: number; n: number }>();
+    for (const [bkt, list] of byBucket) {
+      const m = median(list);
+      if (m !== null && m > 0 && list.length >= this.cfg.ctrBucketMinRows) medians.set(bkt, { median: m, n: list.length });
+    }
+    const byPage = new Map<string, Array<{ r: SliceRow; bkt: string; med: { median: number; n: number } }>>();
+    for (const r of units) {
+      const bkt = positionBucket(r.position);
+      const med = bkt ? medians.get(bkt) : undefined;
+      if (!bkt || !med || r.impressions < this.cfg.minImpressions) continue;
+      if (rowCtr(r) >= med.median * this.cfg.ctrBelowMedianFactor) continue;
+      const k = normalizeUrl(r.page!);
+      const list = byPage.get(k) ?? [];
+      list.push({ r, bkt, med });
+      byPage.set(k, list);
+    }
+    const out: Candidate[] = [];
+    for (const [norm, list] of byPage) {
+      list.sort((a, b) => b.r.impressions - a.r.impressions);
+      const top = list[0]!;
+      const page = this.pagesByNorm.get(norm) ?? null;
+      const impressions = list.reduce((s, x) => s + x.r.impressions, 0);
+      const clicks = list.reduce((s, x) => s + x.r.clicks, 0);
+      const ev: EvidenceSpec[] = [
+        this.gscRowEvidence(list.map((x) => x.r), "rows with CTR below their position-bucket median"),
+        this.ruleEvidence(
+          "weak_ctr",
+          `median CTR for position bucket ${top.bkt} across ${top.med.n} query/page rows with at least ${this.cfg.medianMinImpressions} impressions is ${fmtPct(top.med.median)}; flagged rows are below ${fmtPct(top.med.median * this.cfg.ctrBelowMedianFactor)}.`,
+          { bucket: top.bkt, median: top.med.median, rows: top.med.n, factor: this.cfg.ctrBelowMedianFactor },
+        ),
+      ];
+      if (page) ev.push(this.crawlEvidence(page));
+      out.push(
+        this.base("weak_ctr", {
+          key: `weak_ctr:${norm}`,
+          issueType: "weak_ctr",
+          trigger: `From GSC query "${clip(top.r.query ?? top.r.page, 80)}"`,
+          issue: `Search results for ${top.r.page} get fewer clicks than similar positions on this site.`,
+          query: top.r.query,
+          page,
+          target: { kind: "url", url: top.r.page! },
+          metrics: { impressions, clicks, ctr: impressions ? clicks / impressions : null, position: top.r.position, bucket: top.bkt, bucketMedianCtr: top.med.median },
+          priority: this.priorityFor(impressions, clicks, "low"),
+          defaultAction: "rewrite_title_meta",
+          evidence: ev,
+          identity: { page: norm },
+          wantsIntent: !!top.r.query,
+        }),
+      );
+    }
+    return out.sort((a, b) => Number(b.metrics.impressions) - Number(a.metrics.impressions));
+  }
+
+  // ---------------------------------------------------------------- striking_distance
+  strikingDistance(exclude: Set<string>): Candidate[] {
+    if (!this.inp.sync) return [];
+    const byQuery = new Map<string, SliceRow[]>();
+    const src = this.qp.length ? this.qp : this.cur.filter((r) => r.query && !r.page);
+    for (const r of src) {
+      const list = byQuery.get(r.query!) ?? [];
+      list.push(r);
+      byQuery.set(r.query!, list);
+    }
+    const out: Candidate[] = [];
+    for (const [query, rows] of byQuery) {
+      const impressions = rows.reduce((s, r) => s + r.impressions, 0);
+      const clicks = rows.reduce((s, r) => s + r.clicks, 0);
+      const pos = weightedPosition(rows);
+      if (pos === null || impressions < this.cfg.minImpressions) continue;
+      if (pos < this.cfg.strikingMinPosition - 0.5 || pos >= this.cfg.strikingMaxPosition + 0.5) continue;
+      const top = [...rows].sort((a, b) => b.impressions - a.impressions)[0]!;
+      let pageUrl = top.page;
+      let page = pageUrl ? (this.pagesByNorm.get(normalizeUrl(pageUrl)) ?? null) : null;
+      if (!pageUrl) {
+        const best = this.bestMatchingPage(query);
+        if (!best || best.score < this.cfg.matchMinCoverage) continue;
+        page = best.page;
+        pageUrl = best.page.url;
+      }
+      if (exclude.has(`${query}|${normalizeUrl(pageUrl)}`)) continue;
+      const ev: EvidenceSpec[] = [
+        this.gscRowEvidence(rows, "query in striking distance"),
+        this.ruleEvidence(
+          "striking_distance",
+          `query "${clip(query, 80)}" has ${fmtInt(impressions)} impressions at an impression-weighted average position of ${fmtPos(pos)} (window ${this.cfg.strikingMinPosition}-${this.cfg.strikingMaxPosition}).`,
+          { query, impressions, position: pos },
+        ),
+      ];
+      if (page) ev.push(this.crawlEvidence(page));
+      out.push(
+        this.base("striking_distance", {
+          key: `striking_distance:${queryKey(query)}|${normalizeUrl(pageUrl)}`,
+          issueType: "striking_distance",
+          trigger: `From GSC query "${clip(query, 80)}"`,
+          issue: `The query "${clip(query, 80)}" ranks just off the top results for ${pageUrl}.`,
+          query,
+          page,
+          target: { kind: "url", url: pageUrl },
+          metrics: { impressions, clicks, position: pos },
+          priority: this.priorityFor(impressions, clicks, "medium"),
+          defaultAction: "add_section",
+          evidence: ev,
+          identity: { query: queryKey(query), page: normalizeUrl(pageUrl) },
+          wantsIntent: true,
+        }),
+      );
+    }
+    return out.sort((a, b) => Number(b.metrics.impressions) - Number(a.metrics.impressions));
+  }
+
+  // ---------------------------------------------------------------- declining
+  declining(): Candidate[] {
+    if (!this.inp.sync) return [];
+    const out: Candidate[] = [];
+    for (const [norm, prev] of this.pageMetricsPrev) {
+      const cur = this.pageMetricsCur.get(norm);
+      if (prev.clicks < this.cfg.decliningMinPrevClicks) continue;
+      const curClicks = cur?.clicks ?? 0;
+      const drop = (prev.clicks - curClicks) / prev.clicks;
+      if (drop < this.cfg.decliningMinDrop) continue;
+      const page = this.pagesByNorm.get(norm) ?? null;
+      const url = page?.url ?? norm;
+      const ev: EvidenceSpec[] = [this.pageMetricEvidence(url, prev, "previous")];
+      if (cur) ev.push(this.pageMetricEvidence(url, cur, "current"));
+      ev.push(
+        this.ruleEvidence(
+          "declining",
+          `clicks for ${url} changed from ${fmtInt(prev.clicks)} (${this.prevWin}) to ${fmtInt(curClicks)} (${this.win}), a drop of ${fmtPct(drop)}; threshold is a ${fmtPct(this.cfg.decliningMinDrop)} drop with at least ${this.cfg.decliningMinPrevClicks} previous clicks.`,
+          { page: url, previousClicks: prev.clicks, currentClicks: curClicks, drop },
+        ),
+      );
+      if (page) ev.push(this.crawlEvidence(page));
+      out.push(
+        this.base("declining", {
+          key: `declining:${norm}`,
+          issueType: "declining_page",
+          trigger: `Clicks down ${fmtPct(drop)} vs previous 28 days`,
+          issue: `Search clicks to ${url} dropped compared with the previous window.`,
+          page,
+          target: { kind: "url", url },
+          metrics: { clicks: curClicks, previousClicks: prev.clicks, drop, impressions: cur?.impressions ?? 0 },
+          priority: this.priorityFor(null, prev.clicks - curClicks, "medium"),
+          defaultAction: "improve_intro_answer",
+          evidence: ev,
+          identity: { page: norm },
+          limitations: this.gscLimitations("A click drop can have causes outside the page (seasonality, SERP changes); check before editing."),
+        }),
+      );
+    }
+    return out.sort((a, b) => Number(b.metrics.previousClicks) - Number(a.metrics.previousClicks));
+  }
+
+  // ---------------------------------------------------------------- query_page_mismatch
+  queryPageMismatch(): Candidate[] {
+    if (!this.inp.sync || this.inp.pages.length < 2) return [];
+    const byQuery = new Map<string, SliceRow[]>();
+    for (const r of this.qp) {
+      const list = byQuery.get(r.query!) ?? [];
+      list.push(r);
+      byQuery.set(r.query!, list);
+    }
+    const out: Candidate[] = [];
+    for (const [query, rows] of byQuery) {
+      const impressions = rows.reduce((s, r) => s + r.impressions, 0);
+      if (impressions < this.cfg.minImpressions) continue;
+      const top = [...rows].sort((a, b) => b.impressions - a.impressions)[0]!;
+      const topPage = this.pagesByNorm.get(normalizeUrl(top.page!));
+      if (!topPage) continue;
+      const q = tokenSet(query);
+      const topScore = coverage(q, tokenSet(`${topPage.title ?? ""} ${topPage.h1 ?? ""}`));
+      const best = this.bestMatchingPage(query);
+      if (!best || best.page.norm === topPage.norm) continue;
+      if (best.score < this.cfg.matchMinCoverage || best.score < topScore + this.cfg.mismatchMargin) continue;
+      const clicks = rows.reduce((s, r) => s + r.clicks, 0);
+      out.push(
+        this.base("query_page_mismatch", {
+          key: `query_page_mismatch:${queryKey(query)}|${best.page.norm}`,
+          issueType: "query_page_mismatch",
+          trigger: `From GSC query "${clip(query, 80)}"`,
+          issue: `Search Console shows ${topPage.url} for "${clip(query, 80)}", but ${best.page.url} matches the query more closely.`,
+          query,
+          page: best.page,
+          pageB: topPage,
+          target: { kind: "url", url: best.page.url, exampleUrls: [best.page.url, topPage.url] },
+          metrics: { impressions, clicks, bestCoverage: best.score, topCoverage: topScore },
+          priority: this.priorityFor(impressions, clicks, "low"),
+          defaultAction: "add_internal_links",
+          evidence: [
+            this.gscRowEvidence([top], "page Search Console shows for the query"),
+            this.ruleEvidence(
+              "query_page_mismatch",
+              `"${clip(query, 80)}": ${fmtPct(best.score)} of its words appear in the title/H1 of ${best.page.url}, versus ${fmtPct(topScore)} for ${topPage.url}.`,
+              { query, best: best.page.url, bestCoverage: best.score, top: topPage.url, topCoverage: topScore },
+            ),
+            this.crawlEvidence(best.page),
+            this.crawlEvidence(topPage),
+          ],
+          identity: { query: queryKey(query), best: best.page.norm, top: topPage.norm },
+          wantsIntent: true,
+        }),
+      );
+    }
+    return out.sort((a, b) => Number(b.metrics.impressions) - Number(a.metrics.impressions));
+  }
+
+  // ---------------------------------------------------------------- coverage_gap
+  coverageGap(): Candidate[] {
+    if (!this.inp.sync) return [];
+    const byPage = new Map<string, SliceRow[]>();
+    for (const r of this.qp) {
+      if (r.impressions < this.cfg.coverageGapMinQueryImpressions) continue;
+      const k = normalizeUrl(r.page!);
+      const list = byPage.get(k) ?? [];
+      list.push(r);
+      byPage.set(k, list);
+    }
+    const out: Candidate[] = [];
+    for (const [norm, rows] of byPage) {
+      const page = this.pagesByNorm.get(norm);
+      if (!page) continue;
+      const hay = tokenSet([page.title, page.h1, page.metaDescription, ...page.headings, page.excerpt].filter(Boolean).join(" "));
+      const gaps = rows
+        .filter((r) => coverage(tokenSet(r.query!), hay) < this.cfg.coverageGapMaxCoverage)
+        .sort((a, b) => b.impressions - a.impressions)
+        .slice(0, 5);
+      if (gaps.length === 0) continue;
+      const impressions = gaps.reduce((s, r) => s + r.impressions, 0);
+      if (impressions < this.cfg.minImpressions) continue;
+      const clicks = gaps.reduce((s, r) => s + r.clicks, 0);
+      out.push(
+        this.base("coverage_gap", {
+          key: `coverage_gap:${norm}`,
+          issueType: "coverage_gap",
+          trigger: `From GSC query "${clip(gaps[0]!.query, 80)}"`,
+          issue: `${page.url} receives impressions for queries whose words are mostly missing from its title, headings, and opening text.`,
+          query: gaps[0]!.query,
+          page,
+          target: { kind: "url", url: page.url },
+          metrics: { impressions, clicks, queries: gaps.length },
+          priority: this.priorityFor(impressions, clicks, "medium"),
+          defaultAction: "add_section",
+          evidence: [
+            this.gscRowEvidence(gaps, "queries not covered by the page's headings or text"),
+            this.crawlEvidence(page, `headings: ${clip(page.headings.slice(0, 8).join(" | "), 200) || "(none)"}`),
+          ],
+          identity: { page: norm },
+          wantsIntent: true,
+          wantsPillar: true,
+          limitations: this.gscLimitations("Coverage is checked against the crawled title, headings, and a capped text excerpt only."),
+        }),
+      );
+    }
+    return out.sort((a, b) => Number(b.metrics.impressions) - Number(a.metrics.impressions));
+  }
+
+  // ---------------------------------------------------------------- internal_link
+  internalLinks(): Candidate[] {
+    if (!this.inp.sync || !this.inp.crawl || this.inp.pages.length < this.cfg.internalLinkMinCrawled) return [];
+    const inlinks = new Map<string, Set<string>>();
+    for (const p of this.inp.pages) {
+      for (const l of p.internalLinks) {
+        if (l === p.norm) continue;
+        const set = inlinks.get(l) ?? new Set<string>();
+        set.add(p.norm);
+        inlinks.set(l, set);
+      }
+    }
+    const crawled = this.inp.pages.length;
+    const out: Candidate[] = [];
+    for (const p of this.inp.pages) {
+      if (p.pageType === "home") continue;
+      const m = this.pageMetricsCur.get(p.norm);
+      if (!m || m.impressions < this.cfg.internalLinkMinImpressions) continue;
+      const count = inlinks.get(p.norm)?.size ?? 0;
+      if (count > this.cfg.internalLinkMaxInlinks) continue;
+      out.push(
+        this.base("internal_link", {
+          key: `internal_link:${p.norm}`,
+          issueType: "internal_link",
+          trigger: `High-impression page with ${count} internal inlinks`,
+          issue: `${p.url} gets search impressions but few crawled pages link to it.`,
+          page: p,
+          target: { kind: "url", url: p.url },
+          metrics: { impressions: m.impressions, clicks: m.clicks, inlinks: count, crawled },
+          priority: this.priorityFor(m.impressions, m.clicks, "low"),
+          defaultAction: "add_internal_links",
+          evidence: [
+            this.pageMetricEvidence(p.url, m, "current"),
+            {
+              source: "crawl",
+              refId: this.inp.crawl.id,
+              window: this.inp.crawl.day,
+              text: `Crawl on ${this.inp.crawl.day}: ${count} of ${crawled} crawled pages link to ${p.url}.`,
+              data: { inlinks: count, crawled, linkedFrom: [...(inlinks.get(p.norm) ?? [])].slice(0, 5) },
+            },
+          ],
+          identity: { page: p.norm },
+          limitations: this.gscLimitations(`Inlinks are counted only within the ${crawled} crawled pages.`),
+        }),
+      );
+    }
+    return out.sort((a, b) => Number(b.metrics.impressions) - Number(a.metrics.impressions));
+  }
+
+  // ---------------------------------------------------------------- engine_query [A6]
+  engineQueries(): Candidate[] {
+    const groups = this.inp.engineQueries.slice(0, this.cfg.maxEngineQueries);
+    if (groups.length === 0) return [];
+    const gscByKey = new Map<string, SliceRow[]>();
+    const querySrc = this.cur.filter((r) => r.query);
+    for (const r of querySrc) {
+      const k = queryKey(r.query!);
+      const list = gscByKey.get(k) ?? [];
+      list.push(r);
+      gscByKey.set(k, list);
+    }
+    const out: Candidate[] = [];
+    for (const g of groups) {
+      const k = queryKey(g.normalized);
+      if (!k) continue;
+      const rows = gscByKey.get(k) ?? [];
+      const engineEv: EvidenceSpec = {
+        source: "geo_observation",
+        refId: g.observationIds[0] ?? null,
+        window: null,
+        text: `Engine search query "${clip(g.example, 100)}" captured ${g.count} time(s) from ${g.providers.join(", ")} (${g.models.join(", ")}), API-sampled.`,
+        data: { normalized: g.normalized, count: g.count, providers: g.providers, models: g.models, observationIds: g.observationIds },
+      };
+      let match: Candidate["engineMatch"];
+      let page: PageInfo | null = null;
+      let pageUrl: string | null = null;
+      const ev: EvidenceSpec[] = [engineEv];
+      let impressions: number | null = null;
+      let clicks: number | null = null;
+      let position: number | null = null;
+      if (rows.length) {
+        impressions = rows.reduce((s, r) => s + r.impressions, 0);
+        clicks = rows.reduce((s, r) => s + r.clicks, 0);
+        position = weightedPosition(rows);
+        match = position !== null && position <= this.cfg.engineReinforceMaxPosition ? "reinforce" : "improve";
+        const top = [...rows].filter((r) => r.page).sort((a, b) => b.impressions - a.impressions)[0];
+        if (top?.page) {
+          pageUrl = top.page;
+          page = this.pagesByNorm.get(normalizeUrl(top.page)) ?? null;
+        }
+        ev.push(this.gscRowEvidence(rows, "GSC rows matching the engine query"));
+      } else {
+        const best = this.bestMatchingPage(g.normalized);
+        if (best && best.score >= this.cfg.matchMinCoverage) {
+          match = "improve";
+          page = best.page;
+          pageUrl = best.page.url;
+          ev.push(
+            this.ruleEvidence(
+              "engine_query_match",
+              `no GSC rows match "${clip(g.example, 80)}"; ${fmtPct(best.score)} of its words appear in the title/H1 of ${best.page.url}.`,
+              { query: g.normalized, page: best.page.url, coverage: best.score },
+            ),
+          );
+        } else {
+          match = "no_matching_page";
+          ev.push(
+            this.ruleEvidence(
+              "engine_query_match",
+              `no GSC rows match "${clip(g.example, 80)}" and no crawled page title/H1 contains at least ${fmtPct(this.cfg.matchMinCoverage)} of its words (${this.inp.pages.length} crawled pages checked).`,
+              { query: g.normalized, crawled: this.inp.pages.length },
+            ),
+          );
+        }
+      }
+      if (page) ev.push(this.crawlEvidence(page));
+      const noPage = match === "no_matching_page";
+      out.push(
+        this.base("engine_query", {
+          key: `engine_query:${k}`,
+          issueType: `engine_query_${match}`,
+          trigger: `Engine search query "${clip(g.example, 80)}" (API-sampled)`,
+          issue: noPage
+            ? `AI engines searched for "${clip(g.example, 80)}" and no crawled page clearly covers it.`
+            : match === "reinforce"
+              ? `AI engines searched for "${clip(g.example, 80)}", which this site already ranks for.`
+              : `AI engines searched for "${clip(g.example, 80)}"; this site has a related page but weak or no search visibility for it.`,
+          query: g.example,
+          page,
+          scope: noPage ? "site" : "page",
+          target: noPage ? { kind: "site" } : { kind: "url", url: pageUrl ?? undefined },
+          metrics: { engineCount: g.count, impressions, clicks, position },
+          priority: this.priorityFor(impressions, clicks, noPage ? "high" : "medium"),
+          defaultAction: noPage ? "new_page_candidate" : match === "reinforce" ? "add_internal_links" : "improve_intro_answer",
+          evidence: ev,
+          identity: { query: k, match },
+          engineMatch: match,
+          wantsIntent: true,
+          wantsPillar: true,
+          verified: !!page,
+          reviewRequired: noPage,
+          limitations: `Engine queries are those the provider exposed in API-sampled answers; they are not consumer-app measurements.${this.inp.sync ? ` GSC data for ${this.win}.` : " No GSC data imported."} No ranking or citation change is promised.`,
+        }),
+      );
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------- technical [A9]
+  technical(): Candidate[] {
+    if (!this.inp.crawl) return [];
+    const crawled = Math.max(1, this.inp.crawl.crawledCount);
+    const minRank = SEVERITY_RANK[this.cfg.technicalMinSeverity];
+    const findings = this.inp.findings.filter((f) => SEVERITY_RANK[f.severity] >= minRank);
+    const groups = new Map<string, { ruleId: string; pageType: PageType | null; template: string | null; items: typeof findings }>();
+    for (const f of findings) {
+      const pageType = f.url ? (this.pagesByNorm.get(normalizeUrl(f.url))?.pageType ?? "other") : null;
+      const gk = f.url === null ? `${f.ruleId}|site` : f.template ? `${f.ruleId}|tpl:${f.template}` : `${f.ruleId}|type:${pageType}`;
+      const g = groups.get(gk) ?? { ruleId: f.ruleId, pageType, template: f.template, items: [] };
+      g.items.push(f);
+      groups.set(gk, g);
+    }
+    const out: Candidate[] = [];
+    for (const [gk, g] of groups) {
+      const worst = g.items.reduce<Severity>((w, f) => (SEVERITY_RANK[f.severity] > SEVERITY_RANK[w] ? f.severity : w), "advisory");
+      const urls = [...new Set(g.items.map((f) => f.url).filter((u): u is string => !!u))];
+      const pageImpr = urls.reduce((s, u) => s + (this.pageMetricsCur.get(normalizeUrl(u))?.impressions ?? 0), 0);
+      const pageClicks = urls.reduce((s, u) => s + (this.pageMetricsCur.get(normalizeUrl(u))?.clicks ?? 0), 0);
+      const hasGsc = this.inp.sync !== null && this.pageMetricsCur.size > 0;
+      const action = defaultTechnicalAction(g.ruleId);
+      const crawlDay = this.inp.crawl.day;
+      const siteLevel = gk.endsWith("|site");
+      const grouped = !siteLevel && urls.length >= this.cfg.templateMinUrls;
+      if (siteLevel || grouped) {
+        const isTemplate = grouped && (g.template !== null || (g.pageType !== null && TEMPLATE_PAGE_TYPES.has(g.pageType)));
+        const templateName = g.template ?? (g.pageType ? `${g.pageType} template` : "site-wide");
+        const examples = g.items.filter((f) => f.url).slice(0, 3);
+        const affected = siteLevel ? crawled : urls.length;
+        const ev: EvidenceSpec[] = [
+          {
+            source: "rule",
+            refId: g.items[0]!.id,
+            window: crawlDay,
+            text: siteLevel
+              ? `Rule ${g.ruleId} (${worst}) in crawl on ${crawlDay}: ${clip(g.items[0]!.detail, 300)}`
+              : `Rule ${g.ruleId} (${worst}) affects ${urls.length} of ${this.inp.crawl.crawledCount} crawled URLs${g.pageType ? ` of type ${g.pageType}` : ""} in crawl on ${crawlDay}.`,
+            data: { ruleId: g.ruleId, severity: worst, affected: urls.length, crawled: this.inp.crawl.crawledCount, template: g.template, pageType: g.pageType },
+          },
+          ...examples.map((f) => ({
+            source: "crawl" as const,
+            refId: f.id,
+            window: crawlDay,
+            text: `Rule ${f.ruleId} on ${f.url}: ${clip(f.detail, 300)}`,
+            data: { findingId: f.id, url: f.url },
+          })),
+        ];
+        if (ev.length < 2) {
+          ev.push({ source: "crawl", refId: this.inp.crawl.id, window: crawlDay, text: `Crawl on ${crawlDay} checked ${this.inp.crawl.crawledCount} pages.`, data: { crawled: this.inp.crawl.crawledCount } });
+        }
+        if (hasGsc && pageImpr > 0) {
+          ev.push({
+            source: this.gscSource,
+            refId: this.inp.sync!.id,
+            window: this.win,
+            text: `${this.gscLabel} ${this.win}: the ${urls.length} affected URLs received ${fmtInt(pageImpr)} impressions and ${fmtInt(pageClicks)} clicks combined (page rows; lower bound).`,
+            data: { impressions: pageImpr, clicks: pageClicks, urls: urls.length },
+          });
+        }
+        const scope: Scope = isTemplate ? "template" : "site";
+        out.push(
+          this.base("technical", {
+            key: `technical:${gk}`,
+            issueType: `technical:${g.ruleId}`,
+            jevDependent: false,
+            scope,
+            target: isTemplate
+              ? { kind: "template", template: templateName, affectedUrlCount: urls.length, exampleUrls: examples.map((f) => f.url!) }
+              : { kind: "site", affectedUrlCount: affected, exampleUrls: examples.map((f) => f.url!) },
+            trigger: siteLevel ? `Site-level issue: ${g.ruleId}` : `Template issue on ${urls.length} URLs`,
+            issue: siteLevel ? clip(g.items[0]!.detail, 400) : `Rule ${g.ruleId} fails on ${urls.length} ${g.pageType ?? ""} URLs that share one ${isTemplate ? "template" : "pattern"}.`.replace(/\s+/g, " "),
+            page: null,
+            pageType: g.pageType,
+            severity: worst,
+            metrics: { affected, crawled: this.inp.crawl.crawledCount, impressions: hasGsc ? pageImpr : null },
+            priority: this.priorityFor(hasGsc ? pageImpr : null, hasGsc ? pageClicks : null, "medium", SEVERITY_WEIGHT[worst], affected / crawled),
+            defaultAction: action,
+            evidence: ev,
+            identity: { rule: g.ruleId, group: gk },
+            verified: true,
+            limitations: `Based on crawl of ${this.inp.crawl.crawledCount} pages on ${crawlDay}; pages outside the crawl may also be affected. Findings describe observed HTML only, not index status.`,
+          }),
+        );
+        continue;
+      }
+      for (const f of g.items) {
+        const page = f.url ? (this.pagesByNorm.get(normalizeUrl(f.url)) ?? null) : null;
+        const m = f.url ? this.pageMetricsCur.get(normalizeUrl(f.url)) : undefined;
+        const ev: EvidenceSpec[] = [
+          { source: "rule", refId: f.id, window: crawlDay, text: `Rule ${f.ruleId} (${f.severity}) on ${f.url}: ${clip(f.detail, 300)}`, data: { ruleId: f.ruleId, severity: f.severity, url: f.url } },
+        ];
+        if (page) ev.push(this.crawlEvidence(page));
+        if (m) ev.push(this.pageMetricEvidence(f.url!, m, "current"));
+        if (ev.length < 2) ev.push({ source: "crawl", refId: this.inp.crawl.id, window: crawlDay, text: `Crawl on ${crawlDay} checked ${this.inp.crawl.crawledCount} pages.`, data: { crawled: this.inp.crawl.crawledCount } });
+        out.push(
+          this.base("technical", {
+            key: `technical:${f.ruleId}|${normalizeUrl(f.url!)}`,
+            issueType: `technical:${f.ruleId}`,
+            jevDependent: false,
+            scope: "page",
+            target: { kind: "url", url: f.url! },
+            trigger: `Crawl finding ${f.ruleId}`,
+            issue: clip(f.detail, 400),
+            page,
+            pageType: g.pageType,
+            severity: f.severity,
+            metrics: { affected: 1, crawled: this.inp.crawl.crawledCount, impressions: m?.impressions ?? null },
+            priority: this.priorityFor(m ? m.impressions : hasGsc ? 0 : null, m ? m.clicks : hasGsc ? 0 : null, "low", SEVERITY_WEIGHT[f.severity], 1 / crawled),
+            defaultAction: action,
+            evidence: ev,
+            identity: { rule: f.ruleId, url: normalizeUrl(f.url!) },
+            verified: true,
+            limitations: `Based on crawl on ${crawlDay}; describes observed HTML only, not index status.`,
+          }),
+        );
+      }
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------- duplicates [A15]
+  duplicates(): Candidate[] {
+    const pages = this.inp.pages.filter((p) => p.title);
+    if (pages.length < 2) return [];
+    const titleTokens = new Map(pages.map((p) => [p.norm, tokenSet(p.title)]));
+    const pairs = new Map<string, { a: PageInfo; b: PageInfo; sharedTokens: number; titleMatch: boolean; queries: Map<string, number> }>();
+    const pairKey = (x: PageInfo, y: PageInfo) => (x.norm < y.norm ? `${x.norm}||${y.norm}` : `${y.norm}||${x.norm}`);
+    for (let i = 0; i < pages.length; i++) {
+      for (let j = i + 1; j < pages.length; j++) {
+        const a = pages[i]!;
+        const b = pages[j]!;
+        const ta = titleTokens.get(a.norm)!;
+        const tb = titleTokens.get(b.norm)!;
+        const shared = sharedCount(ta, tb);
+        const shorter = Math.min(ta.size, tb.size);
+        if (shorter > 0 && shared >= this.cfg.duplicateMinSharedTokens && shared >= this.cfg.duplicateMinShorterShare * shorter) {
+          pairs.set(pairKey(a, b), { a, b, sharedTokens: shared, titleMatch: true, queries: new Map() });
+        }
+      }
+    }
+    const pagesByQuery = new Map<string, Map<string, number>>();
+    for (const r of this.qp) {
+      if (r.impressions <= 0) continue;
+      const k = normalizeUrl(r.page!);
+      if (!this.pagesByNorm.has(k)) continue;
+      const m = pagesByQuery.get(r.query!) ?? new Map<string, number>();
+      m.set(k, (m.get(k) ?? 0) + r.impressions);
+      pagesByQuery.set(r.query!, m);
+    }
+    for (const [q, m] of pagesByQuery) {
+      const list = [...m.keys()];
+      for (let i = 0; i < list.length; i++) {
+        for (let j = i + 1; j < list.length; j++) {
+          const a = this.pagesByNorm.get(list[i]!)!;
+          const b = this.pagesByNorm.get(list[j]!)!;
+          const key = pairKey(a, b);
+          const entry = pairs.get(key) ?? { a, b, sharedTokens: sharedCount(tokenSet(a.title), tokenSet(b.title)), titleMatch: false, queries: new Map<string, number>() };
+          entry.queries.set(q, Math.min(m.get(list[i]!)!, m.get(list[j]!)!));
+          pairs.set(key, entry);
+        }
+      }
+    }
+    const ranked = [...pairs.entries()]
+      .map(([key, p]) => ({ key, ...p, sharedImpr: [...p.queries.values()].reduce((s, v) => s + v, 0) }))
+      .sort((x, y) => y.sharedImpr - x.sharedImpr || y.sharedTokens - x.sharedTokens)
+      .slice(0, this.cfg.maxDuplicatePairs);
+    return ranked.map((p) => {
+      const ca = this.pageMetricsCur.get(p.a.norm)?.clicks ?? 0;
+      const cb = this.pageMetricsCur.get(p.b.norm)?.clicks ?? 0;
+      const [strong, weak] = ca >= cb ? [p.a, p.b] : [p.b, p.a];
+      const queries = [...p.queries.entries()].sort((x, y) => y[1] - x[1]).map(([q]) => q);
+      const qRows = this.qp.filter((r) => queries.slice(0, 3).includes(r.query!) && [p.a.norm, p.b.norm].includes(normalizeUrl(r.page!)));
+      const ev: EvidenceSpec[] = [this.crawlEvidence(strong), this.crawlEvidence(weak)];
+      if (qRows.length) ev.push(this.gscRowEvidence(qRows, "queries where both URLs received impressions"));
+      ev.push(
+        this.ruleEvidence(
+          "duplicate_prefilter",
+          `${strong.url} and ${weak.url} share ${p.sharedTokens} title words${queries.length ? ` and ${queries.length} GSC queries with impressions for both` : ""}.`,
+          { a: strong.url, b: weak.url, sharedTitleTokens: p.sharedTokens, sharedQueries: queries.slice(0, 10), titleMatch: p.titleMatch },
+        ),
+      );
+      const impressions = queries.length ? p.sharedImpr : null;
+      return this.base("duplicate", {
+        key: `duplicate:${p.key}`,
+        issueType: "consolidate_duplicate",
+        trigger: queries.length ? `Two URLs share GSC query "${clip(queries[0], 80)}"` : "Two URLs with overlapping titles",
+        issue: `${strong.url} and ${weak.url} may compete for the same search intent.`,
+        page: strong,
+        pageB: weak,
+        sharedQueries: queries.slice(0, 10),
+        target: { kind: "url", url: strong.url, exampleUrls: [strong.url, weak.url] },
+        metrics: { sharedTitleTokens: p.sharedTokens, sharedQueries: queries.length, impressions },
+        priority: this.priorityFor(impressions, null, "high"),
+        defaultAction: "consolidate_duplicate",
+        evidence: ev,
+        identity: { pair: p.key },
+        limitations: `Overlap is judged from titles, H1s, opening text${queries.length ? `, and shared GSC queries in ${this.win}` : ""}; confirm before merging or redirecting.`,
+      });
+    });
+  }
+}
+
+/** Deterministic default action for a rule id (used when no Jev action_choice is available). */
+export function defaultTechnicalAction(ruleId: string): ActionChoice | null {
+  const r = ruleId.toLowerCase();
+  if (/canonical|noindex|index|status|robots|redirect|4xx|5xx|broken/.test(r)) return "fix_canonical_or_indexing";
+  if (/json|schema|structured|offer|product_data|rich/.test(r)) return "fix_structured_data";
+  if (/title|meta|description/.test(r)) return "rewrite_title_meta";
+  if (/internal_link|orphan|inlink/.test(r)) return "add_internal_links";
+  if (/duplicate|variant/.test(r)) return "consolidate_duplicate";
+  if (/thin|intro|copy|content/.test(r)) return "add_section";
+  if (/h1|heading/.test(r)) return "improve_intro_answer";
+  return null;
+}

@@ -1,0 +1,12 @@
+{
+  "_fixture": "CONSTRUCTED fixture (not a captured provider response). Shape from https://ai.google.dev/api/generate-content, checked 2026-09-30. groundingMetadata present with only empty web search queries and no chunks.",
+  "candidates": [
+    {
+      "content": { "role": "model", "parts": [{ "text": "Here is a general answer." }] },
+      "finishReason": "STOP",
+      "groundingMetadata": { "webSearchQueries": ["", "   "], "groundingChunks": [] }
+    }
+  ],
+  "usageMetadata": { "promptTokenCount": 10, "candidatesTokenCount": 6, "totalTokenCount": 16 },
+  "responseId": "resp-gemini-empty-003"
+}

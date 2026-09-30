@@ -36,7 +36,7 @@ export interface DemoPage {
   metaDescription: string | null;
   h1: string[];
   jsonldTypes: string[];
-  jsonldIssues: string[];
+  jsonldIssues: Array<{ type: string; issue: "missing_offers"; detail: string }>;
   wordCount: number;
   excerpt: string;
   firstParagraph: string;
@@ -92,7 +92,7 @@ export const DEMO_PAGES: DemoPage[] = [
     metaDescription: "Fictional demo product: three-seat sofa with a washable linen slipcover.",
     h1: ["Linen Slipcover Sofa"],
     jsonldTypes: ["Product"],
-    jsonldIssues: ["Product.offers missing"],
+    jsonldIssues: [{ type: "Product", issue: "missing_offers", detail: "Product has no offers (price, priceCurrency, availability)." }],
     wordCount: 380,
     excerpt: d("Three-seat sofa with a removable linen slipcover."),
     firstParagraph: d("Three-seat sofa with a removable linen slipcover."),
@@ -105,7 +105,7 @@ export const DEMO_PAGES: DemoPage[] = [
     metaDescription: "Fictional demo product: solid oak side table.",
     h1: ["Oak Side Table"],
     jsonldTypes: ["Product"],
-    jsonldIssues: ["Product.offers missing"],
+    jsonldIssues: [{ type: "Product", issue: "missing_offers", detail: "Product has no offers (price, priceCurrency, availability)." }],
     wordCount: 260,
     excerpt: d("Solid oak side table with an oiled finish."),
     firstParagraph: d("Solid oak side table with an oiled finish."),
@@ -118,7 +118,7 @@ export const DEMO_PAGES: DemoPage[] = [
     metaDescription: "Fictional demo product: brass table lamp with linen shade.",
     h1: ["Brass Table Lamp"],
     jsonldTypes: ["Product"],
-    jsonldIssues: ["Product.offers missing"],
+    jsonldIssues: [{ type: "Product", issue: "missing_offers", detail: "Product has no offers (price, priceCurrency, availability)." }],
     wordCount: 190,
     excerpt: d("Brass table lamp with a linen shade. Bulb compatibility is not stated on the page."),
     firstParagraph: d("Brass table lamp with a linen shade."),
@@ -151,6 +151,7 @@ export const DEMO_PAGES: DemoPage[] = [
   },
 ];
 
+/** Rule IDs and severities follow src/worker/seo/rules/registry.ts. */
 export interface DemoFinding {
   ruleId: string;
   severity: "critical" | "major" | "moderate" | "minor" | "advisory";
@@ -161,16 +162,15 @@ export interface DemoFinding {
 
 export const DEMO_FINDINGS: DemoFinding[] = [
   ...["/products/linen-slipcover-sofa", "/products/oak-side-table", "/products/brass-table-lamp"].map((path) => ({
-    ruleId: "ecom.product_offer_missing",
-    severity: "major" as const,
+    ruleId: "ECOM-PRODUCT-OFFER-INCOMPLETE",
+    severity: "moderate" as const,
     path,
     template: "product",
     detail: d("Product JSON-LD is present but has no offers (price, priceCurrency, availability)."),
   })),
-  { ruleId: "meta.description_missing", severity: "moderate", path: "/collections/sofas", template: null, detail: d("No meta description found.") },
-  { ruleId: "ecom.collection_no_intro", severity: "minor", path: "/collections/table-lamps", template: "collection", detail: d("Collection page has a product grid but no introductory copy (45 words).") },
-  { ruleId: "heading.h1_missing", severity: "minor", path: "/pages/about", template: null, detail: d("No H1 found. A missing H1 is not by itself a ranking failure.") },
-  { ruleId: "ai.llms_txt_missing", severity: "advisory", path: null, template: null, detail: d("No /llms.txt found. Advisory only; it does not cause citations.") },
+  { ruleId: "SEO-META-DESC-MISSING", severity: "minor", path: "/collections/sofas", template: null, detail: d("No meta description found.") },
+  { ruleId: "ECOM-COLLECTION-NO-INTRO", severity: "minor", path: "/collections/table-lamps", template: "collection", detail: d("Collection page has a product grid but no introductory copy (45 words).") },
+  { ruleId: "SEO-H1-MISSING", severity: "moderate", path: "/pages/about", template: null, detail: d("No H1 found. A missing H1 is not by itself a ranking failure.") },
 ];
 
 /** GSC query/page rows: [query, path, current clicks, current impressions, current position, previous clicks, previous impressions, previous position]. */

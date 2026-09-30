@@ -21,7 +21,7 @@
  *     model is treated as unknown (null) until this table is re-verified and RATE_VERSION bumped.
  */
 
-import type { GeoAnswer } from "./types";
+import type { GeoAnswer, GeoProvider } from "./types";
 
 /** Bump whenever a value below changes. Stored on provider_calls.rate_version. */
 export const RATE_VERSION = "geo-rates-2026-09-30.1";
@@ -210,6 +210,13 @@ export type GeoAnswerWithOutcome = GeoAnswer & {
   searchQueriesExposed: boolean;
   finishReason?: string | null;
 };
+
+/** The adapters in this folder: a GeoProvider whose answers carry accounting metadata. */
+export interface GeoProviderAdapter extends GeoProvider {
+  /** Request options that can change answers; part of the cohort key. */
+  readonly samplingOptions: Record<string, unknown>;
+  ask(prompt: string, opts: { locale: string; language: string; signal?: AbortSignal }): Promise<GeoAnswerWithOutcome>;
+}
 
 export function outcomeOf(answer: unknown): GeoCallOutcome | null {
   const o = (answer as { outcome?: unknown } | null)?.outcome;

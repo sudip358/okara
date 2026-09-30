@@ -35,6 +35,12 @@ export interface TypeSafeProviderConfig {
   backoffInitialMs?: number;
 }
 
+interface SystemOneData {
+  model: string;
+  answers: Record<string, unknown>;
+  usage: { input_tokens: number; output_tokens: number };
+}
+
 interface Attempt {
   status: number | null;
   requestId: string | null;
@@ -92,13 +98,13 @@ export function createTypeSafeProvider(cfg: TypeSafeProviderConfig): DecisionPro
       const resv = await reserve();
       const attempts: Attempt[] = [];
       let finalError: unknown = null;
-      let data: { model: string; answers: Record<string, unknown>; usage: { input_tokens: number; output_tokens: number } } | null = null;
+      let data: SystemOneData | null = null;
       let requestId: string | null = null;
       try {
         const r = await client(attempts)
           .systemOne({ state: req.state as never, questions: req.questions as unknown as Questions, model })
           .withResponse();
-        data = r.data as unknown as typeof data;
+        data = r.data as unknown as SystemOneData;
         requestId = r.requestId ?? null;
       } catch (e) {
         finalError = e;

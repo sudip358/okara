@@ -1,0 +1,33 @@
+{
+  "_fixture": "CONSTRUCTED fixture (not a captured provider response). Shape from https://docs.perplexity.ai/openapi.json (ResponsesResponse, SearchResultsOutputItem, ResponsesUsage, ResponsesCost) and https://docs.perplexity.ai/docs/agent-api/tools/web-search#response-shape, checked 2026-09-30.",
+  "id": "resp_pplx_0001",
+  "object": "response",
+  "created_at": 1790769600,
+  "status": "completed",
+  "model": "perplexity/sonar",
+  "output": [
+    {
+      "type": "search_results",
+      "queries": ["best solid brass cabinet pulls", "Solid  Brass cabinet pulls review"],
+      "results": [
+        { "id": 1, "url": "https://www.designroundup.example/best-cabinet-pulls", "title": "The 12 best cabinet pulls of 2026", "snippet": "Our favourite forged brass pulls...", "date": "2026-08-14", "last_updated": "2026-09-01", "source": "web" },
+        { "id": 2, "url": "https://brassco.example/pulls", "title": "Brass Co | Forged brass pulls", "snippet": "Solid brass, made to order.", "date": "2025-11-02", "last_updated": "2026-06-10", "source": "web" },
+        { "id": 3, "url": "https://www.designroundup.example/best-cabinet-pulls", "title": "The 12 best cabinet pulls of 2026 (duplicate)", "snippet": "dup", "source": "web" }
+      ]
+    },
+    {
+      "type": "message",
+      "id": "msg_1",
+      "status": "completed",
+      "role": "assistant",
+      "content": [{ "type": "output_text", "text": "Design roundups often recommend Brass Co for forged solid brass pulls [1][2].", "annotations": [] }]
+    }
+  ],
+  "usage": {
+    "input_tokens": 1450,
+    "output_tokens": 210,
+    "total_tokens": 1660,
+    "tool_calls_details": { "search_web": { "invocation": 1 } },
+    "cost": { "currency": "USD", "input_cost": 0.0003625, "output_cost": 0.000525, "tool_calls_cost": 0.0025, "total_cost": 0.0033875 }
+  }
+}
