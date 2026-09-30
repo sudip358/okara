@@ -9,10 +9,11 @@
  * deterministic picks marked review -> persist link_run + link_suggestions, carrying user_status over
  * from earlier runs -> the stored LinkSuggestionReport.
  *
- * Cap: MAX_PAIRS_PER_RUN = 400 pairs per run (highest scores first). At 10 pairs per call that is at most
- * 40 Jev calls, which stays within the default project budget of 60 jev_calls/day only for small sites;
- * the budget is enforced per call by the DecisionProvider, and pairs left when it runs out become
- * deterministic review suggestions.
+ * Cap: MAX_PAIRS_PER_RUN = 400 pairs per run (highest candidate scores first; sentences and anchors are
+ * only computed until the cap is full). At 10 pairs per call a full run is at most 40 Jev calls. The
+ * project's daily jev_calls/provider_calls limit (default 60/day, shared with the agents and the redirect
+ * tool) is enforced per call by the DecisionProvider; pairs left when it runs out become deterministic
+ * review suggestions.
  *
  * Nothing is fetched and nothing on the site is changed.
  */
@@ -188,16 +189,16 @@ interface Pair {
 
 const fmt = (n: number) => n.toLocaleString("en-US");
 
-function candidateReasons(p: Pair): string[] {
+function candidateReasons(p: Pair, sentence: RankedSentence, anchor: AnchorCandidate): string[] {
   const c = p.candidate;
   const reasons = [
     `Shared terms: ${c.overlap.map((t) => t.label).join(", ")} (overlap weight ${c.base.toFixed(2)}).`,
-    `The chosen sentence contains ${p.pick.sentence.hits} of the target's defining terms.`,
+    `The chosen sentence contains ${sentence.hits} of the target's defining terms.`,
   ];
   if (c.orphan) reasons.push(`Target is an orphan within crawl coverage (0 inlinks from crawled pages), x${ORPHAN_BOOST}.`);
   else if (c.linkBoost > 1) reasons.push(`Target has only 1 inlink from crawled pages, x${LOW_INLINK_BOOST}.`);
   if (c.gscImpressions !== null && c.gscBoost > 1) reasons.push(`Target had ${fmt(c.gscImpressions)} GSC impressions in the current window, x${c.gscBoost.toFixed(2)}.`);
-  if (p.pick.anchor.inTitle) reasons.push("The anchor phrase matches words from the target's title or H1.");
+  if (anchor.inTitle) reasons.push("The anchor phrase matches words from the target's title or H1.");
   return reasons;
 }
 
@@ -206,7 +207,7 @@ export async function runLinkSuggestions(env: Env, db: Db, project: ProjectRow, 
   const isDemo = project.is_demo === 1;
   const setup = await linkSetup(db, project);
   if (setup.state === "setup_required" || !setup.host || !setup.crawl) {
-    return emptyReport("setup_required", now, [setup.message ?? "Setup required."], isDemo);
+    return emptyReport("setup_required", null, [setup.message ?? "Setup required."], isDemo);
   }
   const host = setup.host;
   const crawl = setup.crawl;
@@ -257,22 +258,28 @@ export async function runLinkSuggestions(env: Env, db: Db, project: ProjectRow, 
     // ------------------------------------------------------------ candidates, sentences, anchors
     const candidates = candidateTargets({ pages: eligible, terms, sentenceStems: sentenceStemUnion, host });
     const byId = new Map(pages.map((p) => [p.pageId, p]));
-    const pairs: Pair[] = [];
-    for (const [sourceId, list] of candidates) {
-      const source = byId.get(sourceId)!;
-      for (const c of list) {
-        const target = byId.get(c.targetPageId)!;
-        const targetTerms = terms.get(target.pageId) ?? [];
-        const sentences = rankSentences(source.sentences, sentenceStems.get(source.pageId) ?? [], targetTerms);
-        const anchors = anchorCandidates(sentences, { terms: targetTerms, title: target.title, h1s: target.h1s });
-        const pick = deterministicPick(sentences, anchors);
-        if (!pick) continue; // no descriptive anchor phrase in any candidate sentence
-        pairs.push({ candidate: c, source, target, targetTerms, sentences, anchors, pick });
-      }
-    }
-    pairs.sort((a, b) => b.candidate.score - a.candidate.score || (a.source.url < b.source.url ? -1 : a.source.url > b.source.url ? 1 : 0) || (a.target.url < b.target.url ? -1 : 1));
+    const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+    // All candidates in score order; sentences and anchors are computed lazily, only until the cap is full.
+    const ordered = [...candidates.values()]
+      .flat()
+      .map((c) => ({ c, source: byId.get(c.sourcePageId)!, target: byId.get(c.targetPageId)! }))
+      .sort((a, b) => b.c.score - a.c.score || cmp(a.source.url, b.source.url) || cmp(a.target.url, b.target.url));
     const maxPairs = Math.max(1, opts.maxPairs ?? MAX_PAIRS_PER_RUN);
-    const kept = pairs.slice(0, maxPairs);
+    const kept: Pair[] = [];
+    let withoutAnchor = 0;
+    for (const { c, source, target } of ordered) {
+      if (kept.length >= maxPairs) break;
+      const targetTerms = terms.get(target.pageId) ?? [];
+      const sentences = rankSentences(source.sentences, sentenceStems.get(source.pageId) ?? [], targetTerms);
+      const anchors = anchorCandidates(sentences, { terms: targetTerms, title: target.title, h1s: target.h1s });
+      const pick = deterministicPick(sentences, anchors);
+      if (!pick) {
+        withoutAnchor++; // no descriptive anchor phrase in any candidate sentence
+        continue;
+      }
+      kept.push({ candidate: c, source, target, targetTerms, sentences, anchors, pick });
+    }
+    const capped = kept.length >= maxPairs && ordered.length > kept.length + withoutAnchor;
 
     // ------------------------------------------------------------ Jev
     const decisions = isDemo ? null : opts.decisions === undefined ? await buildDecisionsForWorkspace(env, db, project.workspace_id, project.id) : opts.decisions;
@@ -294,12 +301,10 @@ export async function runLinkSuggestions(env: Env, db: Db, project: ProjectRow, 
     const rows: LinkSuggestionRow[] = kept.map((p, i) => {
       const outcome: LinkJevOutcome | null = jev?.outcomes[i] ?? null;
       const skipped = jev?.skipped[i] ?? null;
-      const reasons = candidateReasons(p);
-      let sentence = p.pick.sentence;
-      let anchor = p.pick.anchor;
+      const sentence = (outcome && p.sentences.find((s) => s.key === outcome.sentenceKey)) || p.pick.sentence;
+      const anchor = (outcome && p.anchors.find((a) => a.key === outcome.anchorKey)) || p.pick.anchor;
+      const reasons = candidateReasons(p, sentence, anchor);
       if (outcome) {
-        sentence = p.sentences.find((s) => s.key === outcome.sentenceKey) ?? sentence;
-        anchor = p.anchors.find((a) => a.key === outcome.anchorKey) ?? anchor;
         reasons.unshift(...outcome.reasons);
       } else if (jev) {
         reasons.unshift(
@@ -397,7 +402,7 @@ export async function runLinkSuggestions(env: Env, db: Db, project: ProjectRow, 
     if (noSentences) noteParts.push(`${noSentences} without usable sentences (targets only)`);
     if (fromExcerpt) noteParts.push(`${fromExcerpt} using sentences from the stored excerpt (crawled before sentence extraction)`);
     if (skippedInCrawl) noteParts.push(`${skippedInCrawl} crawled URL${skippedInCrawl === 1 ? "" : "s"} skipped by the crawl`);
-    if (pairs.length > kept.length) noteParts.push(`pairs capped at ${maxPairs} (${pairs.length} candidates; highest scores kept)`);
+    if (capped) noteParts.push(`pairs capped at ${maxPairs} (${ordered.length} candidate pairs; highest scores kept)`);
     const completeness = { note: noteParts.join("; "), covered: analysed.length, total: htmlPages.length };
 
     const counts = { suggested: 0, review: 0, rejected: 0 };
@@ -427,7 +432,8 @@ export async function runLinkSuggestions(env: Env, db: Db, project: ProjectRow, 
       genericAnchors,
       completeness,
       counts,
-      pairsConsidered: pairs.length,
+      pairsConsidered: ordered.length,
+      pairsWithoutAnchor: withoutAnchor,
       pairsKept: kept.length,
       jev: jev ? { calls: jev.calls, asked: jev.asked, answered: jev.answered, stoppedBy: jev.stoppedBy, questionVersion: jev.questionVersion } : null,
     };

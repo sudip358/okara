@@ -49,7 +49,7 @@ linkRoutes.post("/projects/:pid/seo/internal-links/run", async (c) => {
 
   const setup = await linkSetup(db, project);
   if (setup.state === "setup_required") {
-    return c.json({ data: emptyReport("setup_required", now, [setup.message ?? "Setup required."], project.is_demo === 1) });
+    return c.json({ data: emptyReport("setup_required", null, [setup.message ?? "Setup required."], project.is_demo === 1) });
   }
 
   const rl = await hitRateLimit(db, `internal_links_run:${project.id}`, LINK_RUN_RATE_LIMIT.limit, LINK_RUN_RATE_LIMIT.windowSeconds, now);

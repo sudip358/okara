@@ -103,3 +103,15 @@ export function counts(list: readonly LinkSuggestion[]) {
 export function extraLabels(labels: readonly string[]): string[] {
   return labels.filter((l) => l !== LINK_LABEL_REVIEW && l !== LINK_LABEL_CONFIDENCE);
 }
+
+/**
+ * Notices about Jev availability that the page shows as a banner (the run itself succeeds; affected pairs
+ * are deterministic review suggestions). Matches the label texts written by src/worker/links/run.ts.
+ */
+export function jevNotices(labels: readonly string[]): { budget: string | null; unavailable: string | null; notConfigured: string | null } {
+  return {
+    budget: labels.find((l) => l.startsWith("Jev budget reached")) ?? null,
+    unavailable: labels.find((l) => l.startsWith("Jev could not be reached")) ?? null,
+    notConfigured: labels.find((l) => l.startsWith("Jev (TypeSafe) is not configured")) ?? null,
+  };
+}

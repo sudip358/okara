@@ -45,6 +45,7 @@ import {
   counts,
   extraLabels,
   filterSuggestions,
+  jevNotices,
   pct,
   safeHref,
   shortUrl,
@@ -144,9 +145,24 @@ function ReportView({ report: r, projectId, base, onChange }: { report: LinkSugg
   }
 
   const c = counts(r.suggestions);
+  const jev = jevNotices(r.labels);
   return (
     <div className="space-y-4">
       {r.state === "demo" && <StateBanner state="demo" message="Demo data – simulated crawl. Suggestions come from fictional pages; Jev is not called." />}
+      {jev.budget && <StateBanner state="rate_limited" title="Jev budget reached" message={jev.budget} />}
+      {jev.unavailable && <StateBanner state="partial" title="Jev unavailable" message={jev.unavailable} />}
+      {jev.notConfigured && (
+        <StateBanner
+          state="not_connected"
+          title="Jev not configured"
+          message={jev.notConfigured}
+          action={
+            <Link to={projectPath(projectId, "integrations")} className={buttonClass("secondary", "sm")}>
+              Integrations
+            </Link>
+          }
+        />
+      )}
 
       <Card
         title="Summary"

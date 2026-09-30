@@ -1,7 +1,7 @@
 /** [A25] Pure helpers behind the internal-links page (anchor highlighting by string splitting, filters). */
 import { describe, expect, it } from "vitest";
 import type { LinkSuggestion } from "@shared/types";
-import { DEFAULT_FILTERS, extraLabels, filterSuggestions, LINK_LABEL_CONFIDENCE, LINK_LABEL_REVIEW, safeHref, splitAnchor } from "@web/pages/links/lib";
+import { DEFAULT_FILTERS, extraLabels, filterSuggestions, jevNotices, LINK_LABEL_CONFIDENCE, LINK_LABEL_REVIEW, safeHref, splitAnchor } from "@web/pages/links/lib";
 import { LABEL_CONFIDENCE, LABEL_REVIEW_ONLY } from "@worker/links/report";
 
 const s = (over: Partial<LinkSuggestion>): LinkSuggestion => ({
@@ -48,5 +48,12 @@ describe("links web helpers", () => {
     expect(extraLabels([LABEL_REVIEW_ONLY, "Method note", LABEL_CONFIDENCE])).toEqual(["Method note"]);
     expect(safeHref("javascript:alert(1)")).toBeNull();
     expect(safeHref("https://shop.example.com/a")).toBe("https://shop.example.com/a");
+  });
+
+  it("finds the Jev budget / availability notices written by the run", () => {
+    const n = jevNotices(["Jev budget reached: the project's daily Jev call limit was used up, so 3 pairs are deterministic suggestions marked review.", "Other"]);
+    expect(n.budget).toMatch(/^Jev budget reached/);
+    expect(n.unavailable).toBeNull();
+    expect(jevNotices(["Jev (TypeSafe) is not configured for this workspace: suggestions are deterministic."]).notConfigured).toBeTruthy();
   });
 });
