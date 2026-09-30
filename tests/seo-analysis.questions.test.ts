@@ -23,14 +23,27 @@ import {
  * question version starts a new cohort for trends and threshold calibration).
  */
 const SNAPSHOT = {
-  revision: "seo-questions-2026-09-30.1",
+  revision: "seo-questions-2026-09-30.2",
   versions: {
     "seo.query_page_relevance": "9887765bd0d8cfd8",
-    "seo.query_intent": "470d869166554bc0",
+    // [A23] revision .2: `mixed` option + brand terms, country, language in the intent state (templated path).
+    "seo.query_intent": "bdaaf715d381a5e8",
     "seo.intent_page_fit": "dedc628d2ce4b140",
     "seo.action_choice": "0ab65020b5b33251",
     "seo.issue_severity": "1d113e300446e68a",
     "seo.page_overlap": "e4466038c2296720",
+    // [A23] new questions (binary decisions are Noul; page action is a Choice).
+    "seo.query_relevance": "64f826eee4af2677",
+    "seo.thin_content": "433ba1367b1e757e",
+    "seo.page_action": "8d8b7ce5cab7cdb0",
+    "seo.schema_content_match": "c8cb4b91f99a86c5",
+    "seo.title_matches_query": "683966db4ba0ba23",
+    "seo.meta_matches_query": "4ca6a9e8713cd4c8",
+    "seo.covers_topic": "091371863c776b57",
+    "seo.outdated_information": "cc1edf19f47bd025",
+    "seo.answer_is_direct": "de865ff7c298b1ae",
+    "seo.buyer_query": "c5446230343fcea8",
+    "seo.buyer_ready": "a86244b3ed78ac94",
   },
 };
 
@@ -65,12 +78,14 @@ describe("SEO Jev questions (build kit 2.1)", () => {
   it("uses the documented primitives and options", () => {
     expect(QUERY_PAGE_RELEVANCE.type).toBe("noul");
     expect(PAGE_OVERLAP_TEMPLATE.type).toBe("noul");
+    // [A23] `mixed` (routed to human review) is distinct from the `insufficient_context` escape option.
     expect(QUERY_INTENT.type === "choice" && Object.keys(QUERY_INTENT.criteria)).toEqual([
       "informational",
       "commercial_investigation",
       "transactional",
       "navigational",
       "local",
+      "mixed",
       "insufficient_context",
     ]);
     expect(INTENT_PAGE_FIT.type === "choice" && Object.keys(INTENT_PAGE_FIT.criteria)).toEqual(["fits", "partial_fit", "mismatch", "insufficient_context"]);

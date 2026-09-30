@@ -21,10 +21,20 @@
  * for the state path they point at; question_version hashes the TEMPLATE, so the single-candidate form
  * (`query`) and the batched form (`queries.q7`) share one version and one cache cohort.
  *
- * [A23] questions added in revision .2: seo.query_intent gains `mixed` (routed to human review) and
- * brand terms, country, and language in its state; seo.query_relevance, seo.thin_content,
- * seo.page_action, seo.schema_content_match, seo.title_meta_alignment, seo.topic_coverage,
- * seo.outdated_information, and seo.answer_clarity.
+ * [A23] questions added in revision .2 (binary decisions are Noul, per the product owner's direction;
+ * Noul is tiered by the policy's probability bands, never by a confidence field):
+ *   seo.query_intent        gains `mixed` (routed to human review) and brand terms, country, language
+ *   seo.query_relevance     Noul, batched per query before candidates (drop confident no, flag middle)
+ *   seo.buyer_query         Noul, batched per query for the buyer-query view (include yes / flag middle)
+ *   seo.buyer_ready         Noul, same batch: ready to buy now (transactional) vs still comparing
+ *                           (commercial_investigation); only labels rows the buyer_query gate kept
+ *   seo.thin_content        Noul per example page, confirms SEO-CONTENT-THIN before a recommendation
+ *   seo.page_action         Choice keep/update/merge/remove/insufficient_context (genuinely categorical)
+ *   seo.schema_content_match Noul, structured data vs visible content
+ *   seo.title_matches_query / seo.meta_matches_query  Noul each, snippet vs the page's top GSC query
+ *   seo.covers_topic        Noul per topic (`seo.covers_topic#t<n>`), aggregated in code
+ *   seo.outdated_information Noul with today's date in state
+ *   seo.answer_is_direct    Noul, the opening answers the top query in its first two sentences (AEO)
  */
 import type { DecisionQuestion } from "../providers/types";
 import { questionVersion } from "../runs/policy";
@@ -43,10 +53,13 @@ export const QUESTION = {
   thinContent: "seo.thin_content",
   pageAction: "seo.page_action",
   schemaContentMatch: "seo.schema_content_match",
-  titleMetaAlignment: "seo.title_meta_alignment",
-  topicCoverage: "seo.topic_coverage",
+  titleMatchesQuery: "seo.title_matches_query",
+  metaMatchesQuery: "seo.meta_matches_query",
+  coversTopic: "seo.covers_topic",
   outdatedInformation: "seo.outdated_information",
-  answerClarity: "seo.answer_clarity",
+  answerIsDirect: "seo.answer_is_direct",
+  buyerQuery: "seo.buyer_query",
+  buyerReady: "seo.buyer_ready",
 } as const;
 export type SeoQuestionId = (typeof QUESTION)[keyof typeof QUESTION];
 
@@ -256,35 +269,42 @@ export const SCHEMA_CONTENT_MATCH: DecisionQuestion = {
   },
 };
 
-// ------------------------------------------------------------------ [A23]/[A25] title/meta alignment with the top GSC query
-export const TITLE_META_ALIGNMENT_OPTIONS = ["aligned", "weak", "mismatched", "insufficient_context"] as const;
-
-export const TITLE_META_ALIGNMENT: DecisionQuestion = {
-  type: "choice",
+// ------------------------------------------------------------------ [A23]/[A25] snippet vs the page's top GSC query
+export const TITLE_MATCHES_QUERY: DecisionQuestion = {
+  type: "noul",
   instructions:
-    "How well do the page title in `page.title` and the meta description in `page.meta_description` reflect the search query in `top_query`, the query that brings this page the most Search Console impressions?",
+    "Does the page title in `page.title` clearly promise what someone searching `top_query` wants? `top_query` is the query that brings this page the most Search Console impressions.",
   criteria: {
-    aligned: "Aligned. The title and description clearly name what `top_query` asks for, so a searcher would recognize the page as a match from its search snippet.",
-    weak: "Weak. The title or description touches the topic of `top_query` but buries it, uses different wording, or leaves out a key part, so the snippet is only a weak match.",
-    mismatched: "Mismatched. The title and description describe something different from what `top_query` asks for, so a searcher would not expect the page to answer the query.",
-    insufficient_context: "Insufficient context. The title, the description, or `top_query` is too short or ambiguous to judge how well the snippet matches the query.",
+    true: "The title names what `top_query` asks for in words a searcher would recognize, so the page reads as a match for that search from its title alone.",
+    false: "The title buries, rewords beyond recognition, or leaves out what `top_query` asks for, so a searcher would not expect this page to answer that search.",
   },
 };
 
-// ------------------------------------------------------------------ [A23] topic coverage (GSC + engine queries vs page text)
-export const TOPIC_COVERAGE_OPTIONS = ["covered", "partial", "missing", "insufficient_context"] as const;
-
-export const TOPIC_COVERAGE: DecisionQuestion = {
-  type: "choice",
+export const META_MATCHES_QUERY: DecisionQuestion = {
+  type: "noul",
   instructions:
-    "How fully does the visible text of the page, shown by `page.title`, `page.h1`, `page.headings`, and `page.text`, cover what searchers ask about in the queries listed in `queries`?",
+    "Does the meta description in `page.meta_description` clearly promise what someone searching `top_query` wants? `top_query` is the query that brings this page the most Search Console impressions.",
   criteria: {
-    covered: "Covered. The page already answers what the queries in `queries` ask about, even where it uses different words, so no content needs to be added for them.",
-    partial: "Partial. The page covers some of what the queries ask about but leaves at least one important subtopic from `queries` unanswered.",
-    missing: "Missing. The page does not address what the queries in `queries` ask about, so the topic is absent from its visible text.",
-    insufficient_context: "Insufficient context. The page text or the queries are too short or ambiguous to judge how well the page covers them.",
+    true: "The description tells a searcher of `top_query` that this page answers or offers what they are looking for, in plain and specific words.",
+    false: "The description is generic, off-topic, or about something else, so it gives a searcher of `top_query` no clear reason to choose this page.",
   },
 };
+
+// ------------------------------------------------------------------ [A23] topic coverage (one Noul per topic)
+/** `{t}` is the state path of one topic (`topics.t<n>`: a GSC gap query or an engine search query). */
+export const COVERS_TOPIC_TEMPLATE: DecisionQuestion = {
+  type: "noul",
+  instructions:
+    "Does the page described by `page.title`, `page.h1`, `page.headings`, and `page.text` cover the topic in `{t}` with substantive content?",
+  criteria: {
+    true: "The page gives real, specific information about the topic in `{t}`, even where it uses different words, so a searcher asking about it would find an answer on this page.",
+    false: "The page does not address the topic in `{t}`, or mentions it only in passing without useful detail, so a searcher asking about it would not find an answer here.",
+  },
+};
+
+export function coversTopicQuestion(path: string): DecisionQuestion {
+  return fillTemplate(COVERS_TOPIC_TEMPLATE, "{t}", path);
+}
 
 // ------------------------------------------------------------------ [A23] freshness (with the deterministic stale-year detector)
 export const OUTDATED_INFORMATION: DecisionQuestion = {
@@ -298,20 +318,45 @@ export const OUTDATED_INFORMATION: DecisionQuestion = {
 };
 
 // ------------------------------------------------------------------ [A23] answer clarity (AEO)
-export const ANSWER_CLARITY_LEVELS = 5;
-
-export const ANSWER_CLARITY: DecisionQuestion = {
-  type: "score",
+export const ANSWER_IS_DIRECT: DecisionQuestion = {
+  type: "noul",
   instructions:
-    "How clearly does the opening section of the page in `page.opening` answer the search query in `top_query`, the query that brings this page the most Search Console impressions?",
-  criteria: [
-    "Does not answer. The opening section does not address `top_query` at all, so a reader must search the rest of the page or leave.",
-    "Barely answers. The opening mentions the topic of `top_query` but gives no direct answer, only general introduction or marketing copy.",
-    "Partly answers. The opening gives part of the answer to `top_query`, but it is buried, incomplete, or depends on the rest of the page.",
-    "Mostly answers. The opening answers `top_query` within the first few sentences, with minor gaps or some preamble before the answer.",
-    "Directly answers. The first one or two sentences answer `top_query` completely and clearly, so a reader or an answer engine could quote them on their own.",
-  ],
+    "Does the opening section in `page.opening` directly answer the search query in `top_query` within its first two sentences? `top_query` is the query that brings this page the most Search Console impressions.",
+  criteria: {
+    true: "The first one or two sentences answer `top_query` clearly and on their own, so a reader or an answer engine could quote them as the answer.",
+    false: "The opening does not answer `top_query` in its first two sentences, for example it starts with general introduction or marketing copy, or the answer is buried further down the page.",
+  },
 };
+
+// ------------------------------------------------------------------ [A23] buyer queries (batched per query)
+/** `{q}` is the state path of one query (`queries.q<n>`). */
+export const BUYER_QUERY_TEMPLATE: DecisionQuestion = {
+  type: "noul",
+  instructions:
+    "Is the search query in `{q}` typed by someone looking to buy, hire, or compare options before buying, for a searcher in `country` using `language` on a site of type `site_type`? `brand_terms.competitors` lists competing brands.",
+  criteria: {
+    true: "The wording shows purchase or hiring intent, such as naming a product with a variant, asking for prices, stores, or services, or comparing brands, models, or reviews before a purchase.",
+    false: "The wording shows no buying or hiring intent, for example a how-to, a definition, general ideas, care advice, or a search for a specific website, so the searcher is not evaluating a purchase.",
+  },
+};
+
+export const BUYER_READY_TEMPLATE: DecisionQuestion = {
+  type: "noul",
+  instructions:
+    "Is the search query in `{q}` typed by someone ready to buy, order, or hire now, rather than someone still comparing options, reading reviews, or deciding what to buy?",
+  criteria: {
+    true: "The searcher wants to purchase, order, book, or hire a specific product or service now, for example a query naming an item with a size or finish, or asking where to buy it.",
+    false: "The searcher is still comparing or researching before a purchase, for example asking for the best options, reviews, alternatives, or a comparison between brands or models.",
+  },
+};
+
+export function buyerQueryQuestion(path: string): DecisionQuestion {
+  return fillTemplate(BUYER_QUERY_TEMPLATE, "{q}", path);
+}
+
+export function buyerReadyQuestion(path: string): DecisionQuestion {
+  return fillTemplate(BUYER_READY_TEMPLATE, "{q}", path);
+}
 
 /** Inputs available for one candidate's state. */
 export interface QuestionInputs {
@@ -349,6 +394,9 @@ const TEMPLATES: Record<string, DecisionQuestion> = {
   [QUESTION.queryIntent]: QUERY_INTENT_TEMPLATE,
   [QUESTION.queryRelevance]: QUERY_RELEVANCE_TEMPLATE,
   [QUESTION.thinContent]: THIN_CONTENT_TEMPLATE,
+  [QUESTION.coversTopic]: COVERS_TOPIC_TEMPLATE,
+  [QUESTION.buyerQuery]: BUYER_QUERY_TEMPLATE,
+  [QUESTION.buyerReady]: BUYER_READY_TEMPLATE,
 };
 
 /** Base question id without a `#key` suffix. */
@@ -373,10 +421,13 @@ export const SEO_STATIC_QUESTIONS: Readonly<Record<string, DecisionQuestion>> = 
   [QUESTION.thinContent]: THIN_CONTENT_TEMPLATE,
   [QUESTION.pageAction]: PAGE_ACTION,
   [QUESTION.schemaContentMatch]: SCHEMA_CONTENT_MATCH,
-  [QUESTION.titleMetaAlignment]: TITLE_META_ALIGNMENT,
-  [QUESTION.topicCoverage]: TOPIC_COVERAGE,
+  [QUESTION.titleMatchesQuery]: TITLE_MATCHES_QUERY,
+  [QUESTION.metaMatchesQuery]: META_MATCHES_QUERY,
+  [QUESTION.coversTopic]: COVERS_TOPIC_TEMPLATE,
   [QUESTION.outdatedInformation]: OUTDATED_INFORMATION,
-  [QUESTION.answerClarity]: ANSWER_CLARITY,
+  [QUESTION.answerIsDirect]: ANSWER_IS_DIRECT,
+  [QUESTION.buyerQuery]: BUYER_QUERY_TEMPLATE,
+  [QUESTION.buyerReady]: BUYER_READY_TEMPLATE,
 };
 
 /** Versions of the static questions (snapshot-tested). */

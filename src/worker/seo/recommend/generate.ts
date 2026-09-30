@@ -24,6 +24,14 @@
  * and a blocked search-engine crawler adds a critical robots.txt candidate whose snippet is the
  * advisor's suggestion (drafted by the deterministic template only; the snippet is code-owned).
  * Checklist dedup key = hash(project, 'checklist', item id, target). The daily cap is unchanged.
+ *
+ * [A23] Before candidates: the query relevance pre-filter (relevance.ts; Jev only, cached 7 days) drops
+ * lookalike queries and flags uncertain ones. New kinds (freshness, schema_mismatch, answer_clarity) are
+ * judged by their gate question only (decide.evaluateGate); thin-content findings are always sent for
+ * seo.thin_content confirmation when Jev is configured (not limited by maxTechnicalJudged).
+ * [A25] Internal link suggestions (act tier) are drafted deterministically with the suggester's Jev tier
+ * (no re-ask); dedup key = hash(project, 'internal_link', source, target). Declining pages whose dip
+ * matches last year are logged as seasonal and not proposed.
  */
 import type { Tier } from "@shared/types";
 import { BudgetExceededError } from "../../lib/errors";
@@ -34,19 +42,25 @@ import { createEvidence } from "../../recommendations/evidence";
 import { isDuplicate, remainingToday, saveRecommendation } from "../../recommendations/store";
 import type { RunContext } from "../../runs/context";
 import { POLICY_VERSION } from "../../runs/policy";
-import { buildCandidates, CANDIDATE_RULES_VERSION, type Candidate, type CandidateConfig } from "./candidates";
+import { baseQuestionId } from "../questions";
+import { buildCandidates, CANDIDATE_RULES_VERSION, seasonalSuppressions, type Candidate, type CandidateConfig } from "./candidates";
 import { buildSeoChecklistCandidates } from "./checklist-candidates";
 import {
   DecisionCallError,
   evaluateContent,
+  evaluateGate,
+  evaluateLinkSuggestion,
   evaluatePair,
   evaluateTechnical,
+  GATE_KINDS,
+  isThinCandidate,
   judgeCandidate,
   judgePairs,
   type Evaluation,
   type JudgedQuestion,
   type Judgment,
 } from "./decide";
+import { prejudgeQueryRelevance } from "./relevance";
 import { draftDeterministic, draftWithWriter, effortFor, type DraftResult, type StoredEvidence } from "./draft";
 import { loadCandidateInputs, type CandidateInputs } from "./inputs";
 import { computePriority, PRIORITY_VERSION } from "./priority";
@@ -70,6 +84,8 @@ export interface GenerateOptions {
   checklist?: boolean;
   /** [A21] Per-page checklists evaluated for up to this many top pages (default 10). */
   checklistTopPages?: number;
+  /** [A23] Run the query relevance pre-filter when Jev is configured (default true). */
+  queryRelevance?: boolean;
 }
 
 export const DEFAULT_MAX_JUDGED = 6;
@@ -94,6 +110,12 @@ export async function dedupKeyFor(projectId: string, c: Candidate): Promise<stri
     const h = await hashJson({ p: projectId, k: "checklist", i: id.checklist, t: id.target });
     return `seo:checklist:${h.slice(0, 24)}`;
   }
+  if (c.linkSuggestion) {
+    // [A25] hash(project, 'internal_link', source, target).
+    const id = c.identity as { source: string; target: string };
+    const h = await hashJson({ p: projectId, k: "internal_link", s: id.source, t: id.target });
+    return `seo:internal_link:${h.slice(0, 24)}`;
+  }
   const target = c.target.url ?? c.target.template ?? "site";
   const h = await hashJson({ p: projectId, t: target, i: c.issueType, e: c.identity });
   return `seo:${c.issueType}:${h.slice(0, 24)}`;
@@ -115,13 +137,34 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
     return { candidates: 0, created: 0, rejected: 0, note };
   }
 
+  // [A23] Query relevance pre-filter (Jev only; never fatal: without it every query is kept).
+  if (ctx.decisions && opts.queryRelevance !== false && (inputs.sync || inputs.engineQueries.length)) {
+    try {
+      const rel = await prejudgeQueryRelevance(ctx, inputs, opts.candidateConfig);
+      inputs.queryFilter = rel.filter;
+      if (rel.note) await ctx.log.event(step, "info", rel.note);
+    } catch (e) {
+      await ctx.log.event(step, "info", `Query relevance pre-filter unavailable (${e instanceof Error ? e.message.slice(0, 200) : "error"}); all queries kept.`);
+    }
+  }
+  const seasonal = seasonalSuppressions(inputs, opts.candidateConfig);
+  if (seasonal.length) {
+    await ctx.log.event(
+      step,
+      "info",
+      `Year-over-year: ${seasonal.length} declining page(s) not proposed because clicks match the same window last year (seasonal): ${seasonal.slice(0, 3).map((x) => x.url).join(", ")}.`,
+    );
+  }
+
   let all = buildCandidates(inputs, opts.candidateConfig);
   if (opts.checklist !== false) {
     // [A21] Checklist gaps + robots.txt advisor. Never fatal: without them the run continues as before.
     try {
       const cl = await buildSeoChecklistCandidates(ctx, inputs, all, { topPages: opts.checklistTopPages });
       if (cl.supersedes.length) all = all.filter((c) => !cl.supersedes.includes(c.key));
-      all.push(...cl.candidates);
+      // [A23] The AEO answer-clarity candidate for a page supersedes that page's "answer in the first lines" gap.
+      const aeoPages = new Set(all.filter((c) => c.kind === "answer_clarity").map((c) => c.page?.norm));
+      all.push(...cl.candidates.filter((c) => !(c.checklist?.itemId === "seo.on_page.answer_first_lines" && c.page && aeoPages.has(c.page.norm))));
       for (const n of cl.notes) await ctx.log.event(step, "info", n);
     } catch (e) {
       await ctx.log.event(step, "info", `Checklist gaps unavailable this run (${e instanceof Error ? e.message.slice(0, 200) : "error"}); continuing without them.`);
@@ -165,7 +208,7 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
         unavailable++;
         await reject(p, "decision_unavailable");
       } else {
-        p.evaluation = evaluateTechnical(p.c, null);
+        p.evaluation = p.c.linkSuggestion ? evaluateLinkSuggestion(p.c) : evaluateTechnical(p.c, null);
         selected.push(p);
       }
     }
@@ -188,7 +231,7 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
       try {
         const ev = await ensureEvidence(ctx, p);
         p.judgment = await judgeCandidate(ctx, p.c, inputs, ev.map((e) => e.id));
-        p.evaluation = evaluateContent(p.c, p.judgment);
+        p.evaluation = GATE_KINDS.has(p.c.kind) ? evaluateGate(p.c, p.judgment) : evaluateContent(p.c, p.judgment);
         for (const w of p.evaluation.warnings) await ctx.log.event(step, "info", `${p.c.kind}: ${w}`);
         if (p.evaluation.outcome === "rejected") await reject(p, p.evaluation.reasonCode ?? "low_fit", p.evaluation.tier);
         else selected.push(p);
@@ -206,9 +249,16 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
 
     let techJudged = 0;
     for (const p of technical) {
+      if (p.c.linkSuggestion) {
+        // [A25] The suggester's Jev tier is reused; no question is asked again.
+        p.evaluation = evaluateLinkSuggestion(p.c);
+        selected.push(p);
+        continue;
+      }
       let j: Judgment | null = null;
       // Deterministic checklist candidates carry their own documented severity: no Jev question.
-      if (p.c.kind === "technical" && techJudged < maxTech && !budgetOut) {
+      // [A23] Thin-content findings always get their seo.thin_content confirmation (budget permitting).
+      if (p.c.kind === "technical" && (techJudged < maxTech || isThinCandidate(p.c)) && !budgetOut) {
         techJudged++;
         try {
           const ev = await ensureEvidence(ctx, p);
@@ -220,7 +270,9 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
         }
       }
       p.evaluation = evaluateTechnical(p.c, j);
-      selected.push(p);
+      for (const w of p.evaluation.warnings) await ctx.log.event(step, "info", `${p.c.issueType}: ${w}`);
+      if (p.evaluation.outcome === "rejected") await reject(p, p.evaluation.reasonCode ?? "low_fit", p.evaluation.tier);
+      else selected.push(p);
     }
 
     if (pairs.length) {
@@ -254,7 +306,7 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
     const ev = p.evaluation!;
     const inputsForPriority = {
       ...p.c.priority,
-      effort: effortFor(p.c, ev.action),
+      effort: effortFor(p.c, ev.action, ev.pageAction ?? null),
       severity: ev.severity ?? p.c.priority.severity,
     };
     p.priority = computePriority(inputsForPriority, ev.tier);
@@ -279,10 +331,19 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
     }
     const evidence = await ensureEvidence(ctx, p);
     const ev = p.evaluation!;
-    const draftInput = { candidate: p.c, action: ev.action, tier: ev.tier, intent: ev.intent, severityScore: ev.severityScore, evidence, contextDocs: ev.fields["seo.pillar_fit.choice"] ? contextDocs : [] };
+    const draftInput = {
+      candidate: p.c,
+      action: ev.action,
+      tier: ev.tier,
+      intent: ev.intent,
+      severityScore: ev.severityScore,
+      evidence,
+      contextDocs: ev.fields["seo.pillar_fit.choice"] ? contextDocs : [],
+      pageAction: ev.pageAction ?? null,
+    };
     let result: DraftResult;
     try {
-      result = ctx.writer && !p.c.checklist?.deterministicOnly ? await draftWithWriter(ctx, draftInput) : draftDeterministic(draftInput);
+      result = ctx.writer && !p.c.checklist?.deterministicOnly && !p.c.deterministicOnly ? await draftWithWriter(ctx, draftInput) : draftDeterministic(draftInput);
     } catch (e) {
       const why = e instanceof BudgetExceededError ? "Writer budget exhausted." : e instanceof Error ? e.message.slice(0, 200) : "writer error";
       result = { ok: false, reason: "writer_failed", errors: [why] };
@@ -386,21 +447,27 @@ async function recordOutcome(ctx: RunContext, p: Pending, outcome: "selected" | 
       provider: null,
       model: null,
       state_hash: null,
-      answer_json: JSON.stringify({ candidate: p.c.key, kind: p.c.kind, rules: CANDIDATE_RULES_VERSION }),
+      answer_json: JSON.stringify({
+        candidate: p.c.key,
+        kind: p.c.kind,
+        rules: CANDIDATE_RULES_VERSION,
+        ...(p.c.linkSuggestion ? { linkSuggestionId: p.c.linkSuggestion.id, suggestionTier: p.c.linkSuggestion.tier, shouldExist: p.c.linkSuggestion.shouldExist } : {}),
+      }),
       tier: tier ?? "n/a",
     });
     return;
   }
   for (const q of j.questions) {
+    const baseId = baseQuestionId(q.questionId);
     await ctx.db.insert("decision_records", {
       id: newId("dec"),
       ...base,
-      question_id: q.questionId,
+      question_id: baseId,
       question_version: q.questionVersion,
       provider: j.provider,
       model: j.model,
       state_hash: j.stateHash,
-      answer_json: JSON.stringify({ answer: q.answer ?? null, candidate: p.c.key, questionTier: q.tier }),
+      answer_json: JSON.stringify({ answer: q.answer ?? null, candidate: p.c.key, questionTier: q.tier, ...(baseId !== q.questionId ? { key: q.questionId } : {}) }),
       tier: q.tier,
     });
   }

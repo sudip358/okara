@@ -4,6 +4,14 @@
  * the [A10]/[A17] validator. Without a writer, a deterministic template builds a factual draft that
  * copies evidence text and cites evidence ids (writerProvider null). Both paths run validateDraft;
  * a failing draft is never saved.
+ *
+ * [A25] Title suggestions keep the page's top Search Console query: for rewrite_title_meta drafts with a
+ * query, the writer gets TARGET.top_query (and the prompt rule), and validateDraft's titleQuery check
+ * rejects a suggested title ("Title: ..." line, <title>, or "suggested title: ...") that drops a
+ * non-stopword term of that query.
+ * [A23] seo.page_action "remove": the draft is always unverified and says a human must review the
+ * removal and plan a redirect. Code-owned action text (freshness, schema mismatch, link suggestions)
+ * and the decay-cause rationale sentence come from the candidate.
  */
 import type { EvidenceBullet, Level, Tier } from "@shared/types";
 import type { RunContext } from "../../runs/context";
@@ -13,7 +21,7 @@ import { SEO_WRITER_SYSTEM } from "../../writing/prompts";
 import { RECOMMENDATION_V1_JSON_SCHEMA, recommendationOutputSchema, recommendationTextFields } from "../../writing/schemas";
 import { demandPhrase } from "../gsc/demand";
 import { safeMessage } from "../gsc/sync";
-import type { ActionChoice } from "../questions";
+import type { ActionChoice, PageAction } from "../questions";
 import type { Candidate, EvidenceSpec } from "./candidates";
 import { isSelfAccounting } from "./decide";
 import { clip } from "./text";
@@ -33,6 +41,16 @@ export interface DraftInput {
   severityScore: number | null;
   evidence: StoredEvidence[];
   contextDocs: Array<{ id: string; kind: string; version: number; excerpt: string }>;
+  /** [A23] seo.page_action when it counted. */
+  pageAction?: PageAction | null;
+}
+
+/** [A23] Human-review wording for a page the evaluation says could be removed (never auto-verified). */
+export const REMOVE_REVIEW_TEXT = "Removing a page needs human review: keep it until someone confirms it has no remaining purpose, then retire it with a permanent redirect to the closest relevant page and update internal links.";
+
+/** [A25] The query a suggested title must keep (rewrite_title_meta drafts with a GSC query). */
+export function titleQueryFor(d: Pick<DraftInput, "candidate" | "action">): string | null {
+  return d.action === "rewrite_title_meta" && d.candidate.query && d.candidate.kind !== "engine_query" ? d.candidate.query : null;
 }
 
 export interface Draft {
@@ -67,7 +85,9 @@ const EFFORT_BY_ACTION: Record<ActionChoice, Level> = {
   no_action: "low",
 };
 
-export function effortFor(c: Candidate, action: ActionChoice | null): Level {
+export function effortFor(c: Candidate, action: ActionChoice | null, pageAction: PageAction | null = null): Level {
+  if (pageAction === "remove") return "high";
+  if (c.linkSuggestion) return "low";
   if (c.kind === "technical") return c.scope === "page" ? "low" : "medium";
   // [A21] Deterministic checklist candidates carry their own effort; Jev-dependent ones follow the chosen action.
   if (c.kind === "checklist" && c.checklist && !c.jevDependent) return c.checklist.effort;
@@ -106,9 +126,10 @@ function bulletText(t: string): string {
 export async function draftWithWriter(ctx: RunContext, d: DraftInput): Promise<DraftResult> {
   const writer = ctx.writer!;
   const c = d.candidate;
+  const topQuery = titleQueryFor(d);
   const input = {
-    DECISION: { action_choice: d.action, scope: c.scope, severity_score: d.severityScore, intent: d.intent, tier: d.tier },
-    TARGET: { url_or_template: c.target.url ?? c.target.template ?? "site", page_type: c.pageType, target: c.target },
+    DECISION: { action_choice: d.action, scope: c.scope, severity_score: d.severityScore, intent: d.intent, tier: d.tier, page_action: d.pageAction ?? null },
+    TARGET: { url_or_template: c.target.url ?? c.target.template ?? "site", page_type: c.pageType, target: c.target, top_query: topQuery },
     CONTEXT_DOCS: d.contextDocs,
     EVIDENCE: d.evidence.map((e) => ({
       id: e.id,
@@ -117,7 +138,7 @@ export async function draftWithWriter(ctx: RunContext, d: DraftInput): Promise<D
       // [A14] tainted evidence can be cited but its text is excluded from writer context.
       text_or_metric: e.spec.tainted ? "[withheld: text flagged as possible instructions to an AI system]" : e.spec.text,
     })),
-    REQUIRED_FIELDS: { agent: "seo", scope: c.scope, trigger_hint: c.trigger, issue_hint: c.issue, limitations_hint: c.limitations, verified_max: c.verified && !c.reviewRequired },
+    REQUIRED_FIELDS: { agent: "seo", scope: c.scope, trigger_hint: c.trigger, issue_hint: c.issue, limitations_hint: c.limitations, verified_max: c.verified && !c.reviewRequired && d.pageAction !== "remove" },
   };
   const selfAccounting = isSelfAccounting(writer as { name: string; recordsCalls?: boolean });
   const inputTokensEstimate = Math.ceil(JSON.stringify(input).length / 4) + Math.ceil(SEO_WRITER_SYSTEM.length / 4);
@@ -163,8 +184,10 @@ export async function draftWithWriter(ctx: RunContext, d: DraftInput): Promise<D
   if (!parsed.success) return { ok: false, reason: "validation_failed", errors: parsed.error.issues.slice(0, 5).map((i) => `${i.path.join(".")}: ${i.message}`) };
   const o = parsed.data;
   if (o.agent !== "seo") return { ok: false, reason: "validation_failed", errors: ["Writer output agent is not 'seo'."] };
-  const check = validateDraft(recommendationTextFields(o), o.evidence_ids, validationEvidence(d.evidence));
+  const check = validateDraft(recommendationTextFields(o), o.evidence_ids, validationEvidence(d.evidence), topQuery ? { titleQuery: topQuery } : {});
   if (!check.ok) return { ok: false, reason: "validation_failed", errors: check.errors };
+  const removal = d.pageAction === "remove";
+  const action = removal && !/human review/i.test(o.action) ? clip(`${o.action} ${REMOVE_REVIEW_TEXT}`, 600) : o.action;
 
   const known = new Set(d.evidence.map((e) => e.id));
   const specById = new Map(d.evidence.map((e) => [e.id, e.spec]));
@@ -180,15 +203,15 @@ export async function draftWithWriter(ctx: RunContext, d: DraftInput): Promise<D
     draft: {
       trigger: o.trigger,
       issue: o.issue,
-      action: o.action,
+      action,
       // A code-owned snippet (robots.txt advisor) always wins over anything the writer produced.
       suggestedSnippet: c.checklist?.snippet ?? o.suggested_snippet ?? null,
       rationale: o.rationale,
       // Code owns scope/target/effort (priority used it) and verification; the writer cannot change them.
-      effort: effortFor(c, d.action),
-      uncertainty: maxLevel(o.uncertainty, uncertaintyFor(c, d.tier)),
+      effort: effortFor(c, d.action, d.pageAction ?? null),
+      uncertainty: removal ? "high" : maxLevel(o.uncertainty, uncertaintyFor(c, d.tier)),
       limitations: o.limitations,
-      verified: o.verified && c.verified && !c.reviewRequired,
+      verified: o.verified && c.verified && !c.reviewRequired && !removal,
       evidenceIds,
       evidenceBullets: bullets.slice(0, 4),
       confirmPlaceholders: [...new Set([...(o.confirm_placeholders ?? []), ...check.confirmPlaceholders])],
@@ -227,6 +250,9 @@ const RATIONALE: Record<Candidate["kind"], string> = {
   technical: "The rule reported this on the crawled HTML; fixing it once at the reported scope addresses every affected URL together.",
   duplicate: "Jev judged that the two pages compete for the same search intent, and they share title words or queries, so one strong page may serve searchers better than two partial ones.",
   checklist: "The readiness checklist found this gap in the project's own crawl, Search Console, or robots.txt data; it describes a practice that makes pages easier to crawl and understand, and no ranking change is promised.",
+  freshness: "The page shows dated references in its title or opening text, and Jev judged that it presents information as current that is likely out of date; refreshing it keeps readers from acting on stale facts.",
+  schema_mismatch: "The page's structured data appears to describe something the page does not visibly show; markup that matches the visible content is what search engines expect, and no rich result is promised.",
+  answer_clarity: "The page's opening does not directly answer the query that brings it the most impressions; a first sentence that answers it helps readers and answer engines quote the page, without any promise of a snippet or citation.",
 };
 
 export function draftDeterministic(d: DraftInput): DraftResult {
@@ -237,7 +263,9 @@ export function draftDeterministic(d: DraftInput): DraftResult {
   const primary = d.evidence.slice(0, 2).map((e) => e.id);
   let actionText: string;
   // [A21] Deterministic checklist candidates carry code-owned action text; Jev-dependent ones use the chosen action.
-  if (c.checklist?.actionText && (!c.jevDependent || !d.action)) actionText = c.checklist.actionText;
+  if (d.pageAction === "remove") actionText = `${REMOVE_REVIEW_TEXT} Page: ${targetText}; [confirm: whether ${targetText} still serves a purpose and where it should redirect].`;
+  else if (c.checklist?.actionText && (!c.jevDependent || !d.action)) actionText = c.checklist.actionText;
+  else if (c.actionText) actionText = c.actionText;
   else if (d.action) actionText = ACTION_TEXT[d.action](targetText);
   else {
     const rule = c.issueType.startsWith("technical:") ? c.issueType.slice("technical:".length) : c.issueType;
@@ -251,7 +279,9 @@ export function draftDeterministic(d: DraftInput): DraftResult {
     c.demand && demandEv
       ? ` In this site's own Search Console impressions, "${clip(c.demand.query, 80)}" is ${demandPhrase(c.demand)}; this describes first-party visibility, not market search volume. ${cite([demandEv.id])}`
       : "";
-  const rationale = `${c.checklist?.rationale ?? RATIONALE[c.kind]} ${cite(ids.slice(0, 3))}${demandText}`;
+  const noteEv = c.rationaleNote ? d.evidence[c.rationaleNote.evidenceIndex] : undefined;
+  const noteText = c.rationaleNote && noteEv ? ` ${c.rationaleNote.text} ${cite([noteEv.id])}` : "";
+  const rationale = `${c.checklist?.rationale ?? RATIONALE[c.kind]} ${cite(ids.slice(0, 3))}${noteText}${demandText}`;
   const text = {
     trigger: clip(c.trigger, 200),
     issue: `${clip(c.issue, 360)} ${cite(primary.slice(0, 1))}`,
@@ -259,17 +289,19 @@ export function draftDeterministic(d: DraftInput): DraftResult {
     rationale: clip(rationale, 600),
     limitations: clip(c.limitations, 400),
   };
-  const check = validateDraft([text.trigger, text.issue, text.action, text.rationale, text.limitations], ids, validationEvidence(d.evidence));
+  const topQuery = titleQueryFor(d);
+  const check = validateDraft([text.trigger, text.issue, text.action, text.rationale, text.limitations], ids, validationEvidence(d.evidence), topQuery ? { titleQuery: topQuery } : {});
   if (!check.ok) return { ok: false, reason: "validation_failed", errors: check.errors };
+  const removal = d.pageAction === "remove";
   return {
     ok: true,
     warnings: check.warnings,
     draft: {
       ...text,
       suggestedSnippet: c.checklist?.snippet ?? null,
-      effort: effortFor(c, d.action),
-      uncertainty: uncertaintyFor(c, d.tier),
-      verified: c.verified && !c.reviewRequired,
+      effort: effortFor(c, d.action, d.pageAction ?? null),
+      uncertainty: removal ? "high" : uncertaintyFor(c, d.tier),
+      verified: c.verified && !c.reviewRequired && !removal,
       evidenceIds: ids,
       evidenceBullets: codeBullets(d.evidence),
       confirmPlaceholders: check.confirmPlaceholders,

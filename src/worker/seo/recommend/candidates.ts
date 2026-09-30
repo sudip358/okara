@@ -23,6 +23,27 @@
  *  checklist     [A21]  readiness-checklist gaps (checklists/bridge.ts) that fit the SEO agent, plus the
  *                       robots.txt advisor for blocked search-engine crawlers; built asynchronously by
  *                       checklist-candidates.ts (not by buildCandidates, which stays pure)
+ *  freshness     [A23]  pages whose title, H1, or first paragraph carries a stale year (freshness.ts);
+ *                       seo.outdated_information (Noul, today's date in state) decides
+ *  schema_mismatch [A23] JSON-LD types that conflict with the crawled page (schema-match.ts);
+ *                       seo.schema_content_match (Noul) decides; severity moderate
+ *  answer_clarity [A23] (AEO) pages whose top non-brand GSC query is question-like (or article pages)
+ *                       with >= answerMinImpressions; seo.answer_is_direct (Noul) decides
+ *
+ * [A23] brand: queries containing the brand name or an alias (gsc/brand.ts) are excluded from weak_ctr
+ * (flagged rows AND the bucket medians, since brand CTR is not comparable) and striking_distance.
+ * Competitor-name queries stay in and carry metrics.competitorBrand = "yes".
+ * [A23] query relevance: `inputs.queryFilter` (set by generate.ts after the Noul pre-filter) removes
+ * confident "not about this business" queries from every query-based candidate; middle-band queries cap
+ * the candidate at Flag (tierCap).
+ * [A25] declining: when the sync holds last year's page slice, a dip that is not down against the same
+ * window last year is suppressed as seasonal (decay.ts); every declining candidate lists its likely
+ * causes (demand_or_season, ranking_loss, ctr_drop, content_changed) in evidence and text.
+ * [A25] internal links: the top act-tier suggestions of the internal link suggester become concrete
+ * page-scope internal_link candidates (source -> target, sentence, anchor, role; no Jev re-ask); the
+ * few-inlinks candidate stays only for targets with no such suggestion.
+ * [A25] duplicates: queries whose top page alternates between URLs across weeks (gsc/slices.ts) add
+ * their page pairs to the [A15] prefilter.
  *
  * Technical grouping uses the rule registry: only rules marked `templateable` become template-scope
  * candidates (one per rule + template); a non-templateable rule on >= templateMinUrls URLs (for
@@ -33,19 +54,24 @@
  * metrics and in the GSC evidence (text + data). It describes first-party visibility only, never
  * market search volume.
  */
-import type { EvidenceSource, Level, PageType, Scope, Severity } from "@shared/types";
+import type { EvidenceSource, Level, PageType, Scope, Severity, Tier } from "@shared/types";
 import { EVIDENCE_TEXT_MAX } from "../../recommendations/evidence";
 import type { RecommendationDraft } from "../../recommendations/store";
 import { pageMetrics, weightedPosition, type EntityMetrics, type SliceRow } from "../gsc/aggregate";
+import { createBrandClassifier, type BrandClassifier } from "../gsc/brand";
 import { DEMAND_METHOD_VERSION, demandLookup, demandPhrase, normalizeDemandQuery, type RankedQuery } from "../gsc/demand";
+import { detectAlternatingUrls, type AlternatingQuery } from "../gsc/slices";
 import { windowLabel } from "../gsc/windows";
 import { getRule } from "../rules/registry";
 import type { ActionChoice } from "../questions";
+import { classifyDecay, DECAY_CAUSE_LABEL, DECAY_CAUSE_VERSION, yoyVerdict, type WindowMetric } from "./decay";
+import { detectStaleYears, STALE_YEAR_VERSION } from "./freshness";
 import type { CandidateInputs, PageInfo } from "./inputs";
 import { SEVERITY_WEIGHT, type PriorityInputs } from "./priority";
-import { clip, coverage, fmtInt, fmtPct, fmtPos, normalizeUrl, queryKey, sharedCount, tokenSet } from "./text";
+import { offerPriceCheck, schemaConflicts, SCHEMA_CONFLICT_TEXT, SCHEMA_MATCH_VERSION } from "./schema-match";
+import { clip, coverage, fmtInt, fmtPct, fmtPos, looksLikeInstructions, normalizeUrl, queryKey, sharedCount, tokenSet } from "./text";
 
-export const CANDIDATE_RULES_VERSION = "seo-candidates-2026-09-30.2";
+export const CANDIDATE_RULES_VERSION = "seo-candidates-2026-09-30.3";
 
 export interface CandidateConfig {
   minImpressions: number;
@@ -71,6 +97,10 @@ export interface CandidateConfig {
   duplicateMinShorterShare: number;
   maxDuplicatePairs: number;
   maxPerKind: number;
+  /** [A23] answer_clarity: minimum impressions of the page's top query. */
+  answerMinImpressions: number;
+  /** [A25] internal link suggestions turned into candidates per run (act tier only). */
+  maxLinkSuggestions: number;
 }
 
 export const DEFAULT_CANDIDATE_CONFIG: CandidateConfig = {
@@ -97,6 +127,8 @@ export const DEFAULT_CANDIDATE_CONFIG: CandidateConfig = {
   duplicateMinShorterShare: 0.5,
   maxDuplicatePairs: 40,
   maxPerKind: 10,
+  answerMinImpressions: 50,
+  maxLinkSuggestions: 5,
 };
 
 export type CandidateKind =
@@ -109,7 +141,10 @@ export type CandidateKind =
   | "engine_query"
   | "technical"
   | "duplicate"
-  | "checklist";
+  | "checklist"
+  | "freshness"
+  | "schema_mismatch"
+  | "answer_clarity";
 
 export interface EvidenceSpec {
   source: EvidenceSource;
@@ -155,6 +190,36 @@ export interface Candidate {
   demand: CandidateDemand | null;
   /** [A21] Set for kind 'checklist': the checklist item and the code-owned draft parts. */
   checklist?: ChecklistCandidateMeta;
+  /** [A23] Tier cap from a pre-filter (query relevance middle band): the result is shown with "Check this yourself". */
+  tierCap?: Extract<Tier, "flag"> | null;
+  /** [A23]/[A25] Code-owned action text (freshness, schema mismatch, link suggestions); the draft appends citations. */
+  actionText?: string | null;
+  /** Draft with the deterministic template only (code-owned text; the writer is not asked). */
+  deterministicOnly?: boolean;
+  /** [A25] Extra rationale sentence and the index (in `evidence`) of the evidence it is drawn from. */
+  rationaleNote?: { text: string; evidenceIndex: number } | null;
+  /** [A23] Topics for seo.covers_topic: GSC gap queries plus engine search queries matched to the page. */
+  coverageQueries?: string[];
+  /** [A23] Freshness: dated references found by the stale-year detector (for Jev state). */
+  datedReferences?: string[];
+  /** [A23] Schema mismatch: deterministic conflict descriptions. */
+  schemaConflicts?: string[];
+  /** [A25] The internal link suggestion this candidate came from (its Jev tier is reused, never re-asked). */
+  linkSuggestion?: LinkSuggestionMeta;
+}
+
+export interface LinkSuggestionMeta {
+  id: string;
+  sourceUrl: string;
+  targetUrl: string;
+  anchor: string;
+  sentence: string;
+  role: string | null;
+  tier: Tier;
+  /** Noul from the suggester's links.should_exist question. */
+  shouldExist: number | null;
+  provider: string | null;
+  model: string | null;
 }
 
 /** Checklist provenance and code-owned draft parts for a 'checklist' candidate (see checklist-candidates.ts). */
@@ -214,11 +279,36 @@ export function buildCandidates(inputs: CandidateInputs, config: Partial<Candida
   out.push(...cap(b.declining()));
   out.push(...cap(b.queryPageMismatch()));
   out.push(...cap(b.coverageGap()));
-  out.push(...cap(b.internalLinks()));
+  const links = b.linkSuggestions().slice(0, cfg.maxLinkSuggestions);
+  out.push(...links);
+  out.push(...cap(b.internalLinks(new Set(links.map((c) => normalizeUrl(c.linkSuggestion!.targetUrl))))));
   out.push(...b.engineQueries());
   out.push(...b.technical());
   out.push(...b.duplicates());
-  return out.map((c) => b.withDemand(c));
+  out.push(...cap(b.freshness()));
+  out.push(...cap(b.schemaMismatch()));
+  out.push(...cap(b.answerClarity()));
+  return out.map((c) => b.finalize(c));
+}
+
+/** [A25] Declining pages whose dip matches the same window last year (not emitted as candidates). */
+export function seasonalSuppressions(inputs: CandidateInputs, config: Partial<CandidateConfig> = {}): Array<{ url: string; currentClicks: number; lastYearClicks: number }> {
+  const b = new Builder(inputs, { ...DEFAULT_CANDIDATE_CONFIG, ...config });
+  b.declining();
+  return b.seasonal;
+}
+
+const EMPTY_TERMS = { self: [], competitors: [], skipped: [] };
+const LEGAL_PATH = /\/(privacy|terms|legal|policy|policies|cookie|cookies|imprint|gdpr|accessibility)(\/|$|[-_.])/i;
+/** Question-like query (answer_clarity shortlist; English). */
+export const QUESTION_QUERY = /\?|^(how|what|why|which|when|where|who|can|does|do|is|are|should|will|best way)\b/i;
+
+function isLegalUrl(url: string): boolean {
+  try {
+    return LEGAL_PATH.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
 }
 
 /** Evidence sentence for a query's demand segment (first-party impressions only). */
@@ -240,10 +330,19 @@ class Builder {
   readonly pageMetricsPrev: Map<string, EntityMetrics>;
   readonly demand: Map<string, RankedQuery>;
   readonly brandTokens: Set<string>;
+  readonly brand: BrandClassifier;
+  readonly rows: SliceRow[];
+  readonly dropped: Set<string>;
+  /** [A25] Declining pages suppressed as seasonal by the YoY check (filled by declining()). */
+  seasonal: Array<{ url: string; currentClicks: number; lastYearClicks: number }> = [];
 
   constructor(readonly inp: CandidateInputs, readonly cfg: CandidateConfig) {
     for (const p of inp.pages) this.pagesByNorm.set(p.norm, p);
-    this.cur = inp.rows.filter((r) => r.window === "current");
+    this.brand = createBrandClassifier(inp.project.brandTerms ?? EMPTY_TERMS);
+    this.dropped = inp.queryFilter?.dropped ?? new Set<string>();
+    // [A23] Queries Jev confidently judged "not about this business" never drive candidates.
+    this.rows = this.dropped.size ? inp.rows.filter((r) => !(r.query && this.dropped.has(normalizeDemandQuery(r.query)))) : inp.rows;
+    this.cur = this.rows.filter((r) => r.window === "current");
     this.qp = this.cur.filter((r) => r.query && r.page);
     this.win = inp.sync ? windowLabel(inp.sync.current) : null;
     this.prevWin = inp.sync ? windowLabel(inp.sync.previous) : null;
@@ -255,9 +354,13 @@ class Builder {
     const sliceClicks = this.cur.reduce((s, r) => s + (r.query && r.page ? r.clicks : 0), 0);
     this.totalImpr = t ? t.impressions : sliceImpr > 0 ? sliceImpr : null;
     this.totalClicks = t ? t.clicks : sliceClicks > 0 ? sliceClicks : null;
-    this.pageMetricsCur = pageMetrics(inp.rows, "current", normalizeUrl);
-    this.pageMetricsPrev = pageMetrics(inp.rows, "previous", normalizeUrl);
-    this.demand = demandLookup(this.cur, inp.project.language);
+    this.pageMetricsCur = pageMetrics(this.rows, "current", normalizeUrl);
+    this.pageMetricsPrev = pageMetrics(this.rows, "previous", normalizeUrl);
+    // Demand segments come from the non-brand curve (the overview's default), before the relevance filter.
+    this.demand = demandLookup(
+      inp.rows.filter((r) => r.window === "current" && !(r.query && this.brand.isSelfBrand(r.query))),
+      inp.project.language,
+    );
     this.brandTokens = new Set(inp.project.brandTokens ?? []);
   }
 
@@ -374,6 +477,21 @@ class Builder {
     };
   }
 
+  /** withDemand() plus the relevance tier cap and the competitor-brand flag. */
+  finalize(c: Candidate): Candidate {
+    let out = this.withDemand(c);
+    const flagged = this.inp.queryFilter?.flagged;
+    if (out.query && flagged?.has(normalizeDemandQuery(out.query))) {
+      out = {
+        ...out,
+        tierCap: "flag",
+        limitations: clip(`${out.limitations} Jev was unsure whether this query is about the business (query relevance middle band); check it yourself.`, 400),
+      };
+    }
+    if (out.query && this.brand.classify(out.query).kind === "competitor_brand") out = { ...out, metrics: { ...out.metrics, competitorBrand: "yes" } };
+    return out;
+  }
+
   /** base() plus demand tagging from the candidate's query (metrics carry the segment for Jev state). */
   withDemand(c: Candidate): Candidate {
     const demand = c.demand ?? this.demandOf(c.query);
@@ -384,7 +502,8 @@ class Builder {
   // ---------------------------------------------------------------- weak_ctr
   weakCtr(): Candidate[] {
     if (!this.inp.sync) return [];
-    const units = this.qp.length ? this.qp : this.cur.filter((r) => r.page && !r.query);
+    // [A23] Brand queries are excluded from the medians and the flagged rows (brand CTR is not comparable).
+    const units = (this.qp.length ? this.qp : this.cur.filter((r) => r.page && !r.query)).filter((r) => !(r.query && this.brand.isSelfBrand(r.query)));
     const byBucket = new Map<string, number[]>();
     for (const r of units) {
       const bkt = positionBucket(r.position);
@@ -458,6 +577,7 @@ class Builder {
     }
     const out: Candidate[] = [];
     for (const [query, rows] of byQuery) {
+      if (this.brand.isSelfBrand(query)) continue; // [A23] brand queries are not striking-distance opportunities
       const impressions = rows.reduce((s, r) => s + r.impressions, 0);
       const clicks = rows.reduce((s, r) => s + r.clicks, 0);
       const pos = weightedPosition(rows);
@@ -506,6 +626,17 @@ class Builder {
   // ---------------------------------------------------------------- declining
   declining(): Candidate[] {
     if (!this.inp.sync) return [];
+    this.seasonal = [];
+    const yoy = this.inp.sync.extras?.yoy?.status === "available" ? this.inp.sync.extras.yoy : null;
+    const lyWin = yoy ? windowLabel(yoy.window) : null;
+    const lyPages = new Map<string, WindowMetric>();
+    if (yoy) {
+      for (const [page, clicks, impressions, position] of yoy.pages) {
+        const k = normalizeUrl(page);
+        const cur = lyPages.get(k);
+        lyPages.set(k, cur ? { clicks: cur.clicks + clicks, impressions: cur.impressions + impressions, position: cur.position } : { clicks, impressions, position: position > 0 ? position : null });
+      }
+    }
     const out: Candidate[] = [];
     for (const [norm, prev] of this.pageMetricsPrev) {
       const cur = this.pageMetricsCur.get(norm);
@@ -515,6 +646,13 @@ class Builder {
       if (drop < this.cfg.decliningMinDrop) continue;
       const page = this.pagesByNorm.get(norm) ?? null;
       const url = page?.url ?? norm;
+      // [A25] Seasonality: not down against the same window last year -> suppressed.
+      const ly = yoy ? (lyPages.get(norm) ?? null) : null;
+      const verdict = yoy ? yoyVerdict(curClicks, ly, { minPrevClicks: this.cfg.decliningMinPrevClicks, minDrop: this.cfg.decliningMinDrop }) : "no_comparison";
+      if (verdict === "seasonal") {
+        this.seasonal.push({ url, currentClicks: curClicks, lastYearClicks: ly!.clicks });
+        continue;
+      }
       const ev: EvidenceSpec[] = [this.pageMetricEvidence(url, prev, "previous")];
       if (cur) ev.push(this.pageMetricEvidence(url, cur, "current"));
       ev.push(
@@ -524,7 +662,53 @@ class Builder {
           { page: url, previousClicks: prev.clicks, currentClicks: curClicks, drop },
         ),
       );
+      if (ly && lyWin) {
+        ev.push({
+          source: this.gscSource,
+          refId: this.inp.sync.id,
+          window: lyWin,
+          text: `${this.gscLabel} ${lyWin} (same window last year, page totals): page ${url}: ${fmtInt(ly.impressions)} impressions, ${fmtInt(ly.clicks)} clicks. This window is ${verdict === "down_yoy" ? "also down against last year" : "not comparable (too few clicks last year)"}.`,
+          data: { page: url, window: "last_year", clicks: ly.clicks, impressions: ly.impressions, position: ly.position, verdict },
+        });
+      }
+      // [A25] Likely causes (deterministic; decay.ts).
+      const changed = page && page.contentHash && page.previousContentHash ? page.contentHash !== page.previousContentHash : null;
+      const decay = classifyDecay(
+        { clicks: prev.clicks, impressions: prev.impressions, position: prev.approxPosition },
+        { clicks: curClicks, impressions: cur?.impressions ?? 0, position: cur?.approxPosition ?? null },
+        { changed },
+      );
+      let rationaleNote: Candidate["rationaleNote"] = null;
+      if (decay.causes.length) {
+        rationaleNote = {
+          text: `Likely cause from the project's own Search Console and crawl data: ${decay.causes.map((c) => DECAY_CAUSE_LABEL[c]).join("; ")}.`,
+          evidenceIndex: ev.length,
+        };
+        ev.push(
+          this.ruleEvidence(
+            "decay_cause",
+            `likely cause for ${url} (${DECAY_CAUSE_VERSION}): ${decay.causes.map((c) => DECAY_CAUSE_LABEL[c]).join("; ")}: ${decay.details.join("; ")}.`,
+            {
+              page: url,
+              causes: decay.causes,
+              details: decay.details,
+              previous: { clicks: prev.clicks, impressions: prev.impressions, position: prev.approxPosition },
+              current: { clicks: curClicks, impressions: cur?.impressions ?? 0, position: cur?.approxPosition ?? null },
+              contentChanged: changed,
+              yoy: verdict,
+              version: DECAY_CAUSE_VERSION,
+            },
+            page?.snapshotId ?? null,
+          ),
+        );
+      }
       if (page) ev.push(this.crawlEvidence(page));
+      const yoyText =
+        verdict === "down_yoy"
+          ? "Clicks are also down against the same window last year, so this is not only seasonal."
+          : yoy
+            ? "Last year's data for this page was too thin to rule out seasonality; check before editing."
+            : "A click drop can have causes outside the page (seasonality, SERP changes); check before editing.";
       out.push(
         this.base("declining", {
           key: `declining:${norm}`,
@@ -533,12 +717,20 @@ class Builder {
           issue: `Search clicks to ${url} dropped compared with the previous window.`,
           page,
           target: { kind: "url", url },
-          metrics: { clicks: curClicks, previousClicks: prev.clicks, drop, impressions: cur?.impressions ?? 0 },
+          metrics: {
+            clicks: curClicks,
+            previousClicks: prev.clicks,
+            drop,
+            impressions: cur?.impressions ?? 0,
+            decayCauses: decay.causes.join(",") || null,
+            yoy: verdict,
+          },
           priority: this.priorityFor(null, prev.clicks - curClicks, "medium"),
           defaultAction: "improve_intro_answer",
           evidence: ev,
           identity: { page: norm },
-          limitations: this.gscLimitations("A click drop can have causes outside the page (seasonality, SERP changes); check before editing."),
+          rationaleNote,
+          limitations: this.gscLimitations(yoyText),
         }),
       );
     }
@@ -622,8 +814,10 @@ class Builder {
       const impressions = gaps.reduce((s, r) => s + r.impressions, 0);
       if (impressions < this.cfg.minImpressions) continue;
       const clicks = gaps.reduce((s, r) => s + r.clicks, 0);
+      const engineTopics = this.engineQueriesForPage(norm).filter((q) => !gaps.some((g) => queryKey(g.query!) === queryKey(q)));
       out.push(
         this.base("coverage_gap", {
+          coverageQueries: [...gaps.map((g) => g.query!), ...engineTopics].slice(0, 8),
           key: `coverage_gap:${norm}`,
           issueType: "coverage_gap",
           trigger: `From GSC query "${clip(gaps[0]!.query, 80)}"`,
@@ -649,7 +843,7 @@ class Builder {
   }
 
   // ---------------------------------------------------------------- internal_link
-  internalLinks(): Candidate[] {
+  internalLinks(suggestedTargets: Set<string> = new Set()): Candidate[] {
     if (!this.inp.sync || !this.inp.crawl || this.inp.pages.length < this.cfg.internalLinkMinCrawled) return [];
     const inlinks = new Map<string, Set<string>>();
     for (const p of this.inp.pages) {
@@ -664,6 +858,7 @@ class Builder {
     const out: Candidate[] = [];
     for (const p of this.inp.pages) {
       if (p.pageType === "home") continue;
+      if (suggestedTargets.has(p.norm)) continue; // [A25] a concrete link suggestion covers this target
       const m = this.pageMetricsCur.get(p.norm);
       if (!m || m.impressions < this.cfg.internalLinkMinImpressions) continue;
       const count = inlinks.get(p.norm)?.size ?? 0;
@@ -698,8 +893,19 @@ class Builder {
   }
 
   // ---------------------------------------------------------------- engine_query [A6]
+  /** Engine search queries whose best-matching crawled page (title/H1 coverage) is `norm`. */
+  engineQueriesForPage(norm: string): string[] {
+    const out: string[] = [];
+    for (const g of this.inp.engineQueries.slice(0, this.cfg.maxEngineQueries)) {
+      if (this.dropped.has(normalizeDemandQuery(g.normalized))) continue;
+      const best = this.bestMatchingPage(g.normalized);
+      if (best && best.page.norm === norm && best.score >= this.cfg.matchMinCoverage) out.push(g.example);
+    }
+    return out.slice(0, 5);
+  }
+
   engineQueries(): Candidate[] {
-    const groups = this.inp.engineQueries.slice(0, this.cfg.maxEngineQueries);
+    const groups = this.inp.engineQueries.filter((g) => !this.dropped.has(normalizeDemandQuery(g.normalized))).slice(0, this.cfg.maxEngineQueries);
     if (groups.length === 0) return [];
     const gscByKey = new Map<string, SliceRow[]>();
     const querySrc = this.cur.filter((r) => r.query);
@@ -889,6 +1095,7 @@ class Builder {
             metrics: { affected, crawled: this.inp.crawl.crawledCount, impressions: hasGsc ? pageImpr : null },
             priority: this.priorityFor(hasGsc ? pageImpr : null, hasGsc ? pageClicks : null, "medium", SEVERITY_WEIGHT[worst], affected / crawled),
             defaultAction: action,
+            actionText: sitemapActionText(g.ruleId, isTemplate ? `the ${templateName}` : "the site", siteLevel ? 1 : urls.length, examples[0] ? { url: examples[0].url, detail: examples[0].detail } : (g.items[0] ? { url: g.items[0].url, detail: g.items[0].detail } : null)),
             evidence: ev,
             identity: { rule: g.ruleId, group: gk },
             verified: true,
@@ -921,6 +1128,7 @@ class Builder {
             metrics: { affected: 1, crawled: this.inp.crawl.crawledCount, impressions: m?.impressions ?? null },
             priority: this.priorityFor(m ? m.impressions : hasGsc ? 0 : null, m ? m.clicks : hasGsc ? 0 : null, "low", SEVERITY_WEIGHT[f.severity], 1 / crawled),
             defaultAction: action,
+            actionText: sitemapActionText(f.ruleId, f.url!, 1, { url: f.url, detail: f.detail }),
             evidence: ev,
             identity: { rule: f.ruleId, url: normalizeUrl(f.url!) },
             verified: true,
@@ -937,7 +1145,7 @@ class Builder {
     const pages = this.inp.pages.filter((p) => p.title);
     if (pages.length < 2) return [];
     const titleTokens = new Map(pages.map((p) => [p.norm, this.titleTokens(p)]));
-    const pairs = new Map<string, { a: PageInfo; b: PageInfo; sharedTokens: number; titleMatch: boolean; queries: Map<string, number> }>();
+    const pairs = new Map<string, { a: PageInfo; b: PageInfo; sharedTokens: number; titleMatch: boolean; queries: Map<string, number>; alternating: AlternatingQuery[] }>();
     const pairKey = (x: PageInfo, y: PageInfo) => (x.norm < y.norm ? `${x.norm}||${y.norm}` : `${y.norm}||${x.norm}`);
     for (let i = 0; i < pages.length; i++) {
       for (let j = i + 1; j < pages.length; j++) {
@@ -948,7 +1156,7 @@ class Builder {
         const shared = sharedCount(ta, tb);
         const shorter = Math.min(ta.size, tb.size);
         if (shorter > 0 && shared >= this.cfg.duplicateMinSharedTokens && shared >= this.cfg.duplicateMinShorterShare * shorter) {
-          pairs.set(pairKey(a, b), { a, b, sharedTokens: shared, titleMatch: true, queries: new Map() });
+          pairs.set(pairKey(a, b), { a, b, sharedTokens: shared, titleMatch: true, queries: new Map(), alternating: [] });
         }
       }
     }
@@ -968,9 +1176,29 @@ class Builder {
           const a = this.pagesByNorm.get(list[i]!)!;
           const b = this.pagesByNorm.get(list[j]!)!;
           const key = pairKey(a, b);
-          const entry = pairs.get(key) ?? { a, b, sharedTokens: sharedCount(this.titleTokens(a), this.titleTokens(b)), titleMatch: false, queries: new Map<string, number>() };
+          const entry = pairs.get(key) ?? { a, b, sharedTokens: sharedCount(this.titleTokens(a), this.titleTokens(b)), titleMatch: false, queries: new Map<string, number>(), alternating: [] };
           entry.queries.set(q, Math.min(m.get(list[i]!)!, m.get(list[j]!)!));
           pairs.set(key, entry);
+        }
+      }
+    }
+    // [A25] Queries whose top page alternates between URLs across weeks feed the same pair prefilter.
+    const weeks = this.inp.sync?.extras?.queryPageWeeks;
+    if (weeks) {
+      for (const alt of detectAlternatingUrls(weeks, normalizeUrl)) {
+        if (this.dropped.has(normalizeDemandQuery(alt.query))) continue;
+        const pgs = alt.pages.map((n) => this.pagesByNorm.get(n)).filter((x): x is PageInfo => !!x);
+        for (let i = 0; i < pgs.length; i++) {
+          for (let j = i + 1; j < pgs.length; j++) {
+            const a = pgs[i]!;
+            const b = pgs[j]!;
+            const key = pairKey(a, b);
+            const entry = pairs.get(key) ?? { a, b, sharedTokens: sharedCount(this.titleTokens(a), this.titleTokens(b)), titleMatch: false, queries: new Map<string, number>(), alternating: [] };
+            const impr = alt.weeks.filter((w) => w.page === a.norm || w.page === b.norm).reduce((n, w) => n + w.impressions, 0);
+            if (!entry.queries.has(alt.query)) entry.queries.set(alt.query, impr);
+            entry.alternating.push(alt);
+            pairs.set(key, entry);
+          }
         }
       }
     }
@@ -986,6 +1214,16 @@ class Builder {
       const qRows = this.qp.filter((r) => queries.slice(0, 3).includes(r.query!) && [p.a.norm, p.b.norm].includes(normalizeUrl(r.page!)));
       const ev: EvidenceSpec[] = [this.crawlEvidence(strong), this.crawlEvidence(weak)];
       if (qRows.length) ev.push(this.gscRowEvidence(qRows, "queries where both URLs received impressions"));
+      for (const alt of p.alternating.slice(0, 2)) {
+        const seq = alt.weeks.map((w) => `week of ${w.weekStart ?? `#${w.week + 1}`}: ${w.page}`).join("; ");
+        ev.push(
+          this.ruleEvidence(
+            "alternating_urls",
+            `"${clip(alt.query, 80)}": the top page by clicks changed ${alt.changes} times across weeks of ${this.win} (${seq}).`,
+            { query: alt.query, changes: alt.changes, weeks: alt.weeks, pages: alt.pages },
+          ),
+        );
+      }
       ev.push(
         this.ruleEvidence(
           "duplicate_prefilter",
@@ -997,13 +1235,17 @@ class Builder {
       return this.base("duplicate", {
         key: `duplicate:${p.key}`,
         issueType: "consolidate_duplicate",
-        trigger: queries.length ? `Two URLs share GSC query "${clip(queries[0], 80)}"` : "Two URLs with overlapping titles",
+        trigger: p.alternating.length
+          ? `Two URLs alternate as the top result for GSC query "${clip(p.alternating[0]!.query, 80)}"`
+          : queries.length
+            ? `Two URLs share GSC query "${clip(queries[0], 80)}"`
+            : "Two URLs with overlapping titles",
         issue: `${strong.url} and ${weak.url} may compete for the same search intent.`,
         page: strong,
         pageB: weak,
         sharedQueries: queries.slice(0, 10),
         target: { kind: "url", url: strong.url, exampleUrls: [strong.url, weak.url] },
-        metrics: { sharedTitleTokens: p.sharedTokens, sharedQueries: queries.length, impressions },
+        metrics: { sharedTitleTokens: p.sharedTokens, sharedQueries: queries.length, impressions, alternatingQueries: p.alternating.length || null },
         priority: this.priorityFor(impressions, null, "high"),
         defaultAction: "consolidate_duplicate",
         evidence: ev,
@@ -1012,10 +1254,255 @@ class Builder {
       });
     });
   }
+
+  // ---------------------------------------------------------------- [A25] internal link suggestions
+  /** Act-tier suggestions of the latest suggester run -> concrete page-scope link candidates. */
+  linkSuggestions(): Candidate[] {
+    const list = this.inp.linkSuggestions ?? [];
+    const out: Candidate[] = [];
+    const crawled = Math.max(1, this.inp.crawl?.crawledCount ?? this.inp.pages.length);
+    for (const s of list) {
+      if (s.status !== "suggested" || s.userStatus !== "open" || s.method !== "jev" || s.decision?.tier !== "act") continue;
+      if (!s.sentence || !s.anchor) continue;
+      if (looksLikeInstructions(s.sentence.text) || looksLikeInstructions(s.anchor.text)) continue; // [A14]
+      const srcNorm = normalizeUrl(s.source.url);
+      const tgtNorm = normalizeUrl(s.target.url);
+      const source = this.pagesByNorm.get(srcNorm) ?? null;
+      const m = this.pageMetricsCur.get(tgtNorm);
+      const day = this.inp.crawl?.day ?? null;
+      const sentence = clip(s.sentence.text, 240);
+      const anchor = clip(s.anchor.text, 100);
+      const ev: EvidenceSpec[] = [
+        {
+          source: "crawl",
+          refId: s.id,
+          window: day,
+          text: `Internal link suggestion (Jev act tier): add a link from ${s.source.url} to ${s.target.url} with the anchor "${anchor}" in the sentence "${sentence}"${s.role ? ` (role: ${s.role.replace(/_/g, " ")})` : ""}.`,
+          data: {
+            linkSuggestionId: s.id,
+            sourceUrl: s.source.url,
+            targetUrl: s.target.url,
+            anchor: s.anchor.text,
+            sentence: s.sentence.text,
+            role: s.role,
+            tier: s.decision.tier,
+            shouldExist: s.decision.shouldExist,
+          },
+        },
+      ];
+      if (m) ev.push(this.pageMetricEvidence(s.target.url, m, "current"));
+      ev.push({
+        source: "crawl",
+        refId: this.inp.crawl?.id ?? null,
+        window: day,
+        text: `Crawl${day ? ` on ${day}` : ""}: ${s.target.url} has ${s.target.inlinks} internal inlinks among crawled pages${s.target.orphan ? " (orphan)" : ""}, and ${s.source.url} does not link to it yet.`,
+        data: { target: s.target.url, inlinks: s.target.inlinks, orphan: s.target.orphan },
+      });
+      out.push(
+        this.base("internal_link", {
+          key: `internal_link_suggestion:${srcNorm}|${tgtNorm}`,
+          issueType: "internal_link",
+          jevDependent: false,
+          deterministicOnly: true,
+          trigger: clip(`Internal link suggestion: ${s.source.url} to ${s.target.url}`, 200),
+          issue: clip(`${s.source.url} does not link to ${s.target.url}; the internal link suggester found a sentence and anchor for the link.`, 400),
+          page: source,
+          target: { kind: "url", url: s.source.url, exampleUrls: [s.source.url, s.target.url] },
+          metrics: { impressions: m?.impressions ?? null, clicks: m?.clicks ?? null, targetInlinks: s.target.inlinks, suggestionScore: s.score },
+          priority: this.priorityFor(m ? m.impressions : null, m ? m.clicks : null, "low", null, 1 / crawled),
+          defaultAction: "add_internal_links",
+          actionText: `Add a link from ${s.source.url} to ${s.target.url} using the anchor "${anchor}" in the sentence: "${sentence}"; [confirm: the sentence and anchor still read naturally on the live page].`,
+          evidence: ev,
+          identity: { source: srcNorm, target: tgtNorm },
+          verified: !!source,
+          limitations: `From the internal link suggester's latest run over the crawl${day ? ` of ${day}` : ""}; Okara never edits pages. Inlinks are counted only within crawled pages. No ranking change is promised.`,
+          linkSuggestion: {
+            id: s.id,
+            sourceUrl: s.source.url,
+            targetUrl: s.target.url,
+            anchor: s.anchor.text,
+            sentence: s.sentence.text,
+            role: s.role,
+            tier: s.decision.tier,
+            shouldExist: s.decision.shouldExist,
+            provider: s.decision.provider,
+            model: s.decision.model,
+          },
+        }),
+      );
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------- [A23] freshness
+  freshness(): Candidate[] {
+    const today = this.inp.today;
+    if (!today || !this.inp.crawl) return [];
+    const out: Candidate[] = [];
+    for (const p of this.inp.pages) {
+      if (p.tainted || isLegalUrl(p.url)) continue;
+      const refs = detectStaleYears({ title: p.title, h1: p.h1, firstParagraph: p.firstParagraph ?? (p.excerpt ? p.excerpt.slice(0, 400) : null) }, today);
+      if (refs.length === 0) continue;
+      const years = [...new Set(refs.map((r) => r.year))].sort((a, b) => a - b);
+      const m = this.pageMetricsCur.get(p.norm);
+      const refText = refs.slice(0, 4).map((r) => `${r.year} in the ${r.field.replace("_", " ")} ("${clip(r.context, 70)}")`).join("; ");
+      const ev: EvidenceSpec[] = [
+        { ...this.ruleEvidence("stale_years", `dated references on ${p.url} (${STALE_YEAR_VERSION}; years at least 2 years before ${today}): ${refText}.`, { url: p.url, references: refs, today }, p.snapshotId), window: this.inp.crawl.day, tainted: p.tainted },
+        this.crawlEvidence(p),
+      ];
+      if (m) ev.push(this.pageMetricEvidence(p.url, m, "current"));
+      out.push(
+        this.base("freshness", {
+          key: `freshness:${p.norm}`,
+          issueType: "freshness_outdated",
+          trigger: clip(`Dated reference ${years.join(", ")} on the page`, 200),
+          issue: clip(`${p.url} shows dated references (${years.join(", ")}) in its title, H1, or opening text that may present outdated information as current.`, 400),
+          page: p,
+          target: { kind: "url", url: p.url },
+          metrics: { years: years.join(", "), impressions: m?.impressions ?? null, clicks: m?.clicks ?? null },
+          priority: this.priorityFor(m ? m.impressions : null, m ? m.clicks : null, "medium"),
+          defaultAction: null,
+          actionText: `Review the dated references on ${p.url} (${years.join(", ")}) and update any fact, price, or recommendation that is no longer current, or label it clearly as historical; [confirm: the current facts or dates to use].`,
+          datedReferences: refs.map((r) => `${r.year} (${r.field}): ${r.context}`),
+          evidence: ev,
+          identity: { page: p.norm, years },
+          limitations: `Years detected in the crawled title, H1, and first paragraph only (${STALE_YEAR_VERSION}); historical mentions such as "since 1998" are excluded. Jev judges whether the page presents them as current. No ranking change is promised.`,
+        }),
+      );
+    }
+    return out.sort((a, b) => Number(b.metrics.impressions ?? 0) - Number(a.metrics.impressions ?? 0));
+  }
+
+  // ---------------------------------------------------------------- [A23] schema-content mismatch
+  schemaMismatch(): Candidate[] {
+    if (!this.inp.crawl) return [];
+    const crawled = Math.max(1, this.inp.crawl.crawledCount);
+    const out: Candidate[] = [];
+    for (const p of this.inp.pages) {
+      const types = p.jsonLdTypes ?? [];
+      if (types.length === 0 || p.tainted) continue;
+      const conflicts = schemaConflicts({ pageType: p.pageType, jsonLdTypes: types, headings: p.headings, h1: p.h1 });
+      // Offer price values are not stored by the crawler yet, so the price check is skipped (never guessed).
+      const price = offerPriceCheck(null, p.excerpt);
+      const reasons = conflicts.map((c) => SCHEMA_CONFLICT_TEXT[c]);
+      if (price.status === "mismatch") reasons.push(price.reason);
+      if (reasons.length === 0) continue;
+      const m = this.pageMetricsCur.get(p.norm);
+      out.push(
+        this.base("schema_mismatch", {
+          key: `schema_mismatch:${p.norm}`,
+          issueType: "schema_content_mismatch",
+          trigger: clip(`Structured data may not match the page: ${reasons[0]}`, 200),
+          issue: clip(`The structured data on ${p.url} (${types.join(", ")}) may describe something the page does not visibly show.`, 400),
+          page: p,
+          target: { kind: "url", url: p.url },
+          severity: "moderate",
+          metrics: { jsonLdTypes: types.join(", "), conflicts: conflicts.join(","), priceCheck: price.status, impressions: m?.impressions ?? null },
+          priority: this.priorityFor(m ? m.impressions : null, m ? m.clicks : null, "medium", SEVERITY_WEIGHT.moderate, 1 / crawled),
+          defaultAction: "fix_structured_data",
+          actionText: `Make the structured data on ${p.url} describe what the page visibly shows (${reasons.join("; ")}): change or remove the markup that does not match; [confirm: which schema type fits this page].`,
+          schemaConflicts: reasons,
+          evidence: [
+            this.ruleEvidence(
+              "schema_match",
+              `${p.url} (${p.pageType}) has JSON-LD types ${types.join(", ")}: ${reasons.join("; ")} (${SCHEMA_MATCH_VERSION}). Offer price check: ${price.status} (${price.reason})`,
+              { url: p.url, pageType: p.pageType, jsonLdTypes: types, conflicts, priceCheck: price },
+              p.snapshotId,
+            ),
+            this.crawlEvidence(p, `headings: ${clip(p.headings.slice(0, 8).join(" | "), 200) || "(none)"}`),
+          ],
+          identity: { page: p.norm, conflicts },
+          verified: true,
+          limitations: `Based on the JSON-LD types and text stored from the crawl on ${this.inp.crawl.day}; Offer price values are not stored, so no price comparison was made. Structured data never guarantees rich results.`,
+        }),
+      );
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------- [A23] answer clarity (AEO)
+  answerClarity(): Candidate[] {
+    if (!this.inp.sync || !this.inp.crawl) return [];
+    const byPage = new Map<string, SliceRow[]>();
+    for (const r of this.qp) {
+      if (this.brand.isSelfBrand(r.query)) continue;
+      const k = normalizeUrl(r.page!);
+      const list = byPage.get(k) ?? [];
+      list.push(r);
+      byPage.set(k, list);
+    }
+    const out: Candidate[] = [];
+    for (const [norm, rows] of byPage) {
+      const page = this.pagesByNorm.get(norm);
+      if (!page || page.tainted || isLegalUrl(page.url)) continue;
+      const opening = page.firstParagraph ?? page.excerpt;
+      if (!opening) continue;
+      const byQuery = new Map<string, SliceRow[]>();
+      for (const r of rows) byQuery.set(r.query!, [...(byQuery.get(r.query!) ?? []), r]);
+      const [top, topRows] = [...byQuery.entries()].sort((a, b) => b[1].reduce((n, r) => n + r.impressions, 0) - a[1].reduce((n, r) => n + r.impressions, 0))[0]!;
+      const impressions = topRows.reduce((n, r) => n + r.impressions, 0);
+      if (impressions < this.cfg.answerMinImpressions) continue;
+      if (!QUESTION_QUERY.test(top.trim()) && page.pageType !== "article") continue;
+      const clicks = topRows.reduce((n, r) => n + r.clicks, 0);
+      out.push(
+        this.base("answer_clarity", {
+          key: `answer_clarity:${norm}`,
+          issueType: "answer_clarity",
+          trigger: `From GSC query "${clip(top, 80)}"`,
+          issue: clip(`The opening of ${page.url} may not answer "${top}", the query that brings it the most impressions, in its first sentences.`, 400),
+          query: top,
+          page,
+          target: { kind: "url", url: page.url },
+          metrics: { impressions, clicks, position: weightedPosition(topRows) },
+          priority: this.priorityFor(impressions, clicks, "medium"),
+          defaultAction: "improve_intro_answer",
+          evidence: [this.gscRowEvidence(topRows, "the page's top query"), this.crawlEvidence(page, `opening "${clip(opening, 200)}"`)],
+          identity: { page: norm, query: queryKey(top) },
+          limitations: this.gscLimitations("A direct opening answer helps readers and answer engines quote the page; it does not guarantee a snippet, ranking, or AI citation."),
+        }),
+      );
+    }
+    return out.sort((a, b) => Number(b.metrics.impressions) - Number(a.metrics.impressions));
+  }
+}
+
+/**
+ * Sitemap health rules (seo/rules/sitemap-health.ts): every one is fixed in the sitemap (which URLs it
+ * lists and their lastmod), so all map explicitly to fix_canonical_or_indexing; the finding's own
+ * "Fix: ..." text becomes the code-owned action (see sitemapActionText).
+ */
+export const SITEMAP_RULE_ACTIONS: Readonly<Record<string, ActionChoice>> = {
+  "SEO-SITEMAP-URL-ERROR": "fix_canonical_or_indexing",
+  "SEO-SITEMAP-URL-REDIRECT": "fix_canonical_or_indexing",
+  "SEO-SITEMAP-URL-NOINDEX": "fix_canonical_or_indexing",
+  "SEO-SITEMAP-URL-NONCANONICAL": "fix_canonical_or_indexing",
+  "SEO-SITEMAP-LASTMOD-INVALID": "fix_canonical_or_indexing",
+  "SEO-SITEMAP-OFFHOST": "fix_canonical_or_indexing",
+};
+
+/** The fix sentence a finding carries in its detail ("... Fix: <text>"), or null. */
+export function findingFixText(detail: string): string | null {
+  const i = detail.indexOf(" Fix: ");
+  const t = i >= 0 ? detail.slice(i + 6).trim() : "";
+  return t ? t.replace(/[.;]\s*$/, "") : null;
+}
+
+/** Code-owned action for sitemap-health candidates, quoting the finding's exact fix. */
+export function sitemapActionText(ruleId: string, target: string, count: number, example: { url: string | null; detail: string } | null): string | null {
+  if (!SITEMAP_RULE_ACTIONS[ruleId]) return null;
+  const fix = example ? findingFixText(example.detail) : null;
+  const lead =
+    count > 1
+      ? `Correct the ${count} sitemap entries reported by ${ruleId} for ${target}, so the sitemap lists only final, indexable, canonical URLs on the verified host with valid lastmod dates`
+      : `Correct the sitemap entry reported by ${ruleId} for ${target}`;
+  const eg = fix ? `${count > 1 && example?.url ? ` (for example ${example.url}: ${fix})` : `: ${fix}`}` : "";
+  return `${lead}${eg}; [confirm: where your platform generates the sitemap].`;
 }
 
 /** Deterministic default action for a rule id (used when no Jev action_choice is available). */
 export function defaultTechnicalAction(ruleId: string): ActionChoice | null {
+  const mapped = SITEMAP_RULE_ACTIONS[ruleId];
+  if (mapped) return mapped;
   const r = ruleId.toLowerCase();
   if (/canonical|noindex|index|status|robots|redirect|4xx|5xx|broken/.test(r)) return "fix_canonical_or_indexing";
   if (/json|schema|structured|offer|product_data|rich/.test(r)) return "fix_structured_data";

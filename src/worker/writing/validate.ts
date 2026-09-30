@@ -11,6 +11,9 @@
  *  - a certification / spec term (UL, ETL, CSA, CE, damp/wet rating, IP44/IP65, dimmable, lumens,
  *    kelvin, warranty, lead time, ...) that does not appear in the cited evidence
  *  - guarantee / ranking-promise language ("guarantee", "will rank", "ensures inclusion", "#1 ranking")
+ *  - [A25] when `opts.titleQuery` is given: a suggested title ("Title: ..." / "Suggested title: ..." line,
+ *    `suggested|new|proposed|revised title "..."`, or <title>...</title>) that does not contain every
+ *    non-stopword term of that query (case-, accent-, and simple-plural-insensitive; word order free)
  * Warnings (shown, not rejected):
  *  - negated guarantee wording ("does not guarantee"), guarantee wording quoted from evidence
  *  - URLs that do not appear in cited evidence
@@ -36,9 +39,14 @@ export interface ValidateOptions {
   knownRuleIds?: Iterable<string>;
   /** Decision record ids the writer was given; ids in supplied evidence are always known. */
   knownDecisionIds?: Iterable<string>;
+  /**
+   * [A25] The page's top Search Console query: any suggested title in the text must keep its
+   * non-stopword terms. Omitted (the default) = no title check, so existing callers are unaffected.
+   */
+  titleQuery?: string | null;
 }
 
-export const VALIDATOR_VERSION = "validator-2026-09-30.2";
+export const VALIDATOR_VERSION = "validator-2026-09-30.3";
 
 const PLACEHOLDER_RE = /\[confirm:\s*([^\]]*)\]/gi;
 /** Rule registry id shape (src/worker/seo/rules/registry.ts): uppercase prefix + dash-separated segments. */
@@ -215,7 +223,59 @@ export function validateDraft(textFields: string[], citedEvidenceIds: string[], 
     }
   }
 
+  // 8. [A25] Suggested titles keep the top query's terms.
+  if (opts.titleQuery) {
+    const need = [...titleTerms(opts.titleQuery)];
+    if (need.length) {
+      for (const title of suggestedTitles(fullText.replace(PLACEHOLDER_RE, " "))) {
+        const have = titleTerms(title);
+        const missingTerms = need.filter((t) => !have.has(t));
+        if (missingTerms.length) {
+          errors.push(`Suggested title "${title.slice(0, 80)}" drops terms of the page's top Search Console query "${opts.titleQuery.slice(0, 80)}": ${missingTerms.join(", ")}`);
+        }
+      }
+    }
+  }
+
   return { ok: errors.length === 0, errors: dedupe(errors), warnings: dedupe(warnings), confirmPlaceholders };
+}
+
+// ------------------------------------------------------------------ [A25] title terms
+/** English stopwords and generic search modifiers that a title does not have to repeat. */
+const TITLE_STOPWORDS = new Set(
+  (
+    "a an and are as at be by for from has have how i in into is it its of on or our that the their them there these this to was " +
+    "we what when where which who why will with you your vs versus best top near me my do does can should buy shop online new"
+  ).split(" "),
+);
+
+/** Lowercased, accent-free, stopword-free terms with light plural folding ("knobs" -> "knob"). */
+export function titleTerms(text: string): Set<string> {
+  const out = new Set<string>();
+  const norm = text.normalize("NFKC").toLowerCase().normalize("NFD").replace(/\p{M}+/gu, "");
+  for (const raw of norm.split(/[^\p{L}\p{N}]+/u)) {
+    if (!raw || TITLE_STOPWORDS.has(raw)) continue;
+    let t = raw;
+    if (t.length > 3 && t.endsWith("ies")) t = `${t.slice(0, -3)}y`;
+    else if (t.length > 3 && /(sh|ch|x|ss)es$/.test(t)) t = t.slice(0, -2);
+    else if (t.length > 3 && t.endsWith("s") && !t.endsWith("ss")) t = t.slice(0, -1);
+    out.add(t);
+  }
+  return out;
+}
+
+const TITLE_LINE_RE = /^[ \t>*•-]*(?:suggested |new |proposed |revised |recommended )?(?:page |seo )?title(?: tag)?\s*[:：]\s*(.+)$/gim;
+const TITLE_TAG_RE = /<title>([^<]{1,300})<\/title>/gi;
+const TITLE_INLINE_RE = /\b(?:suggested|new|proposed|revised|recommended) (?:page |seo )?title(?: tag)?(?:\s*[:：])?\s*["“]([^"”]{1,300})["”]/gi;
+
+/** Suggested titles written in the draft text (see the header for the recognized forms). */
+export function suggestedTitles(text: string): string[] {
+  const out: string[] = [];
+  const clean = (t: string) => t.trim().replace(/^["“'`]+|["”'`]+$/g, "").trim();
+  for (const m of text.matchAll(TITLE_LINE_RE)) out.push(clean(m[1] ?? ""));
+  for (const m of text.matchAll(TITLE_TAG_RE)) out.push(clean(m[1] ?? ""));
+  for (const m of text.matchAll(TITLE_INLINE_RE)) out.push(clean(m[1] ?? ""));
+  return [...new Set(out.filter((t) => t.length > 0))];
 }
 
 // ------------------------------------------------------------------ helpers

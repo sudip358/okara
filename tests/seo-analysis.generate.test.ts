@@ -109,8 +109,18 @@ describe("generateSeoRecommendations", () => {
       expect(JSON.parse(d.answer_json)).toHaveProperty("answer");
       expect(["act", "flag", "drop"]).toContain(d.tier);
     }
+    // [A23] The query relevance pre-filter and seo.page_action (declining page) are asked too.
     expect(new Set(asked.map((d) => d.question_id))).toEqual(
-      new Set([QUESTION.queryPageRelevance, QUESTION.queryIntent, QUESTION.intentPageFit, QUESTION.actionChoice, QUESTION.issueSeverity, QUESTION.pageOverlap]),
+      new Set([
+        QUESTION.queryRelevance,
+        QUESTION.queryPageRelevance,
+        QUESTION.queryIntent,
+        QUESTION.intentPageFit,
+        QUESTION.actionChoice,
+        QUESTION.issueSeverity,
+        QUESTION.pageOverlap,
+        QUESTION.pageAction,
+      ]),
     );
     // One call per candidate state (all its questions batched), one call for all pairs.
     for (const req of jev.requests) expect(Object.keys(req.questions).length).toBeGreaterThan(0);
