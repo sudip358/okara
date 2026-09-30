@@ -17,12 +17,12 @@ changelog 2026-02-11 subrequests, changelog 2026-09-01 D1 free-tier enforcement)
 | D1 daily row reads/writes | Enforced since 2026-09-01; queries fail over the limit until midnight UTC | Usage-based |
 | Workflow instance retention | 3 days | 30 days |
 
-**Recommendation: Workers Paid.** Crawling and parsing pages, Search Console pagination, and provider calls
-need more than 10 ms of CPU per step, so agent runs will fail on the free plan. The free plan is fine for
-clicking through the UI and demo mode. Run history is stored in D1, so the short free-plan Workflow retention
-doesn't lose data. After upgrading, uncomment the `limits` block in `wrangler.jsonc`.
+**Decision: Workers Paid ($5/month).** `wrangler.jsonc` sets `limits` (60 s CPU per invocation/step, 2,000 subrequests), which only works on the paid plan, so upgrade before the first deploy. Crawling and parsing pages, Search Console pagination, and provider calls
+need more than 10 ms of CPU per step, so agent runs will fail on the free plan. Run history is stored in D1, not only in Workflow state.
 
 ## Steps
+
+0. **Upgrade the Cloudflare account to Workers Paid** (dashboard → Workers & Pages → Plans).
 
 1. **Cloudflare**
    ```sh
