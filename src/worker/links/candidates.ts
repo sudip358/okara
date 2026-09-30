@@ -2,7 +2,8 @@
  * [A25] Candidate targets per source page (deterministic, code-owned; Jev never does this arithmetic).
  *
  * Eligibility (within the latest crawl of the verified host):
- *   source: 2xx, not skipped, not a redirect, on the verified host, with at least one link-context sentence.
+ *   source: 2xx, not skipped, not a redirect, on the verified host, not canonicalised to another URL, with
+ *           at least one link-context sentence.
  *   target: 2xx, not skipped, not a redirect, on the verified host, not noindex (meta robots or
  *           X-Robots-Tag), and not canonicalised to another URL.
  * Pairs excluded: the page itself, and targets the source already links to (internal_links_json,
@@ -91,8 +92,9 @@ export function targetExclusion(p: LinkPage, host: string): string | null {
   return null;
 }
 
+/** Sources: crawled 2xx pages on the host with sentences; a page canonicalised elsewhere is a duplicate, not a source. */
 export function canBeSource(p: LinkPage, host: string): boolean {
-  return onHost(p.url, host) && isOk(p) && !isRedirected(p) && p.sentences.length > 0;
+  return onHost(p.url, host) && isOk(p) && !isRedirected(p) && !canonicalElsewhere(p) && p.sentences.length > 0;
 }
 
 /** Analyzable page (2xx, not skipped, not a redirect): its links count as inlinks. */

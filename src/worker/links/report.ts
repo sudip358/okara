@@ -251,10 +251,11 @@ export const CSV_COLUMNS = [
  * that a spreadsheet would treat as a formula (leading =, +, -, @, tab, CR) are prefixed with a single
  * quote, because sentences are untrusted crawled text.
  */
-export function csvCell(value: string | number | null | undefined, opts: { text?: boolean } = {}): string {
+export function csvCell(value: string | number | null | undefined): string {
   if (value === null || value === undefined) return "";
-  let s = typeof value === "number" ? (Number.isFinite(value) ? String(value) : "") : value;
-  if (opts.text !== false && typeof value === "string" && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "";
+  let s = value;
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 

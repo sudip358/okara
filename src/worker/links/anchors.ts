@@ -6,7 +6,8 @@
  *   - contain at least one of the target's defining terms,
  *   - do not start or end with a stopword,
  *   - are not generic ("click here", "read more", "this page", ...; see isGenericAnchor),
- *   - are at least 4 characters when they are a single word.
+ *   - are at least 4 characters when they are a single word,
+ *   - have no conjunction inside ("brass and left unlacquered") unless the phrase is in the target title/H1.
  * Score (ANCHORS_VERSION):
  *   term weight   sum of the weights of the distinct target terms in the phrase
  * + title/H1     +1.5 when the phrase (2+ words) appears word-for-word, as stems, in the target title or an H1
@@ -90,6 +91,7 @@ function containsSeq(hay: readonly string[], needle: readonly string[]): boolean
 }
 
 const LENGTH_ADJ = [0, -0.3, 0.3, 0.3, 0.1, -0.2];
+const CONJUNCTIONS = new Set(["and", "or", "but", "so", "then", "nor", "yet", "while", "because", "although"]);
 
 export function anchorCandidates(
   sentences: readonly RankedSentence[],
@@ -117,6 +119,7 @@ export function anchorCandidates(
           if (isGenericAnchor(text)) continue;
           const stems = span.map((w) => w.stem);
           const inTitle = span.length >= 2 && titleSeqs.some((seq) => containsSeq(seq, stems));
+          if (!inTitle && span.slice(1, -1).some((w) => CONJUNCTIONS.has(w.lower))) continue;
           const termWeight = matched.reduce((a, st) => a + (weightOf.get(st) ?? 0), 0);
           const density = span.filter((w) => weightOf.has(w.stem) || titleStems.has(w.stem)).length / span.length;
           const score = round(termWeight + (inTitle ? 1.5 : 0) + density + (LENGTH_ADJ[span.length] ?? 0) + 0.2 * (1 - rank / 4));

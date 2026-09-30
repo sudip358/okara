@@ -10,11 +10,16 @@
  * idf = ln((1 + N) / (1 + df)) + 1 (smoothed; df = pages containing the term in any field).
  * score = weighted tf x idf. The top TOP_TERMS terms per page (ties broken alphabetically) are the page's
  * defining terms; `weight` = score / the page's top score, so weights are comparable across pages (0..1].
+ * Site-wide vocabulary: when the corpus has at least SITE_WIDE_MIN_DOCS pages, terms found on more than
+ * SITE_WIDE_SHARE of them (for example "brass" on a brass-hardware store) define no single page and are
+ * not defining terms.
  */
 
 export const TERMS_VERSION = "links-terms-2026-09-30.1";
 export const TOP_TERMS = 12;
 export const FIELD_WEIGHTS = { title: 3, h1: 3, heading: 2, sentence: 1 } as const;
+export const SITE_WIDE_SHARE = 0.8;
+export const SITE_WIDE_MIN_DOCS = 5;
 const MIN_TOKEN_LENGTH = 3;
 
 /** English function words and web boilerplate words that never define a page's topic. */
@@ -50,7 +55,7 @@ export function stem(word: string): string {
   if (w.length <= 3 || STEM_EXCEPTIONS.has(w)) return w;
   if (w.endsWith("ies") && w.length > 4) return `${w.slice(0, -3)}y`;
   if (w.endsWith("sses")) return w.slice(0, -2);
-  if (/(?:x|z|ch|sh)es$/.test(w)) return w.slice(0, -2);
+  if (/(?:x|zz|ch|sh)es$/.test(w)) return w.slice(0, -2);
   if (w.endsWith("s") && !/(?:ss|us|is|ous)$/.test(w)) return w.slice(0, -1);
   return w;
 }
@@ -161,7 +166,10 @@ export function computeDefiningTerms(docs: readonly TermDoc[], opts: { extraStop
   for (const doc of docs) {
     const tf = tfs.get(doc.id)!;
     const lab = labels.get(doc.id)!;
-    const scored = [...tf.entries()].map(([term, f]) => ({ term, score: f * (Math.log((1 + n) / (1 + (df.get(term) ?? 0))) + 1) }));
+    const siteWide = (term: string) => n >= SITE_WIDE_MIN_DOCS && (df.get(term) ?? 0) / n > SITE_WIDE_SHARE;
+    const scored = [...tf.entries()]
+      .filter(([term]) => !siteWide(term))
+      .map(([term, f]) => ({ term, score: f * (Math.log((1 + n) / (1 + (df.get(term) ?? 0))) + 1) }));
     scored.sort((a, b) => b.score - a.score || (a.term < b.term ? -1 : a.term > b.term ? 1 : 0));
     const kept = scored.slice(0, top);
     const max = kept[0]?.score ?? 0;
