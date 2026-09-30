@@ -2,7 +2,7 @@
  * SEO overview + GSC CSV import (seo-analysis module).
  *   GET  /projects/:pid/seo/overview    -> SeoOverview
  *   POST /projects/:pid/seo/import-csv  -> body {csv, window:'current'|'previous', start, end}; labelled csv_import
- *                                          201 {data:{syncId, rows, window}}; 400 with the expected headers on bad input
+ *                                          201 {data:{syncId, rows, window}}; 400 with details.expectedHeaders on bad input
  * CSRF/origin checks for the POST are enforced by the app-wide middleware.
  */
 import { Hono } from "hono";
@@ -11,7 +11,7 @@ import type { AppEnv } from "../app";
 import { requireUser } from "../platform/require-user";
 import { badRequest, HttpError } from "../lib/errors";
 import { requireProject } from "../platform/access";
-import { CSV_MAX_BYTES, importGscCsv } from "../seo/gsc/csv";
+import { CSV_MAX_BYTES, EXPECTED_CSV_HEADERS, importGscCsv } from "../seo/gsc/csv";
 import { buildSeoOverview } from "../seo/gsc/overview";
 
 export const seoOverviewRoutes = new Hono<AppEnv>();
@@ -50,7 +50,12 @@ seoOverviewRoutes.post("/projects/:pid/seo/import-csv", async (c) => {
     throw badRequest("Body must be JSON.");
   }
   const parsed = importBody.safeParse(raw);
-  if (!parsed.success) throw badRequest("Invalid import request.", parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`));
+  if (!parsed.success) {
+    throw badRequest("Invalid import request.", {
+      expectedHeaders: EXPECTED_CSV_HEADERS,
+      errors: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`),
+    });
+  }
   const result = await importGscCsv(
     db,
     { workspaceId: project.workspace_id, projectId: project.id, userId: user.id, property: project.gsc_property, now: c.get("now") },

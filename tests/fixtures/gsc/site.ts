@@ -146,21 +146,61 @@ export function fakeGsc(data: FakeGscData = DEFAULT_GSC_DATA, fail?: (req: GscQu
   return provider;
 }
 
+/**
+ * Ten more crawled product pages with distinct titles (no duplicate-title overlap). They all share one
+ * product-template issue in the default findings (the [A9] fixture).
+ */
+const PRODUCT_NAMES = [
+  "Walnut Shelf Bracket", "Copper Towel Hook", "Iron Door Stop", "Bronze Mail Slot", "Nickel Coat Rail",
+  "Glass Bath Shelf", "Steel Wall Hook", "Chrome Hinge Set", "Oak Drawer Knob", "Marble Door Plate",
+];
+export const PRODUCT_ITEMS: PageFx[] = PRODUCT_NAMES.map((name, i) => ({
+  url: `${ORIGIN}/products/item-${i + 1}`,
+  type: "product" as const,
+  title: name,
+  h1: name,
+  headings: ["Details"],
+  excerpt: `The ${name.toLowerCase()}.`,
+  links: [U.hardware],
+}));
+export const ALL_PAGES: PageFx[] = [...PAGES, ...PRODUCT_ITEMS];
+
 // ------------------------------------------------------------------ DB seed
-export interface SeedOptions {
-  /** Findings: default = 10 product URLs missing Offer (template) + one page-level + one site-level. */
-  findings?: Array<{ rule: string; severity: string; url: string | null; template?: string | null; detail: string }>;
-  pages?: PageFx[];
-  engineQueries?: string[];
-  pillars?: string | null;
+export interface FindingFx {
+  rule: string;
+  severity: string;
+  url: string | null;
+  template?: string | null;
+  detail: string;
+  evidence?: Record<string, unknown>;
 }
 
-export function defaultFindings() {
-  const products = Array.from({ length: 10 }, (_, i) => `${ORIGIN}/products/item-${i + 1}`);
+export interface SeedOptions {
+  /** Findings: default = 10 product URLs with one product-template issue + one page-level + one site-level advisory. */
+  findings?: FindingFx[];
+  pages?: PageFx[];
+}
+
+/** Findings in the crawler's output format (registry rule ids, template label, evidence_json.templateAffectedUrls). */
+export function defaultFindings(): FindingFx[] {
   return [
-    ...products.map((url) => ({ rule: "product_offer_missing", severity: "major", url, template: "product template", detail: "Product JSON-LD has no Offer (price, availability)." })),
-    { rule: "meta_description_missing", severity: "moderate", url: U.sconces, template: null, detail: "No meta description." },
-    { rule: "robots_blocks_answer_crawler", severity: "advisory", url: null, template: null, detail: "robots.txt blocks an answer crawler." },
+    ...PRODUCT_ITEMS.map((p) => ({
+      rule: "ECOM-PRODUCT-OFFER-INCOMPLETE",
+      severity: "moderate",
+      url: p.url,
+      template: "product template",
+      detail: "Product JSON-LD: Offer has no price.",
+      evidence: { issues: ["offer_missing_price"], templateAffectedUrls: PRODUCT_ITEMS.length, pageType: "product", rulesetVersion: "2026-09-30.1" },
+    })),
+    { rule: "SEO-META-DESC-MISSING", severity: "minor", url: U.sconces, template: null, detail: "The page has no meta description.", evidence: { pageType: "landing" } },
+    {
+      rule: "AI-SEARCH-CRAWLER-BLOCKED",
+      severity: "advisory",
+      url: null,
+      template: null,
+      detail: "OAI-SearchBot (OpenAI) is disallowed for the site root by robots.txt.",
+      evidence: { token: "OAI-SearchBot", pageType: null },
+    },
   ];
 }
 
@@ -168,7 +208,7 @@ export async function seedCrawl(env: Env, workspaceId: string, projectId: string
   const db = new Db(env.DB);
   const now = FIXED_NOW.toISOString();
   const crawlId = newId("crawl");
-  const pages = opts.pages ?? PAGES;
+  const pages = opts.pages ?? ALL_PAGES;
   await db.insert("crawl_runs", { id: crawlId, workspace_id: workspaceId, project_id: projectId, status: "completed", pages_limit: 20, pages_crawled: pages.length, started_at: "2026-09-29T08:00:00.000Z", finished_at: "2026-09-29T08:05:00.000Z" });
   for (const p of pages) {
     const pageId = newId("pg");
@@ -193,7 +233,19 @@ export async function seedCrawl(env: Env, workspaceId: string, projectId: string
     });
   }
   for (const f of opts.findings ?? defaultFindings()) {
-    await db.insert("audit_findings", { id: newId("fnd"), workspace_id: workspaceId, project_id: projectId, crawl_run_id: crawlId, rule_id: f.rule, severity: f.severity, url: f.url, template: f.template ?? null, detail: f.detail, evidence_json: "{}", created_at: now });
+    await db.insert("audit_findings", {
+      id: newId("fnd"),
+      workspace_id: workspaceId,
+      project_id: projectId,
+      crawl_run_id: crawlId,
+      rule_id: f.rule,
+      severity: f.severity,
+      url: f.url,
+      template: f.template ?? null,
+      detail: f.detail,
+      evidence_json: JSON.stringify(f.evidence ?? {}),
+      created_at: now,
+    });
   }
   return crawlId;
 }

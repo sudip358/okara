@@ -242,8 +242,24 @@ export interface Evaluation {
   /** Normalized severity from seo.issue_severity when counted (technical only). */
   severity: number | null;
   severityScore: number | null;
+  /** Every counted answer, namespaced by question id (internal: logs, pillar gate). */
   fields: Record<string, number | string>;
+  /**
+   * The headline question's answer for the recommendation card, using the provider's real field names
+   * only (choice/confidence for Choice, score/confidence for Score, noul for Noul) plus `question`.
+   * null when no Jev value is shown (drop tier or no question asked).
+   */
+  decisionFields: Record<string, number | string> | null;
   warnings: string[];
+}
+
+/** Card fields for one judged question; never invents a confidence (Noul has none). */
+export function headlineFields(q: JudgedQuestion | undefined): Record<string, number | string> | null {
+  const a = q?.answer;
+  if (!q || !a || q.tier === "drop") return null;
+  if (a.type === "noul") return { question: q.questionId, noul: round(a.noul) };
+  if (a.type === "choice") return { question: q.questionId, choice: a.choice, confidence: round(a.confidence) };
+  return { question: q.questionId, score: a.score, confidence: round(a.confidence) };
 }
 
 const TIER_ORDER: Record<Tier, number> = { act: 0, "n/a": 0, flag: 1, drop: 2 };
@@ -278,7 +294,18 @@ export function evaluateContent(c: Candidate, j: Judgment): Evaluation {
     if (!q.answer) warnings.push(`Answer missing for ${q.questionId}; dropped.`);
   }
   let tier: Tier = "act";
-  const reject = (reasonCode: string, t: Tier = tier): Evaluation => ({ outcome: "rejected", reasonCode, tier: t, action: null, intent: null, severity: null, severityScore: null, fields, warnings });
+  const reject = (reasonCode: string, t: Tier = tier): Evaluation => ({
+    outcome: "rejected",
+    reasonCode,
+    tier: t,
+    action: null,
+    intent: null,
+    severity: null,
+    severityScore: null,
+    fields,
+    decisionFields: null,
+    warnings,
+  });
 
   const rel = by.get(QUESTION.queryPageRelevance);
   if (rel) {
@@ -303,10 +330,26 @@ export function evaluateContent(c: Candidate, j: Judgment): Evaluation {
     delete fields[`${QUESTION.intentPageFit}.confidence`];
     delete fields[`${QUESTION.intentPageFit}.runner_up`];
   }
+  // A confident mismatch between the query's intent and this page type means improving this page is
+  // the wrong move, unless the action itself routes elsewhere (new page, consolidation, linking) or
+  // the candidate is already about the query landing on the wrong page.
+  const fit = by.get(QUESTION.intentPageFit);
+  if (
+    intent &&
+    fit?.tier === "act" &&
+    fit.answer?.type === "choice" &&
+    fit.answer.choice === "mismatch" &&
+    c.kind !== "query_page_mismatch" &&
+    !MISMATCH_SAFE_ACTIONS.has(action)
+  ) {
+    return reject("low_fit", fit.tier);
+  }
 
   if (c.reviewRequired) tier = worse(tier, "flag");
-  return { outcome: "selected", reasonCode: null, tier, action, intent, severity: null, severityScore: null, fields, warnings };
+  return { outcome: "selected", reasonCode: null, tier, action, intent, severity: null, severityScore: null, fields, decisionFields: headlineFields(act), warnings };
 }
+
+const MISMATCH_SAFE_ACTIONS: ReadonlySet<ActionChoice> = new Set(["new_page_candidate", "consolidate_duplicate", "add_internal_links"]);
 
 /** Technical candidate: Jev severity counts when not dropped; otherwise deterministic severity. */
 export function evaluateTechnical(c: Candidate, j: Judgment | null): Evaluation {
@@ -324,20 +367,22 @@ export function evaluateTechnical(c: Candidate, j: Judgment | null): Evaluation 
       severity: severityFromScore(q.answer.score, ISSUE_SEVERITY_LEVELS),
       severityScore: q.answer.score,
       fields,
+      decisionFields: headlineFields(q),
       warnings,
     };
   }
   if (q) warnings.push("Jev severity withheld (drop tier or missing); using the rule's deterministic severity.");
-  return { outcome: "selected", reasonCode: null, tier: "n/a", action: c.defaultAction, intent: null, severity: null, severityScore: null, fields, warnings };
+  return { outcome: "selected", reasonCode: null, tier: "n/a", action: c.defaultAction, intent: null, severity: null, severityScore: null, fields, decisionFields: null, warnings };
 }
 
 /** Duplicate pair: only confident merge-side answers select; middle band and keep-side reject. */
 export function evaluatePair(p: PairJudgment): Evaluation {
   const fields: Record<string, number | string> = {};
   fieldsOf(p.question, fields);
-  const base = { action: null, intent: null, severity: null, severityScore: null, fields, warnings: [] as string[] };
+  const base = { action: null, intent: null, severity: null, severityScore: null, fields, decisionFields: null, warnings: [] as string[] };
   const a = p.question.answer;
+  // seo.page_overlap policy: middle band is 'drop' (dead band), so only confident answers reach here.
   if (!a || a.type !== "noul" || p.question.tier === "drop") return { ...base, outcome: "rejected", reasonCode: "insufficient_evidence", tier: "drop" };
   if (a.noul < 0.5) return { ...base, outcome: "rejected", reasonCode: "low_fit", tier: p.question.tier };
-  return { ...base, outcome: "selected", reasonCode: null, tier: p.question.tier, action: "consolidate_duplicate" };
+  return { ...base, outcome: "selected", reasonCode: null, tier: p.question.tier, action: "consolidate_duplicate", decisionFields: headlineFields(p.question) };
 }

@@ -1,9 +1,15 @@
-/** Builds the SeoOverview API shape from stored syncs. Totals come only from totals_json. */
-import type { CapabilityState, DateWindow, SeoOverview } from "@shared/types";
+/**
+ * Builds the SeoOverview API shape from stored syncs. Totals come only from totals_json (never from
+ * summed slices). States: 'demo' for demo projects; 'setup_required' whenever no GSC/CSV data has
+ * been imported (whether or not Search Console is connected; the completeness note says which);
+ * 'error' when the only syncs failed; otherwise 'ready'.
+ */
+import type { CapabilityState, DateWindow, DemandCurve, SeoOverview } from "@shared/types";
 import type { Db } from "../../lib/db";
 import { excludeIncompleteDays, parseTotalsJson, toWindowTotals } from "./aggregate";
+import { buildDemandCurve } from "./demand";
 import { GSC_LIMITATIONS } from "./sync";
-import { windowLabel } from "./windows";
+import { daysInWindow, windowLabel } from "./windows";
 
 export interface SyncRow {
   id: string;
@@ -38,7 +44,7 @@ export async function latestUsableSync(db: Db, workspaceId: string, projectId: s
 
 export async function buildSeoOverview(
   db: Db,
-  project: { id: string; workspace_id: string; gsc_property: string | null; is_demo: number },
+  project: { id: string; workspace_id: string; gsc_property: string | null; is_demo: number; language?: string | null },
 ): Promise<SeoOverview> {
   const ws = project.workspace_id;
   const history = await db.all<SyncRow>(
@@ -70,22 +76,26 @@ export async function buildSeoOverview(
     completeness: { note: "No Search Console data imported yet.", covered: null, total: null },
     visitsRevenue: { state: "not_connected" },
     limitations,
+    demandCurve: null,
   };
 
+  const isDemo = project.is_demo === 1;
   if (!latest) {
     if (latestAny?.status === "failed") {
       return {
         ...empty,
-        state: "error",
+        state: isDemo ? "demo" : "error",
         syncedAt: latestAny.synced_at,
         completeness: { note: `Last Search Console sync failed: ${latestAny.error ?? "unknown error"}`, covered: null, total: null },
       };
     }
     return {
       ...empty,
-      state: connected ? "ready" : "setup_required",
+      state: isDemo ? "demo" : "setup_required",
       completeness: {
-        note: connected ? "Search Console is connected; no sync has completed yet." : "Connect Search Console or import a CSV export to see search performance.",
+        note: connected
+          ? "Search Console is connected; no data has been imported yet (waiting for the first sync)."
+          : "Connect Search Console or import a CSV export to see search performance.",
         covered: null,
         total: null,
       },
@@ -111,7 +121,7 @@ export async function buildSeoOverview(
   const completenessNote =
     latest.status === "no_data"
       ? `Search Console returned no data for ${windowLabel(current)}.`
-      : `${rowsText}${sourceText} (${detail}); ${daily.length} of ${daysBetween(current)} days in ${windowLabel(current)}.`;
+      : `${rowsText}${sourceText} (${detail}); ${daily.length} of ${daysInWindow(current)} days in ${windowLabel(current)}.`;
 
   for (const n of totals.notes ?? []) if (!limitations.includes(n)) limitations.push(n);
   if (latest.source === "csv_import") {
@@ -121,8 +131,13 @@ export async function buildSeoOverview(
     limitations.push(`The most recent sync (${latestAny.synced_at}) failed: ${latestAny.error ?? "unknown error"}. Showing the previous successful sync.`);
   }
 
-  let state: CapabilityState = latest.source === "demo" || project.is_demo === 1 ? "demo" : "ready";
-  if (state === "ready" && latestAny?.status === "failed" && latestAny.id === latest.id) state = "error";
+  const state: CapabilityState = latest.source === "demo" || isDemo ? "demo" : "ready";
+  const demandCurve = latest.status === "no_data" ? null : await loadDemandCurve(db, ws, project.id, latest, project.language ?? "en");
+  if (demandCurve && latest.source !== "csv_import") {
+    limitations.push(
+      "Demand curve: query totals are summed from query+page rows, which Search Console aggregates by page, so a search that showed two of your URLs counts once per URL.",
+    );
+  }
 
   return {
     state,
@@ -138,7 +153,26 @@ export async function buildSeoOverview(
     completeness: { note: completenessNote, covered: rows, total: null },
     visitsRevenue: { state: "not_connected" },
     limitations,
+    demandCurve,
   };
+}
+
+/** Current-window query-level demand curve for a sync; null when the sync has no query rows. */
+export async function loadDemandCurve(db: Db, workspaceId: string, projectId: string, sync: SyncRow, language: string): Promise<DemandCurve | null> {
+  const rows = await db.all<{ query: string; clicks: number; impressions: number }>(
+    `SELECT query, SUM(clicks) AS clicks, SUM(impressions) AS impressions FROM gsc_metrics
+      WHERE workspace_id = ? AND project_id = ? AND sync_id = ? AND window = 'current' AND query IS NOT NULL
+      GROUP BY query`,
+    workspaceId,
+    projectId,
+    sync.id,
+  );
+  return buildDemandCurve(rows, {
+    source: sync.source,
+    window: { start: sync.window_start, end: sync.window_end },
+    truncated: sync.truncated === 1,
+    language,
+  });
 }
 
 /** Annotate configuration changes between consecutive syncs: property or source switches. */
@@ -161,6 +195,3 @@ export function configAnnotations(historyDesc: SyncRow[]): Array<{ date: string;
 
 const sourceLabel = (s: SyncRow["source"]) => (s === "api" ? "API sync" : s === "csv_import" ? "CSV import" : "demo data");
 
-function daysBetween(w: DateWindow): number {
-  return Math.round((Date.parse(`${w.end}T00:00:00Z`) - Date.parse(`${w.start}T00:00:00Z`)) / 86400_000) + 1;
-}

@@ -5,12 +5,13 @@
  * copies evidence text and cites evidence ids (writerProvider null). Both paths run validateDraft;
  * a failing draft is never saved.
  */
-import type { EvidenceBullet, EvidenceSource, Level, Tier } from "@shared/types";
+import type { EvidenceBullet, Level, Tier } from "@shared/types";
 import type { RunContext } from "../../runs/context";
 import type { ValidationEvidence } from "../../writing/validate";
 import { validateDraft } from "../../writing/validate";
 import { SEO_WRITER_SYSTEM } from "../../writing/prompts";
 import { RECOMMENDATION_V1_JSON_SCHEMA, recommendationOutputSchema, recommendationTextFields } from "../../writing/schemas";
+import { demandPhrase } from "../gsc/demand";
 import { safeMessage } from "../gsc/sync";
 import type { ActionChoice } from "../questions";
 import type { Candidate, EvidenceSpec } from "./candidates";
@@ -82,12 +83,12 @@ function validationEvidence(ev: StoredEvidence[]): ValidationEvidence[] {
   return ev.map((e) => ({ id: e.id, text: e.spec.text, data: { window: e.spec.window, data: e.spec.data } }));
 }
 
-const SOURCE_ORDER: EvidenceSource[] = ["gsc", "manual_import", "crawl", "geo_observation", "context_doc", "rule"];
-
-/** 2-4 bullets, tagged by source, most direct evidence first. */
+/**
+ * 2-4 bullets, tagged by source, in the candidate's evidence order (candidates list the most direct
+ * evidence first; a template candidate lists the rule summary, then three example URLs [A9]).
+ */
 export function codeBullets(ev: StoredEvidence[]): EvidenceBullet[] {
-  const sorted = [...ev].sort((a, b) => SOURCE_ORDER.indexOf(a.spec.source) - SOURCE_ORDER.indexOf(b.spec.source));
-  return sorted.slice(0, 4).map((e) => ({ evidenceId: e.id, source: e.spec.source, text: bulletText(e.spec.text) }));
+  return ev.slice(0, 4).map((e) => ({ evidenceId: e.id, source: e.spec.source, text: bulletText(e.spec.text) }));
 }
 
 /** Evidence text up to 300 chars, cut at a sentence/clause boundary so no number is split. */
@@ -179,8 +180,8 @@ export async function draftWithWriter(ctx: RunContext, d: DraftInput): Promise<D
       action: o.action,
       suggestedSnippet: o.suggested_snippet ?? null,
       rationale: o.rationale,
-      // Code owns scope/target/effort floor and verification; the writer cannot upgrade them.
-      effort: o.effort,
+      // Code owns scope/target/effort (priority used it) and verification; the writer cannot change them.
+      effort: effortFor(c, d.action),
       uncertainty: maxLevel(o.uncertainty, uncertaintyFor(c, d.tier)),
       limitations: o.limitations,
       verified: o.verified && c.verified && !c.reviewRequired,
@@ -197,16 +198,17 @@ const LEVEL_ORDER: Record<Level, number> = { low: 0, medium: 1, high: 2 };
 const maxLevel = (a: Level, b: Level): Level => (LEVEL_ORDER[b] > LEVEL_ORDER[a] ? b : a);
 
 // ------------------------------------------------------------------ deterministic path
+/** Every deterministic action names the facts a human must supply as [confirm: ...] placeholders [A10]. */
 const ACTION_TEXT: Record<ActionChoice, (target: string) => string> = {
   rewrite_title_meta: (t) => `Rewrite the title and meta description of ${t} so the search snippet reflects the queries shown in the evidence. Keep every claim to facts already on the page; [confirm: product facts to mention in the snippet].`,
-  improve_intro_answer: (t) => `Revise the opening paragraph of ${t} so it directly answers the search demand shown in the evidence before any secondary content.`,
+  improve_intro_answer: (t) => `Revise the opening paragraph of ${t} so it directly answers the search demand shown in the evidence before any secondary content; [confirm: the answer or facts to lead with].`,
   add_section: (t) => `Add a section to ${t} that covers the queries shown in the evidence, using only facts the business can confirm; [confirm: facts for the new section].`,
   add_comparison_or_spec_table: (t) => `Add a comparison or specification table to ${t}; [confirm: specifications and values to include].`,
-  add_internal_links: (t) => `Add contextual internal links to ${t} from related pages, using descriptive anchor text that matches the page topic.`,
+  add_internal_links: (t) => `Add contextual internal links to ${t} from related pages, using descriptive anchor text that matches the page topic; [confirm: which related pages should link here].`,
   fix_structured_data: (t) => `Fix the structured data on ${t} so the reported properties are present and valid; [confirm: values for any missing required properties].`,
-  fix_canonical_or_indexing: (t) => `Fix the canonical/indexing signals reported for ${t} so the intended URL is indexable and self-consistent.`,
+  fix_canonical_or_indexing: (t) => `Fix the canonical/indexing signals reported for ${t} so the intended URL is indexable and self-consistent; [confirm: the intended canonical URL and whether it should be indexed].`,
   consolidate_duplicate: (t) => `Review ${t} for consolidation: merge the overlapping content into the stronger URL and redirect or canonicalize the other; [confirm: which URL to keep].`,
-  new_page_candidate: (t) => `Review whether a new page is warranted for the search demand in the evidence${t === "the site" ? "" : ` (related: ${t})`}; a human must confirm scope before any drafting.`,
+  new_page_candidate: (t) => `Review whether a new page is warranted for the search demand in the evidence${t === "the site" ? "" : ` (related: ${t})`}; a human must confirm scope before any drafting; [confirm: whether a page on this topic is wanted].`,
   no_action: () => "No change recommended.",
 };
 
@@ -232,11 +234,17 @@ export function draftDeterministic(d: DraftInput): DraftResult {
   if (d.action) actionText = ACTION_TEXT[d.action](targetText);
   else {
     const rule = c.issueType.startsWith("technical:") ? c.issueType.slice("technical:".length) : c.issueType;
-    actionText = `Resolve rule ${rule} at the reported scope (${c.scope}) for ${targetText}, following the finding details.`;
+    actionText = `Resolve rule ${rule} at the reported scope (${c.scope}) for ${targetText}, following the finding details; [confirm: the intended fix for this rule].`;
   }
   if (c.scope === "template") actionText += " Make the change once in the shared template rather than page by page.";
   actionText = `${actionText} ${cite(primary)}`;
-  const rationale = `${RATIONALE[c.kind]} ${cite(ids)}`;
+  // Demand segment of the query in the site's own GSC impressions (never market volume) [gsc/demand.ts].
+  const demandEv = c.demand ? d.evidence.find((e) => (e.spec.data as { demand?: unknown } | null)?.demand) : undefined;
+  const demandText =
+    c.demand && demandEv
+      ? ` In this site's own Search Console impressions, "${clip(c.demand.query, 80)}" is ${demandPhrase(c.demand)}; this describes first-party visibility, not market search volume. ${cite([demandEv.id])}`
+      : "";
+  const rationale = `${RATIONALE[c.kind]} ${cite(ids.slice(0, 3))}${demandText}`;
   const text = {
     trigger: clip(c.trigger, 200),
     issue: `${clip(c.issue, 360)} ${cite(primary.slice(0, 1))}`,

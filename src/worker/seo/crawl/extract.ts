@@ -23,7 +23,25 @@ export const CAPS = {
   firstParagraph: 400,
   jsonLdBlocks: 20,
   jsonLdBytes: 200_000,
+  viewport: 200,
+  genericAnchors: 10,
+  anchorText: 60,
+  imageCount: 10_000,
 } as const;
+
+/**
+ * Internal-link anchor texts that say nothing about the target ([A21] on-page checklist). Compared after
+ * lower-casing, collapsing whitespace, and trimming trailing punctuation/arrows.
+ */
+export const GENERIC_ANCHOR_TEXTS: ReadonlySet<string> = new Set([
+  "click here", "here", "click", "read more", "learn more", "more", "see more", "view more", "find out more",
+  "more info", "more information", "details", "this", "this page", "link", "go", "continue", "continue reading",
+]);
+
+export function isGenericAnchorText(text: string): boolean {
+  const t = text.toLowerCase().replace(/\s+/g, " ").replace(/[\s.:!…›»→>-]+$/u, "").trim();
+  return GENERIC_ANCHOR_TEXTS.has(t);
+}
 
 export interface JsonLdIssue {
   type: string;
@@ -57,6 +75,16 @@ export interface ExtractedPage {
   tableCount: number;
   hasAppRoot: boolean;
   jsRendered: boolean;
+  /** <img> elements in the body outside noscript/svg (capped). */
+  imagesTotal: number;
+  /** Of those, images without an alt attribute; role=presentation/none or aria-hidden=true count as decorative. */
+  imagesMissingAlt: number;
+  /** <meta name="viewport"> content (capped), or null when absent. */
+  viewport: string | null;
+  /** Breadcrumb navigation markup (aria-label/class/id containing "breadcrumb", or microdata BreadcrumbList). */
+  hasBreadcrumbNav: boolean;
+  /** Internal links whose anchor text is generic ("click here", "read more"), capped. */
+  genericAnchors: Array<{ href: string; text: string }>;
 }
 
 const SKIP_TAGS = new Set(["script", "style", "noscript", "template", "svg", "iframe", "object", "canvas"]);
@@ -102,6 +130,12 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
   let tableCount = 0;
   let hasAppRoot = false;
   let hasMain = false;
+  let imagesTotal = 0;
+  let imagesMissingAlt = 0;
+  let viewport: string | null = null;
+  let hasBreadcrumbNav = false;
+  const genericAnchors: Array<{ href: string; text: string }> = [];
+  let anchor: { href: string; ariaLabel: string | null; buf: string } | null = null;
 
   const jsonLdRaw: string[] = [];
 
@@ -154,6 +188,13 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
         if (BLOCK_TAGS.has(name)) pushText(" ");
 
         const id = (attrs.id ?? "").toLowerCase();
+        if (
+          !hasBreadcrumbNav &&
+          skipDepth === 0 &&
+          (/breadcrumb/i.test(attrs["aria-label"] ?? "") || /breadcrumb/i.test(attrs.class ?? "") || id.includes("breadcrumb") || /BreadcrumbList/i.test(attrs.itemtype ?? ""))
+        ) {
+          hasBreadcrumbNav = true;
+        }
         if (name === "div" && (APP_ROOT_IDS.has(id) || "data-reactroot" in attrs || "ng-app" in attrs || "data-server-rendered" in attrs)) {
           hasAppRoot = true;
         }
@@ -169,6 +210,7 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
           else if (key === "robots") robotsParts.push(collapse(content).toLowerCase());
           else if (key === "author" && !authorMeta) authorMeta = cap(collapse(content), 200) || null;
           else if ((key === "article:modified_time" || key === "og:updated_time") && !modifiedMeta) modifiedMeta = cap(collapse(content), 64) || null;
+          else if (key === "viewport" && viewport === null) viewport = cap(collapse(content), CAPS.viewport);
         } else if (name === "link") {
           const rel = (attrs.rel ?? "").toLowerCase().split(/\s+/);
           if (rel.includes("canonical") && canonical === null && attrs.href) {
@@ -184,9 +226,17 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
             const host = normalizeHost(u.hostname);
             if (host === pageHost) {
               if (internal.size < CAPS.internalLinks) internal.add(u.toString());
+              if (inBody && genericAnchors.length < CAPS.genericAnchors) anchor = { href: u.toString(), ariaLabel: attrs["aria-label"] ?? null, buf: "" };
             } else if (boilerDepth === 0 && inBody) {
               outbound.add(u.toString());
             }
+          }
+        } else if (name === "img" && inBody && skipDepth === 0) {
+          if (imagesTotal < CAPS.imageCount) {
+            imagesTotal++;
+            const role = (attrs.role ?? "").toLowerCase();
+            const decorative = role === "presentation" || role === "none" || (attrs["aria-hidden"] ?? "").toLowerCase() === "true";
+            if (!("alt" in attrs) && !decorative) imagesMissingAlt++;
           }
         } else if (name === "table") {
           tableCount++;
@@ -205,6 +255,7 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
           return;
         }
         if (skipDepth > 0) return;
+        if (anchor && anchor.buf.length < 200) anchor.buf += text;
         if (headingLevel) headingBuf += text;
         if (pDepth > 0 && pBuf.length < 4000) pBuf += text;
         if (boilerDepth === 0 && inBody) pushText(text);
@@ -218,6 +269,14 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
         if (SKIP_TAGS.has(name)) {
           if (skipDepth > 0) skipDepth--;
           return;
+        }
+        if (name === "a" && anchor) {
+          const text = collapse(anchor.buf);
+          const labelled = anchor.ariaLabel !== null && anchor.ariaLabel.trim() !== "" && !isGenericAnchorText(anchor.ariaLabel);
+          if (text && !labelled && isGenericAnchorText(text) && genericAnchors.length < CAPS.genericAnchors) {
+            genericAnchors.push({ href: anchor.href, text: cap(text, CAPS.anchorText) });
+          }
+          anchor = null;
         }
         if (name === "title" && inTitle) {
           inTitle = false;
@@ -272,6 +331,11 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
     tableCount,
     hasAppRoot,
     jsRendered,
+    imagesTotal,
+    imagesMissingAlt,
+    viewport,
+    hasBreadcrumbNav,
+    genericAnchors,
   };
 }
 

@@ -12,11 +12,12 @@
 import type { AiCrawlerAccess, PageType, Severity, SiteType } from "@shared/types";
 import { normalizeHost } from "../ssrf";
 import { robotsAllows, type RobotsState } from "../crawl/robots";
+import { FLAGGED_PURPOSES } from "./ai-crawlers";
 import { templateName } from "../crawl/page-type";
 import type { JsonLdIssue } from "../crawl/extract";
 import { countWords } from "../crawl/extract";
 
-export const RULESET_VERSION = "2026-09-30.1";
+export const RULESET_VERSION = "2026-09-30.2";
 /** Minimum URLs of one page type sharing an issue before findings are labelled with a template. */
 export const TEMPLATE_MIN_URLS = 3;
 
@@ -529,16 +530,16 @@ export const RULES: readonly Rule[] = [
   },
   {
     id: "AI-SEARCH-CRAWLER-BLOCKED",
-    name: "AI answer/search crawler disallowed",
+    name: "Search engine or AI answer/search crawler disallowed",
     area: "ai_crawlers",
     class: "fact",
     severity: "advisory",
     appliesTo: "all",
     templateable: false,
-    applicability: "Advisory only. robots.txt settings are not shown to cause or prevent AI citations. Blocking training crawlers is a business choice and is never flagged.",
+    applicability: "Advisory only. Covers search-engine and AI answer/search crawlers; user-initiated fetchers are informational. robots.txt settings are not shown to cause or prevent AI citations. Blocking training crawlers is a business choice and is never flagged.",
     emit: (ctx) =>
       (ctx.aiCrawlerAccess?.crawlers ?? [])
-        .filter((c) => c.purpose === "answer_search" && c.allowed === false)
+        .filter((c) => FLAGGED_PURPOSES.has(c.purpose) && c.allowed === false)
         .map((c) => ({
           url: null,
           pageType: null,

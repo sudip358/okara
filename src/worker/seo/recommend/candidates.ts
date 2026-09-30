@@ -18,18 +18,31 @@
  *  technical     [A9]   audit findings; >= templateMinUrls URLs sharing rule + page type (or template)
  *                       -> ONE template-scope candidate; else page-scope
  *  duplicate     [A15]  title-token prefilter (>= 2 shared non-stopword tokens AND >= 50% of the
- *                       shorter title) OR GSC queries where both URLs received impressions; <= 40 pairs
+ *                       shorter title; brand name/alias tokens excluded) OR GSC queries where both URLs
+ *                       received impressions; <= 40 pairs
+ *
+ * Technical grouping uses the rule registry: only rules marked `templateable` become template-scope
+ * candidates (one per rule + template); a non-templateable rule on >= templateMinUrls URLs (for
+ * example 4xx responses) becomes one site-scope candidate instead of claiming a template cause.
+ *
+ * Demand tagging: candidates with a GSC query carry that query's demand segment (head | middle |
+ * long_tail of this site's own impressions, gsc/demand.ts) and strong-intent flag, in candidate
+ * metrics and in the GSC evidence (text + data). It describes first-party visibility only, never
+ * market search volume.
  */
 import type { EvidenceSource, Level, PageType, Scope, Severity } from "@shared/types";
+import { EVIDENCE_TEXT_MAX } from "../../recommendations/evidence";
 import type { RecommendationDraft } from "../../recommendations/store";
 import { pageMetrics, weightedPosition, type EntityMetrics, type SliceRow } from "../gsc/aggregate";
+import { DEMAND_METHOD_VERSION, demandLookup, demandPhrase, normalizeDemandQuery, type RankedQuery } from "../gsc/demand";
 import { windowLabel } from "../gsc/windows";
+import { getRule } from "../rules/registry";
 import type { ActionChoice } from "../questions";
 import type { CandidateInputs, PageInfo } from "./inputs";
 import { SEVERITY_WEIGHT, type PriorityInputs } from "./priority";
 import { clip, coverage, fmtInt, fmtPct, fmtPos, normalizeUrl, queryKey, sharedCount, tokenSet } from "./text";
 
-export const CANDIDATE_RULES_VERSION = "seo-candidates-2026-09-30.1";
+export const CANDIDATE_RULES_VERSION = "seo-candidates-2026-09-30.2";
 
 export interface CandidateConfig {
   minImpressions: number;
@@ -134,6 +147,15 @@ export interface Candidate {
   /** Human review required regardless of Jev tier (tier capped at flag). */
   reviewRequired: boolean;
   limitations: string;
+  /** Demand segment of `query` in this site's own GSC impressions (null without a GSC query). */
+  demand: CandidateDemand | null;
+}
+
+export interface CandidateDemand {
+  query: string;
+  segment: RankedQuery["segment"];
+  strongIntent: boolean | null;
+  methodVersion: string;
 }
 
 const SEVERITY_RANK: Record<Severity, number> = { advisory: 0, minor: 1, moderate: 2, major: 3, critical: 4 };
@@ -172,7 +194,12 @@ export function buildCandidates(inputs: CandidateInputs, config: Partial<Candida
   out.push(...b.engineQueries());
   out.push(...b.technical());
   out.push(...b.duplicates());
-  return out;
+  return out.map((c) => b.withDemand(c));
+}
+
+/** Evidence sentence for a query's demand segment (first-party impressions only). */
+export function demandSentence(d: CandidateDemand): string {
+  return `Demand: "${clip(d.query, 80)}" is ${demandPhrase(d)} in this site's own Search Console impressions, not market search volume.`;
 }
 
 class Builder {
@@ -187,6 +214,8 @@ class Builder {
   readonly totalClicks: number | null;
   readonly pageMetricsCur: Map<string, EntityMetrics>;
   readonly pageMetricsPrev: Map<string, EntityMetrics>;
+  readonly demand: Map<string, RankedQuery>;
+  readonly brandTokens: Set<string>;
 
   constructor(readonly inp: CandidateInputs, readonly cfg: CandidateConfig) {
     for (const p of inp.pages) this.pagesByNorm.set(p.norm, p);
@@ -204,20 +233,47 @@ class Builder {
     this.totalClicks = t ? t.clicks : sliceClicks > 0 ? sliceClicks : null;
     this.pageMetricsCur = pageMetrics(inp.rows, "current", normalizeUrl);
     this.pageMetricsPrev = pageMetrics(inp.rows, "previous", normalizeUrl);
+    this.demand = demandLookup(this.cur, inp.project.language);
+    this.brandTokens = new Set(inp.project.brandTokens ?? []);
+  }
+
+  demandOf(query: string | null | undefined): CandidateDemand | null {
+    if (!query) return null;
+    const r = this.demand.get(normalizeDemandQuery(query));
+    return r ? { query: r.query, segment: r.segment, strongIntent: r.strongIntent, methodVersion: DEMAND_METHOD_VERSION } : null;
+  }
+
+  /** Title tokens without the brand name/aliases (a shared "| Brand" suffix is not topical overlap). */
+  titleTokens(p: PageInfo): Set<string> {
+    const t = tokenSet(p.title);
+    for (const b of this.brandTokens) t.delete(b);
+    return t;
   }
 
   // ---------------------------------------------------------------- evidence helpers
-  gscRowEvidence(rows: SliceRow[], label: string): EvidenceSpec {
+  gscRowEvidence(rows: SliceRow[], label: string, focusQuery: string | null = null): EvidenceSpec {
     const lines = rows.slice(0, 5).map((r) => {
       const who = r.query && r.page ? `query "${clip(r.query, 80)}" on ${r.page}` : r.query ? `query "${clip(r.query, 80)}"` : `page ${r.page}`;
       return `${who}: ${fmtInt(r.impressions)} impressions, ${fmtInt(r.clicks)} clicks, CTR ${fmtPct(rowCtr(r))}, average position ${fmtPos(r.position)}`;
     });
+    const demand = this.demandOf(focusQuery ?? rows.find((r) => r.query)?.query ?? null);
+    const prefix = `${this.gscLabel} ${this.win} (${label}): `;
+    const suffix = demand ? ` ${demandSentence(demand)}` : "";
+    // Whole rows only, so the stored (capped) text never cuts a number and the demand note survives.
+    const kept: string[] = [];
+    for (const l of lines) {
+      if (kept.length > 0 && prefix.length + [...kept, l].join("; ").length + 1 + suffix.length > EVIDENCE_TEXT_MAX) break;
+      kept.push(l);
+    }
     return {
       source: this.gscSource,
       refId: this.inp.sync?.id ?? null,
       window: this.win,
-      text: `${this.gscLabel} ${this.win} (${label}): ${lines.join("; ")}.`,
-      data: { rows: rows.slice(0, 5).map((r) => ({ query: r.query, page: r.page, clicks: r.clicks, impressions: r.impressions, position: r.position })) },
+      text: `${prefix}${kept.join("; ")}.${suffix}`,
+      data: {
+        rows: rows.slice(0, 5).map((r) => ({ query: r.query, page: r.page, clicks: r.clicks, impressions: r.impressions, position: r.position })),
+        ...(demand ? { demand } : {}),
+      },
     };
   }
 
@@ -289,8 +345,16 @@ class Builder {
       verified: !!partial.page,
       reviewRequired: false,
       limitations: this.gscLimitations(),
+      demand: null,
       ...partial,
     };
+  }
+
+  /** base() plus demand tagging from the candidate's query (metrics carry the segment for Jev state). */
+  withDemand(c: Candidate): Candidate {
+    const demand = c.demand ?? this.demandOf(c.query);
+    if (!demand) return c;
+    return { ...c, demand, metrics: { ...c.metrics, demandSegment: demand.segment, strongIntent: demand.strongIntent === null ? null : demand.strongIntent ? "yes" : "no" } };
   }
 
   // ---------------------------------------------------------------- weak_ctr
@@ -441,7 +505,7 @@ class Builder {
         this.base("declining", {
           key: `declining:${norm}`,
           issueType: "declining_page",
-          trigger: `Clicks down ${fmtPct(drop)} vs previous 28 days`,
+          trigger: `Clicks down ${fmtPct(drop)} vs the previous window`,
           issue: `Search clicks to ${url} dropped compared with the previous window.`,
           page,
           target: { kind: "url", url },
@@ -640,12 +704,14 @@ class Builder {
       let impressions: number | null = null;
       let clicks: number | null = null;
       let position: number | null = null;
+      let engineDemand: CandidateDemand | null = null;
       if (rows.length) {
         impressions = rows.reduce((s, r) => s + r.impressions, 0);
         clicks = rows.reduce((s, r) => s + r.clicks, 0);
         position = weightedPosition(rows);
         match = position !== null && position <= this.cfg.engineReinforceMaxPosition ? "reinforce" : "improve";
         const top = [...rows].filter((r) => r.page).sort((a, b) => b.impressions - a.impressions)[0];
+        engineDemand = this.demandOf(([...rows].sort((a, b) => b.impressions - a.impressions)[0]!).query);
         if (top?.page) {
           pageUrl = top.page;
           page = this.pagesByNorm.get(normalizeUrl(top.page)) ?? null;
@@ -697,6 +763,7 @@ class Builder {
           evidence: ev,
           identity: { query: k, match },
           engineMatch: match,
+          demand: engineDemand,
           wantsIntent: true,
           wantsPillar: true,
           verified: !!page,
@@ -714,11 +781,11 @@ class Builder {
     const crawled = Math.max(1, this.inp.crawl.crawledCount);
     const minRank = SEVERITY_RANK[this.cfg.technicalMinSeverity];
     const findings = this.inp.findings.filter((f) => SEVERITY_RANK[f.severity] >= minRank);
-    const groups = new Map<string, { ruleId: string; pageType: PageType | null; template: string | null; items: typeof findings }>();
+    const groups = new Map<string, { ruleId: string; pageType: PageType | null; template: string | null; templateAffectedUrls: number | null; items: typeof findings }>();
     for (const f of findings) {
-      const pageType = f.url ? (this.pagesByNorm.get(normalizeUrl(f.url))?.pageType ?? "other") : null;
+      const pageType = f.url ? (f.pageType ?? this.pagesByNorm.get(normalizeUrl(f.url))?.pageType ?? "other") : null;
       const gk = f.url === null ? `${f.ruleId}|site` : f.template ? `${f.ruleId}|tpl:${f.template}` : `${f.ruleId}|type:${pageType}`;
-      const g = groups.get(gk) ?? { ruleId: f.ruleId, pageType, template: f.template, items: [] };
+      const g = groups.get(gk) ?? { ruleId: f.ruleId, pageType, template: f.template, templateAffectedUrls: f.templateAffectedUrls, items: [] };
       g.items.push(f);
       groups.set(gk, g);
     }
@@ -734,7 +801,11 @@ class Builder {
       const siteLevel = gk.endsWith("|site");
       const grouped = !siteLevel && urls.length >= this.cfg.templateMinUrls;
       if (siteLevel || grouped) {
-        const isTemplate = grouped && (g.template !== null || (g.pageType !== null && TEMPLATE_PAGE_TYPES.has(g.pageType)));
+        // Template scope only for rules the registry marks templateable (the crawler labels those);
+        // unknown rule ids fall back to the templated page types.
+        const rule = getRule(g.ruleId);
+        const templateable = rule ? rule.templateable : g.pageType !== null && TEMPLATE_PAGE_TYPES.has(g.pageType);
+        const isTemplate = grouped && templateable && (g.template !== null || (g.pageType !== null && TEMPLATE_PAGE_TYPES.has(g.pageType)));
         const templateName = g.template ?? (g.pageType ? `${g.pageType} template` : "site-wide");
         const examples = g.items.filter((f) => f.url).slice(0, 3);
         const affected = siteLevel ? crawled : urls.length;
@@ -746,7 +817,15 @@ class Builder {
             text: siteLevel
               ? `Rule ${g.ruleId} (${worst}) in crawl on ${crawlDay}: ${clip(g.items[0]!.detail, 300)}`
               : `Rule ${g.ruleId} (${worst}) affects ${urls.length} of ${this.inp.crawl.crawledCount} crawled URLs${g.pageType ? ` of type ${g.pageType}` : ""} in crawl on ${crawlDay}.`,
-            data: { ruleId: g.ruleId, severity: worst, affected: urls.length, crawled: this.inp.crawl.crawledCount, template: g.template, pageType: g.pageType },
+            data: {
+              ruleId: g.ruleId,
+              severity: worst,
+              affected: urls.length,
+              crawled: this.inp.crawl.crawledCount,
+              template: g.template,
+              pageType: g.pageType,
+              templateAffectedUrls: g.templateAffectedUrls,
+            },
           },
           ...examples.map((f) => ({
             source: "crawl" as const,
@@ -833,7 +912,7 @@ class Builder {
   duplicates(): Candidate[] {
     const pages = this.inp.pages.filter((p) => p.title);
     if (pages.length < 2) return [];
-    const titleTokens = new Map(pages.map((p) => [p.norm, tokenSet(p.title)]));
+    const titleTokens = new Map(pages.map((p) => [p.norm, this.titleTokens(p)]));
     const pairs = new Map<string, { a: PageInfo; b: PageInfo; sharedTokens: number; titleMatch: boolean; queries: Map<string, number> }>();
     const pairKey = (x: PageInfo, y: PageInfo) => (x.norm < y.norm ? `${x.norm}||${y.norm}` : `${y.norm}||${x.norm}`);
     for (let i = 0; i < pages.length; i++) {
@@ -865,7 +944,7 @@ class Builder {
           const a = this.pagesByNorm.get(list[i]!)!;
           const b = this.pagesByNorm.get(list[j]!)!;
           const key = pairKey(a, b);
-          const entry = pairs.get(key) ?? { a, b, sharedTokens: sharedCount(tokenSet(a.title), tokenSet(b.title)), titleMatch: false, queries: new Map<string, number>() };
+          const entry = pairs.get(key) ?? { a, b, sharedTokens: sharedCount(this.titleTokens(a), this.titleTokens(b)), titleMatch: false, queries: new Map<string, number>() };
           entry.queries.set(q, Math.min(m.get(list[i]!)!, m.get(list[j]!)!));
           pairs.set(key, entry);
         }

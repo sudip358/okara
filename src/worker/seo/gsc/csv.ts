@@ -52,6 +52,14 @@ const KEY_HEADERS: Record<string, CsvKind> = {
 };
 const METRIC_HEADERS = ["clicks", "impressions", "ctr", "position"] as const;
 
+/** Returned in every 400 so the user can fix the file. */
+export const EXPECTED_CSV_HEADERS = {
+  firstColumn: ["Top queries", "Query", "Top pages", "Page", "Date"],
+  metricColumns: ["Clicks", "Impressions", "CTR", "Position"],
+  example: "Top queries,Clicks,Impressions,CTR,Position",
+  source: "Search Console > Performance > Export > Download CSV (Queries.csv, Pages.csv, or Chart.csv)",
+} as const;
+
 export class CsvError extends Error {
   constructor(message: string, public readonly details?: unknown) {
     super(message);
@@ -192,7 +200,7 @@ export async function importGscCsv(
   try {
     parsed = parseGscCsv(input.csv);
   } catch (e) {
-    if (e instanceof CsvError) throw badRequest(e.message, e.details);
+    if (e instanceof CsvError) throw badRequest(e.message, { expectedHeaders: EXPECTED_CSV_HEADERS, errors: Array.isArray(e.details) ? e.details : [] });
     throw e;
   }
   if (parsed.kind === "dates") {

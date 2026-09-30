@@ -235,12 +235,14 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
     try {
       result = ctx.writer ? await draftWithWriter(ctx, draftInput) : draftDeterministic(draftInput);
     } catch (e) {
-      if (e instanceof BudgetExceededError) {
-        await ctx.log.event(step, "partial", "Writer budget exhausted; drafting stopped.");
-        await reject(p, "budget", ev.tier);
-        continue;
-      }
-      result = { ok: false, reason: "validation_failed", errors: [e instanceof Error ? e.message.slice(0, 200) : "validator error"] };
+      const why = e instanceof BudgetExceededError ? "Writer budget exhausted." : e instanceof Error ? e.message.slice(0, 200) : "writer error";
+      result = { ok: false, reason: "writer_failed", errors: [why] };
+    }
+    if (!result.ok && result.reason === "writer_failed") {
+      // The writer could not be reached (or its budget is spent): fall back to the deterministic
+      // template, labelled with no writer provider. A draft the validator rejects is never rescued.
+      await ctx.log.event(step, "info", `Writer unavailable for a ${p.c.kind} draft (${result.errors[0] ?? "error"}); used the deterministic template.`);
+      result = draftDeterministic(draftInput);
     }
     if (!result.ok) {
       await ctx.log.event(step, "failed", `Draft for ${p.c.kind} rejected (${result.reason}): ${result.errors.slice(0, 3).join("; ")}`);
@@ -248,7 +250,8 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
       continue;
     }
     const d = result.draft;
-    const decisionTier: Tier | null = p.judgment ? ev.tier : null;
+    // The card shows Jev's tier only with a Jev value (drop/deterministic -> no decision shown).
+    const decisionTier: Tier | null = ev.decisionFields ? ev.tier : null;
     await saveRecommendation(ctx, {
       agent: "seo",
       scope: p.c.scope,
@@ -266,7 +269,7 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
       priority: p.priority!,
       priorityVersion: PRIORITY_VERSION,
       decisionTier,
-      decisionFields: Object.keys(ev.fields).length ? ev.fields : null,
+      decisionFields: ev.decisionFields,
       evidenceIds: d.evidenceIds,
       evidenceBullets: d.evidenceBullets,
       confirmPlaceholders: d.confirmPlaceholders,

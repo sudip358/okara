@@ -9,7 +9,9 @@ import { addDays, utcDay } from "../../lib/time";
 import type { RunContext } from "../../runs/context";
 import { parseTotalsJson, toWindowTotals, type SliceRow, type WindowTotals } from "../gsc/aggregate";
 import { latestUsableSync } from "../gsc/overview";
-import { looksLikeInstructions, normalizeUrl, resolveUrl } from "./text";
+import { looksLikeInstructions, normalizeUrl, resolveUrl, tokens } from "./text";
+
+const PAGE_TYPES: ReadonlySet<PageType> = new Set(["home", "collection", "product", "article", "landing", "other"]);
 
 export interface PageInfo {
   pageId: string;
@@ -35,6 +37,10 @@ export interface FindingInfo {
   url: string | null;
   template: string | null;
   detail: string;
+  /** Page type recorded by the crawler (evidence_json.pageType), when present. */
+  pageType: PageType | null;
+  /** URLs of this page type sharing the issue, as counted by the crawler (evidence_json.templateAffectedUrls). */
+  templateAffectedUrls: number | null;
 }
 
 export interface EngineQueryGroup {
@@ -47,7 +53,8 @@ export interface EngineQueryGroup {
 }
 
 export interface CandidateInputs {
-  project: { id: string; siteType: string; locale: string };
+  /** brandTokens: title tokens of the brand name and aliases (excluded from duplicate-title overlap). */
+  project: { id: string; siteType: string; locale: string; language: string; brandTokens: string[] };
   sync: {
     id: string;
     source: "api" | "csv_import" | "demo";
@@ -70,8 +77,8 @@ export const ENGINE_QUERY_LOOKBACK_DAYS = 30;
 export async function loadCandidateInputs(ctx: RunContext): Promise<CandidateInputs> {
   const ws = ctx.project.workspaceId;
   const pid = ctx.project.id;
-  const project = await ctx.db.first<{ site_type: string; locale: string }>(
-    "SELECT site_type, locale FROM projects WHERE id = ? AND workspace_id = ?",
+  const project = await ctx.db.first<{ site_type: string; locale: string; language: string; brand_name: string; brand_aliases_json: string }>(
+    "SELECT site_type, locale, language, brand_name, brand_aliases_json FROM projects WHERE id = ? AND workspace_id = ?",
     pid,
     ws,
   );
@@ -133,7 +140,9 @@ export async function loadCandidateInputs(ctx: RunContext): Promise<CandidateInp
       crawlRow.id,
     );
     for (const s of snaps) {
-      if (s.skipped_reason) continue;
+      // Only analyzable pages (2xx, not skipped, not redirected elsewhere) are content candidates.
+      if (s.skipped_reason || s.status_code === null || s.status_code < 200 || s.status_code >= 300) continue;
+      if (s.final_url && normalizeUrl(s.final_url) !== normalizeUrl(s.url)) continue;
       const h1List = parseJson<unknown[]>(s.h1_json, []).map(textOf).filter(Boolean) as string[];
       const headings = parseJson<unknown[]>(s.headings_json, []).map(textOf).filter(Boolean).slice(0, 40) as string[];
       const links = parseJson<unknown[]>(s.internal_links_json, [])
@@ -159,13 +168,18 @@ export async function loadCandidateInputs(ctx: RunContext): Promise<CandidateInp
       });
     }
     findings = (
-      await ctx.db.all<{ id: string; rule_id: string; severity: Severity; url: string | null; template: string | null; detail: string }>(
-        "SELECT id, rule_id, severity, url, template, detail FROM audit_findings WHERE workspace_id = ? AND project_id = ? AND crawl_run_id = ?",
+      await ctx.db.all<{ id: string; rule_id: string; severity: Severity; url: string | null; template: string | null; detail: string; evidence_json: string }>(
+        "SELECT id, rule_id, severity, url, template, detail, evidence_json FROM audit_findings WHERE workspace_id = ? AND project_id = ? AND crawl_run_id = ?",
         ws,
         pid,
         crawlRow.id,
       )
-    ).map((f) => ({ id: f.id, ruleId: f.rule_id, severity: f.severity, url: f.url, template: f.template, detail: f.detail }));
+    ).map((f) => {
+      const ev = parseJson<Record<string, unknown>>(f.evidence_json, {});
+      const pageType = typeof ev.pageType === "string" && PAGE_TYPES.has(ev.pageType as PageType) ? (ev.pageType as PageType) : null;
+      const n = typeof ev.templateAffectedUrls === "number" && Number.isFinite(ev.templateAffectedUrls) ? ev.templateAffectedUrls : null;
+      return { id: f.id, ruleId: f.rule_id, severity: f.severity, url: f.url, template: f.template, detail: f.detail, pageType, templateAffectedUrls: n };
+    });
     crawl = { id: crawlRow.id, day: (crawlRow.finished_at ?? crawlRow.started_at).slice(0, 10), crawledCount: pages.length };
   }
 
@@ -197,8 +211,12 @@ export async function loadCandidateInputs(ctx: RunContext): Promise<CandidateInp
   );
   const pillarNames = pillarDoc ? parsePillars(pillarDoc.content) : [];
 
+  const brandTokens = project
+    ? [...new Set([project.brand_name, ...parseJson<unknown[]>(project.brand_aliases_json, []).filter((a): a is string => typeof a === "string")].flatMap((b) => tokens(b)))]
+    : [];
+
   return {
-    project: { id: pid, siteType: project?.site_type ?? "other", locale: project?.locale ?? "en-US" },
+    project: { id: pid, siteType: project?.site_type ?? "other", locale: project?.locale ?? "en-US", language: project?.language ?? "en", brandTokens },
     sync,
     rows,
     crawl,

@@ -259,6 +259,11 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
         last_updated: x?.lastUpdated ?? null,
         outbound_citations: x ? x.outboundCitations : null,
         table_count: x ? x.tableCount : null,
+        images_total: x ? x.imagesTotal : null,
+        images_missing_alt: x ? x.imagesMissingAlt : null,
+        viewport_meta: x?.viewport ?? null,
+        breadcrumb_nav: x ? (x.hasBreadcrumbNav ? 1 : 0) : null,
+        generic_anchors_json: x ? JSON.stringify(x.genericAnchors) : null,
         fetched_at: fetchedAt,
       });
       if (data.skippedReason) skipCounts[data.skippedReason] = (skipCounts[data.skippedReason] ?? 0) + 1;
@@ -298,7 +303,8 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
         url,
         contentHash,
       );
-      if (!row) return null;
+      // Snapshots taken before the [A21] extraction fields existed are re-extracted instead of reused.
+      if (!row || row.images_total === null || row.images_total === undefined) return null;
       return {
         title: (row.title as string | null) ?? null,
         metaDescription: (row.meta_description as string | null) ?? null,
@@ -320,6 +326,11 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
         tableCount: Number(row.table_count ?? 0),
         hasAppRoot: false,
         jsRendered: false,
+        imagesTotal: Number(row.images_total ?? 0),
+        imagesMissingAlt: Number(row.images_missing_alt ?? 0),
+        viewport: (row.viewport_meta as string | null) ?? null,
+        hasBreadcrumbNav: Number(row.breadcrumb_nav ?? 0) === 1,
+        genericAnchors: parseJson<Array<{ href: string; text: string }>>(row.generic_anchors_json, []),
       };
     };
 
