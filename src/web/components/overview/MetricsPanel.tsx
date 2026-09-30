@@ -9,6 +9,7 @@ import { useApi } from "@web/lib/hooks";
 import { formatDateTime, formatNumber, formatPercent, formatRatio, formatUsd, formatWindow, humanize } from "@web/lib/format";
 import { projectPath } from "@web/lib/project-context";
 import { LineChart } from "../LineChart";
+import { DemandCurveChart } from "../DemandCurveChart";
 import { Badge, CompletenessNote, ErrorState, LoadingState, MetricTile, StateBadge, StateBanner, Tabs, buttonClass } from "../ui";
 
 export function MetricsPanel({ projectId }: { projectId: string }) {
@@ -127,6 +128,7 @@ function SeoMetrics({ projectId }: { projectId: string }) {
       <p className="text-xs text-zinc-600 dark:text-zinc-400">
         Finalized days only; incomplete recent days are excluded. Dashed lines mark configuration changes.
       </p>
+      {data.demandCurve && <DemandCurveChart curve={data.demandCurve} />}
       <CompletenessNote completeness={data.completeness} />
       {data.limitations.length > 0 && (
         <ul className="list-disc space-y-0.5 pl-5 text-xs text-zinc-600 dark:text-zinc-400">
