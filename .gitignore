@@ -10,3 +10,6 @@ dist/
 /coverage/
 *.log
 .DS_Store
+
+# e2e screenshots and reports
+/e2e/output/

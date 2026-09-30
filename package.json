@@ -15,7 +15,8 @@
     "db:migrate:remote": "wrangler d1 migrations apply okara --remote",
     "deploy": "npm run build && wrangler deploy",
     "cf-typegen": "wrangler types",
-    "eval": "node scripts/eval.mjs"
+    "eval": "node scripts/eval.mjs",
+    "e2e": "node e2e/smoke.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.130.0",
@@ -36,6 +37,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
+    "playwright": "^1.56.1",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.3",
     "vite": "^8.3.1",
