@@ -44,6 +44,10 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | GET | /projects/:pid/geo/answer-coverage | coverage | `CoverageResponse<AnswerCoverageRow>` |
 | GET | /projects/:pid/geo/citation-evidence | coverage | `CoverageResponse<CitationEvidenceRow>` |
 | POST | /projects/:pid/seo/redirect-map | redirects | body `RedirectMapRequest` → `RedirectMapResult` [A23] (user-triggered; budgeted; rate-limited) |
+| POST | /projects/:pid/seo/internal-links/run | links | user-triggered run on the latest crawl (budgeted, rate-limited) → `LinkSuggestionReport` [A25] |
+| GET | /projects/:pid/seo/internal-links | links | latest `LinkSuggestionReport` |
+| PATCH | /projects/:pid/seo/internal-links/:id | links | body `{userStatus}` → `LinkSuggestion` |
+| GET | /projects/:pid/seo/internal-links/export?format=csv\|json | links | download of current suggestions |
 | GET | /projects/:pid/pages | seo-crawl | `PageRow[]` |
 | PATCH | /projects/:pid/pages/:pageId | seo-crawl | body `{pageType}` (user correction) |
 | GET | /projects/:pid/recommendations?agent=&status= | runtime | `Recommendation[]` |

@@ -659,3 +659,42 @@ export interface RedirectMapResult {
   shopifyCsv: string;
   labels: string[];
 }
+
+// ------------------------------------------------------------------ internal link suggester [A25]
+export type LinkRole = "explains_concept" | "deeper_detail" | "broader_guide" | "next_step" | "product_service" | "comparison";
+
+export interface LinkSuggestion {
+  id: string;
+  source: { pageId: string; url: string; title: string | null };
+  target: { pageId: string; url: string; title: string | null; inlinks: number; orphan: boolean };
+  sentence: { index: number; text: string } | null; // plain text from the source page
+  anchor: { text: string } | null;
+  role: LinkRole | null;
+  method: "jev" | "deterministic";
+  /** Real provider fields only: noul for "should exist", confidence for the Choice answers. */
+  decision: {
+    tier: Tier | null;
+    shouldExist: number | null; // Noul
+    sentenceConfidence: number | null;
+    anchorConfidence: number | null;
+    roleConfidence: number | null;
+    provider: string | null;
+    model: string | null;
+  } | null;
+  status: "suggested" | "review" | "rejected";
+  score: number; // deterministic candidate score (documented formula), not a Jev value
+  reasons: string[];
+  userStatus: "open" | "accepted" | "dismissed" | "implemented";
+}
+
+export interface LinkSuggestionReport {
+  state: CapabilityState;
+  generatedAt: string | null;
+  crawlRunId: string | null;
+  pagesAnalysed: number;
+  orphanPages: Array<{ pageId: string; url: string }>;
+  suggestions: LinkSuggestion[];
+  genericAnchors: Array<{ sourceUrl: string; targetUrl: string; anchor: string }>;
+  completeness: Completeness | null;
+  labels: string[];
+}
