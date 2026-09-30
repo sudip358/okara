@@ -45,7 +45,8 @@ TypeScript throughout. React + Vite static SPA, Tailwind CSS, accessible compone
 Deploy static assets and the API through Cloudflare Workers; keep /api/* routed to the backend and configure SPA fallback correctly. No SSR dependency in the MVP.
 Use Cloudflare Workflows for bounded, resumable agent runs and a lightweight scheduled Worker/Cron dispatcher for due projects. Persist history in D1, not only Workflow state. Do not add Queues, R2, KV, Redis, Postgres, or a heavy agent framework unless a measured need justifies it.
 Validate this stack against current Workers/Workflows free-plan limits. Free hosting is a target, not a guarantee. Document all paid external services separately. Do not set paid-only CPU overrides on the free plan.
-Use the TypeSafe official JS SDK if Workers-compatible; otherwise use its documented REST contract behind a typed adapter. Third-party guides report the endpoint as POST https://api.typesafe.ai/v1/systemone; confirm it in docs.typesafe.ai before use. No local Jev model hosting.
+Use the TypeSafe official JS SDK (@typesafe-ai/sdk: new TypeSafeClient({ apiKey, defaultModel }), client.systemOne({ state, questions }), client.models.list()) if it runs on Workers; otherwise call the REST contract behind a typed adapter: POST https://api.typesafe.ai/v1/systemone, Authorization: Bearer <key>, body { model, state, questions: { <id>: { type: "choice" | "score" | "noul", instructions, ... } } }, answers read from answers.<id>. Model alias jev-latest is the default; pin and record the resolved model per call. Use models.list() as the free credential check (no inference). Confirm all of this against docs.typesafe.ai at implementation time. No local Jev model hosting.
+Ask all questions for one state in a single systemOne call (Jev evaluates them in parallel; batching is the documented cheap path). Timeout each call (about 12 s), retry only 429/5xx with bounded backoff, count every attempt against the budget, and fail closed when a safety-relevant Jev check cannot be reached.
 Implement one real web-grounded GEO provider first, chosen after reading official documentation: Gemini with Google Search grounding is the suggested default. Add a second real provider, such as Perplexity's current web-grounded API, after the first passes integration tests. OpenAI web search and Anthropic web search are optional later providers. Unimplemented providers must be disabled, not simulated. Use a configurable real writing provider independently of Jev.
 
 AUTHENTICATION AND TENANCY
@@ -205,6 +206,13 @@ Jev returns typed answers, not text. Response fields per the TypeSafe docs:
 | Noul | `noul` (0–1) | This is the yes-probability; it is **not** a confidence field |
 
 Code builds the input state (compact JSON with evidence IDs). Jev answers the questions. Code computes priority and routes the result.
+
+Authoring rules (taken from working open-source Jev integrations; see section 3.4):
+- **Name state fields and point at them in the question text** (for example "Given `page` and `target_query`…"). Questions can reference state by path.
+- **Write every Choice option, Score level, and Noul true/false criterion as a full descriptive sentence**, not a bare label. Descriptive levels ("Minutes. A handful of edits to headings…") are what make the answer calibrated and auditable.
+- **Keep the state deduplicated.** Send page text once, cap excerpts (for example 6,000 characters), and cap lists (for example 40 headings and 40 sibling titles).
+- **Gate on the confidence of the questions that drive the action.** Don't let a many-option Choice whose probability is spread across near-winners veto a clear headline decision.
+- **Normalize every answer to 0–1 in code before combining it.** Missing answers are dropped with a visible warning, never replaced by a default value.
 
 #### SEO questions
 
@@ -426,11 +434,12 @@ All links returned HTTP 200 on September 30, 2026. Official documentation is aut
 - Confidence-gated routing (send low-confidence judgments to human review): https://docs.typesafe.ai/patterns/confidence-routing
 - Composite scoring (atomic scores combined with code-owned weights; matches the versioned priority formula): https://docs.typesafe.ai/patterns/composite-scoring
 - Double-checking citations (useful for the evidence validator): https://docs.typesafe.ai/cookbooks/citation_check
-- *Third-party (unverified):* MarkTechPost launch coverage, https://www.marktechpost.com/2026/09/19/typesafe-ai-releases-jev/ ; request examples, https://jevmodel.org/api/
+- JS SDK: `@typesafe-ai/sdk` (used at ^0.6.0 by the jevseo reference app; check npm for the current version and Workers compatibility)
+- *Third-party:* MarkTechPost launch coverage, https://www.marktechpost.com/2026/09/19/typesafe-ai-releases-jev/ ; request examples, https://jevmodel.org/api/
 
 ### GEO providers
 - Gemini grounding with Google Search: https://ai.google.dev/gemini-api/docs/google-search
-- Perplexity API (Sonar; the `search_results` field replaces deprecated `citations`): https://docs.perplexity.ai
+- Perplexity API (Sonar; the `search_results` field replaces the removed `citations` field, so don't copy older integrations that parse top-level `citations`): https://docs.perplexity.ai
 - Perplexity Sonar features: https://docs.perplexity.ai/docs/sonar/features
 - OpenAI web search tool: https://platform.openai.com/docs/guides/tools-web-search
 - Anthropic web search tool: https://docs.claude.com/en/docs/agents-and-tools/tool-use/web-search-tool
