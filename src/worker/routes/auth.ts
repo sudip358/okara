@@ -14,13 +14,14 @@ import type { AppEnv } from "../app";
 import type { Env } from "../env";
 import type { Me } from "@shared/types";
 import type { Db } from "../lib/db";
-import { setupRequired, unauthorized } from "../lib/errors";
+import { HttpError, setupRequired, unauthorized } from "../lib/errors";
 import { sha256Hex } from "../lib/hash";
 import { newId, randomToken } from "../lib/ids";
 import { addSeconds, iso } from "../lib/time";
 import { createSession, deleteSession, signInAccess } from "../platform/session";
 import {
   appOrigin,
+  appRedirectUri,
   clearOauthStateCookie,
   clearSessionCookie,
   readOauthStateCookie,
@@ -55,14 +56,15 @@ interface OauthStateRow {
 
 function googleConfig(env: Env) {
   const origin = appOrigin(env);
-  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !origin) {
+  const redirectUri = appRedirectUri(env, "/api/auth/callback");
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !origin || !redirectUri) {
     throw setupRequired("Google sign-in is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and APP_ORIGIN.");
   }
   return {
     clientId: env.GOOGLE_CLIENT_ID,
     clientSecret: env.GOOGLE_CLIENT_SECRET,
     origin,
-    redirectUri: `${origin}/api/auth/callback`,
+    redirectUri,
   };
 }
 
@@ -240,6 +242,9 @@ const devLoginGate: MiddlewareHandler<AppEnv> = async (c, next) => {
 export const DEV_USER: GoogleIdentity = { sub: "dev-bypass:local-demo", email: "demo@localhost.invalid", name: "Local demo user" };
 
 authRoutes.post("/auth/dev-login", devLoginGate, rateLimit({ key: "auth_dev_login", limit: 20, windowSeconds: 60 }), async (c) => {
+  // Same allowlist as every request (loadSession): a session it would reject is never created.
+  if (signInAccess(c.env, DEV_USER.email) !== "allowed")
+    throw new HttpError(403, "not_allowed", `Dev login is off while ALLOWED_EMAILS / ALLOWED_EMAIL_DOMAINS is set; add ${DEV_USER.email} to use it.`);
   const userId = await upsertUser(c.get("db"), DEV_USER, c.get("now"));
   await startSession(c, userId);
   return c.json({ data: { ok: true } });

@@ -8,8 +8,8 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | Method | Path | Owner module | Returns |
 |---|---|---|---|
 | GET | /health | foundation | `{ok:true}` |
-| GET | /auth/login?returnTo= | platform-auth | 302 to Google (state, nonce, PKCE) |
-| GET | /auth/callback | platform-auth | 302 to app; creates user/workspace on first login |
+| GET | /auth/login?returnTo= | platform-auth | 302 to Google (state, nonce, PKCE); in production with no allowlist, 302 to `/?authError=signup_closed` |
+| GET | /auth/callback | platform-auth | 302 to app; creates user/workspace on first login. Failures redirect to `/?authError=<code>` (see below) |
 | POST | /auth/logout | platform-auth | `{ok:true}` |
 | GET | /me | platform-auth | `Me` |
 | POST | /auth/dev-login | platform-auth | local-only demo bypass (DEV_AUTH_BYPASS=true AND ENVIRONMENT=development AND localhost) |
@@ -21,7 +21,7 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | POST | /workspaces/:wid/projects | platform-projects | body `ProjectInput`; `Project` |
 | GET | /projects/:pid | platform-projects | `Project` |
 | PATCH | /projects/:pid | platform-projects | partial `ProjectInput` + `scheduleEnabled`; `Project` |
-| DELETE | /projects/:pid | platform-projects | deletes tenant data, revokes integrations |
+| DELETE | /projects/:pid | platform-projects | deletes tenant data and the stored GSC token; `{ok:true, gscRevoked:false}` (`gscRevoked` is always false: no remote revoke at Google, see below) |
 | GET | /projects/:pid/export | platform-projects | JSON download of all project data, no secrets |
 | GET | /projects/:pid/context | platform-projects | `ContextDocument[]` (latest version per kind) |
 | PUT | /projects/:pid/context/:kind | platform-projects | body `{content, facts}`; new version; `ContextDocument` |
@@ -34,7 +34,7 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | GET | /gsc/callback | platform-projects | 302 back to integrations page |
 | GET | /projects/:pid/gsc/properties | platform-projects | `{siteUrl, permissionLevel}[]` |
 | PUT | /projects/:pid/gsc/property | platform-projects | body `{property}`; also verifies ownership via GSC |
-| DELETE | /projects/:pid/gsc | platform-projects | revoke + delete token |
+| DELETE | /projects/:pid/gsc | platform-projects | deletes the stored token (no remote revoke); `{ok:true, revoked:false}` (`revoked` is always false) |
 | GET | /projects/:pid/seo/overview | seo-analysis | `SeoOverview` |
 | POST | /projects/:pid/seo/import-csv | seo-analysis | body `{csv, window:'current'|'previous', start, end}`; labelled `csv_import` |
 | GET | /projects/:pid/seo/audit | seo-crawl | `SeoAudit` |
@@ -77,3 +77,24 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | PUT | /projects/:pid/pages/:pageId/checklist/:itemId | checklists | body `{checked, note?}` for manual items on that page |
 | PUT | /projects/:pid/checklists/:kind/:itemId | checklists | body `{checked, note?}` for manual items; returns `ChecklistItem` |
 | POST | /demo/seed | platform-projects | DEMO_MODE only, never production: creates a labelled demo project with fixture data |
+
+## Sign-in errors
+
+`GET /auth/login` and `GET /auth/callback` report failures by redirecting to `/?authError=<code>`. The sign-in
+allowlist codes are:
+
+- `signup_closed`: production with neither `ALLOWED_EMAILS` nor `ALLOWED_EMAIL_DOMAINS` set. Nobody can sign in;
+  `/auth/login` redirects here without contacting Google.
+- `not_allowed`: the verified Google email is outside the allowlist. An existing session whose email is later
+  removed from the allowlist is rejected with 401 on its next request.
+
+Other codes (`invalid_state`, `expired_state`, `state_mismatch`, ...) mean the OAuth round trip failed and the
+user should start sign-in again.
+
+## Google token deletion (amends docs/build-kit.md, authentication and acceptance criteria)
+
+`DELETE /projects/:pid` and `DELETE /projects/:pid/gsc` delete the locally stored Search Console token only.
+They do not call Google's revoke endpoint: a revoke ends the grant for the whole Google account, which would
+disconnect every other project connected with that account. `gscRevoked` and `revoked` stay in the responses for
+compatibility and are always `false`. To revoke access at Google, the user removes the app at
+myaccount.google.com.

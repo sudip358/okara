@@ -24,10 +24,17 @@ WRITER_API_KEY=
 WRITER_BASE_URL=
 # Optional, openai_compatible reasoning models only: none|minimal|low|medium|high|xhigh|max
 WRITER_REASONING_EFFORT=
+# Optional, openai_compatible only: extra max_completion_tokens for reasoning (whole number 0-100000).
+# Empty = 0 without WRITER_REASONING_EFFORT, 4000 with it.
+WRITER_REASONING_HEADROOM_TOKENS=
+# Optional Gemini thinkingLevel override: MINIMAL|LOW|MEDIUM|HIGH (any model id) or OFF.
+# Empty = LOW for Gemini 3+ ids and gemini-flash-latest / gemini-pro-latest, nothing for older models.
+GEMINI_THINKING_LEVEL=
 # Sign-in allowlist (comma-separated). Empty = anyone outside production; production refuses everyone until set.
 ALLOWED_EMAILS=
 ALLOWED_EMAIL_DOMAINS=
-# Daily caps across all projects on the operator keys above. Empty = code defaults (src/worker/runs/budget.ts).
+# Daily caps across all projects on the operator keys above. Empty = code defaults (src/worker/runs/budget.ts):
+# 2000000 usd micros ($2.00), 2000 Jev calls, 3000 provider calls, 1000000 writer tokens.
 GLOBAL_USD_MICROS_PER_DAY=
 GLOBAL_JEV_CALLS_PER_DAY=
 GLOBAL_PROVIDER_CALLS_PER_DAY=

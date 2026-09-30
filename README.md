@@ -51,9 +51,10 @@ those are stored encrypted server-side and never returned to the browser. Full l
 | `APP_ORIGIN` | var | The one https origin users reach; sign-in, CSRF and OAuth redirects are bound to it |
 | `TYPESAFE_MODEL` | var | Jev decisions (default alias `jev-latest`) |
 | `GEMINI_MODEL`, `PERPLEXITY_MODEL` | var | GEO providers: Gemini with Google Search grounding, Perplexity |
-| `WRITER_PROVIDER`, `WRITER_MODEL`, `WRITER_BASE_URL`, `WRITER_REASONING_EFFORT` | var | Recommendation drafting (`WRITER_BASE_URL` for `openai_compatible` only) |
-| `ALLOWED_EMAILS`, `ALLOWED_EMAIL_DOMAINS` | var | Sign-in allowlist. In production nobody can sign in until one is set. |
-| `GLOBAL_USD_MICROS_PER_DAY`, `GLOBAL_JEV_CALLS_PER_DAY`, `GLOBAL_PROVIDER_CALLS_PER_DAY`, `GLOBAL_WRITER_TOKENS_PER_DAY` | var | Daily caps across all projects on the operator keys |
+| `WRITER_PROVIDER`, `WRITER_MODEL`, `WRITER_BASE_URL`, `WRITER_REASONING_EFFORT`, `WRITER_REASONING_HEADROOM_TOKENS` | var | Recommendation drafting (`WRITER_BASE_URL` and the reasoning settings for `openai_compatible` only) |
+| `GEMINI_THINKING_LEVEL` | var (optional) | Override Gemini `thinkingLevel` (`MINIMAL`/`LOW`/`MEDIUM`/`HIGH`/`OFF`); default `LOW` for Gemini 3+ only |
+| `ALLOWED_EMAILS`, `ALLOWED_EMAIL_DOMAINS` | var | Sign-in allowlist. In production nobody can sign in until one is set (`?authError=signup_closed`); other emails get `not_allowed`. |
+| `GLOBAL_USD_MICROS_PER_DAY`, `GLOBAL_JEV_CALLS_PER_DAY`, `GLOBAL_PROVIDER_CALLS_PER_DAY`, `GLOBAL_WRITER_TOKENS_PER_DAY` | var | Daily caps across all projects on the operator keys (defaults 2000000 / 2000 / 3000 / 1000000) |
 
 Model IDs always come from configuration. None are hard-coded.
 

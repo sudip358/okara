@@ -3,7 +3,9 @@
  * - Sends credentials (session cookie) and X-CSRF-Token on state-changing requests.
  * - Unwraps { data } / throws ApiError for { error }.
  * - A 401 on any request calls the registered unauthorized handler (the shell redirects to /signin).
- * - A 403 csrf_failed (token rotated by a sign-in in another tab) re-reads /me for the fresh token and retries once.
+ * - A 403 csrf_failed (token rotated by a sign-in in another tab) re-reads /me for the fresh token and retries once,
+ *   but only when /me still belongs to the user this tab loaded. A different user (another account signed in
+ *   elsewhere) or a 401 calls the unauthorized handler instead, so the write never runs as someone else.
  */
 import type { ApiErrorBody } from "@shared/types";
 
@@ -17,8 +19,11 @@ export class ApiError extends Error {
 }
 
 let csrfToken: string | null = null;
-export const setCsrfToken = (t: string | null) => {
+/** User id the shell loaded with the token; a CSRF refresh is replayed only for this same user. */
+let csrfUserId: string | null = null;
+export const setCsrfToken = (t: string | null, userId: string | null = null) => {
   csrfToken = t;
+  csrfUserId = t ? userId : null;
 };
 
 let unauthorizedHandler: (() => void) | null = null;
@@ -55,13 +60,27 @@ function send(path: string, method: string, init: { body?: unknown; signal?: Abo
   });
 }
 
-/** Re-reads the session's CSRF token from GET /me. False when the session is gone or unchanged (no point retrying). */
+/**
+ * Re-reads the session's CSRF token from GET /me. True only when there is a new token for the same user this
+ * tab loaded. False (no retry) when the token is unchanged, the session is gone (401: unauthorized handler),
+ * or the cookie now belongs to another user or the loaded user is unknown (unauthorized handler, so the
+ * shell re-reads /me instead of silently acting as someone else).
+ */
 async function refreshCsrfToken(signal?: AbortSignal): Promise<boolean> {
   try {
     const res = await fetch("/api/me", { headers: { Accept: "application/json" }, credentials: "same-origin", signal });
-    const json = (await res.json().catch(() => null)) as { data?: { csrfToken?: string } } | null;
+    if (res.status === 401) {
+      unauthorizedHandler?.();
+      return false;
+    }
+    const json = (await res.json().catch(() => null)) as { data?: { csrfToken?: string; user?: { id?: string } } } | null;
     const token = res.ok ? json?.data?.csrfToken : undefined;
     if (!token || token === csrfToken) return false;
+    const userId = json?.data?.user?.id;
+    if (!csrfUserId || !userId || userId !== csrfUserId) {
+      unauthorizedHandler?.();
+      return false;
+    }
     csrfToken = token;
     return true;
   } catch {

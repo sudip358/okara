@@ -68,26 +68,40 @@ export async function remainingToday(ctx: RunContext, agent: AgentKind): Promise
   return Math.max(0, DAILY_CAP - (row?.n ?? 0));
 }
 
-export async function saveRecommendation(ctx: RunContext, d: RecommendationDraft, isDemo = false): Promise<string> {
+/**
+ * Save a recommendation unless the agent already has DAILY_CAP recommendations today. The cap check and
+ * the insert are one conditional statement (INSERT ... SELECT ... WHERE count < cap), so concurrent
+ * attempts (a Workflow retry overlapping a manual run) cannot exceed the cap. The 'created' event is
+ * inserted only when the recommendation row exists, in the same batch (a D1 batch is a transaction).
+ * Returns the new id, or null when the cap was already reached (nothing is written).
+ */
+export async function saveRecommendation(ctx: RunContext, d: RecommendationDraft, isDemo = false): Promise<string | null> {
   const id = newId("rec");
   const now = iso(ctx.clock());
-  await ctx.db.batch([
-    [
+  const day = utcDay(ctx.clock());
+  const bind = (sql: string, ...params: unknown[]) => ctx.db.d1.prepare(sql).bind(...params.map((v) => (v === undefined ? null : v)));
+  const results = await ctx.db.d1.batch([
+    bind(
       `INSERT INTO recommendations (id, workspace_id, project_id, run_id, agent, scope, target_json, issue_type, trigger, issue, action,
          suggested_snippet, rationale, effort, uncertainty, limitations, verified, priority, priority_version, decision_label,
          decision_score_json, evidence_ids_json, evidence_bullets_json, confirm_placeholders_json, dedup_key, status, stage,
          writer_provider, writer_model, is_demo, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'open', 'awaiting_approval', ?,?,?,?,?)`,
+       SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'open', 'awaiting_approval', ?,?,?,?,?
+        WHERE (SELECT COUNT(*) FROM recommendations
+                WHERE workspace_id = ? AND project_id = ? AND agent = ? AND substr(created_at, 1, 10) = ?) < ?`,
       id, ctx.project.workspaceId, ctx.project.id, ctx.runId, d.agent, d.scope, JSON.stringify(d.target), d.issueType, d.trigger,
       d.issue, d.action, d.suggestedSnippet ?? null, d.rationale, d.effort, d.uncertainty, d.limitations, d.verified ? 1 : 0,
       d.priority, d.priorityVersion, d.decisionTier, d.decisionFields ? JSON.stringify(d.decisionFields) : null,
       JSON.stringify(d.evidenceIds), JSON.stringify(d.evidenceBullets), JSON.stringify(d.confirmPlaceholders), d.dedupKey,
       d.writerProvider, d.writerModel, isDemo ? 1 : 0, now, now,
-    ],
-    [
-      "INSERT INTO recommendation_events (id, workspace_id, project_id, recommendation_id, user_id, event, note, created_at) VALUES (?,?,?,?,?,?,?,?)",
+      ctx.project.workspaceId, ctx.project.id, d.agent, day, DAILY_CAP,
+    ),
+    bind(
+      `INSERT INTO recommendation_events (id, workspace_id, project_id, recommendation_id, user_id, event, note, created_at)
+       SELECT ?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM recommendations WHERE id = ? AND workspace_id = ? AND project_id = ?)`,
       newId("rev"), ctx.project.workspaceId, ctx.project.id, id, null, "created", null, now,
-    ],
+      id, ctx.project.workspaceId, ctx.project.id,
+    ),
   ]);
-  return id;
+  return (results[0]?.meta?.changes ?? 0) > 0 ? id : null;
 }

@@ -137,7 +137,7 @@ export function createRunRoutes(deps: RunRouteDeps = {}) {
     }
     const { runId, created } = result;
     const ref = { id: runId, projectId: project.id, agent };
-    if (created) {
+    const claimAndStart = async () => {
       const claim = await claimAndLock(db, ref, now, Boolean(c.env.AGENT_RUN));
       if (claim === "locked") {
         // Never started: remove it so it does not consume the manual-run quota.
@@ -157,9 +157,25 @@ export function createRunRoutes(deps: RunRouteDeps = {}) {
           await startRun(c.env, db, ref, now, { deps: deps.orchestrate, waitUntil });
         }
       }
+    };
+    if (created) {
+      await claimAndStart();
+    } else {
+      // An existing run for this key (double submit). If it is still pending with no dispatch claim, the
+      // request that created it died before claiming it (or lost the lock race): claim and start it now
+      // instead of returning a run that would never start. claimAndLock is a conditional UPDATE, so a
+      // concurrent request still inside its own claim cannot start it twice.
+      const existing = await db.first<{ status: string; workflow_instance_id: string | null }>(
+        "SELECT status, workflow_instance_id FROM agent_runs WHERE id = ? AND workspace_id = ?",
+        runId,
+        project.workspace_id,
+      );
+      if (existing?.status === "pending" && existing.workflow_instance_id === null) await claimAndStart();
     }
     const row = await db.first<RunRow>("SELECT * FROM agent_runs WHERE id = ?", runId);
-    return c.json({ data: toRunSummary(row!) }, created ? 201 : 200);
+    // Removed by a concurrent request that found the project + agent locked.
+    if (!row) throw conflict("A run for this project and agent is already in progress.");
+    return c.json({ data: toRunSummary(row) }, created ? 201 : 200);
   });
 
   routes.post("/runs/:id/cancel", async (c) => {

@@ -165,9 +165,18 @@ export function budgetFor(budget: Budget, provider: string): Budget {
   return view && (PROVIDER_IDS as readonly string[]).includes(provider) ? view(provider as ProviderId) : budget;
 }
 
-export function createBudget(db: Db, env: Env, scope: BudgetScope, clock: Clock = systemClock): Budget {
+export function createBudget(
+  db: Db,
+  env: Env,
+  scope: BudgetScope,
+  clock: Clock = systemClock,
+  opts: {
+    /** Sources from the same resolution that picked the keys (runtime), so attribution cannot drift if a key is saved mid-step. */
+    sources?: Record<ProviderId, CredentialSource | null>;
+  } = {},
+): Budget {
   // Resolved once per budget (i.e. per run step / request), like the keys the runtime resolves.
-  let sources: Promise<Record<ProviderId, CredentialSource | null>> | null = null;
+  let sources: Promise<Record<ProviderId, CredentialSource | null>> | null = opts.sources ? Promise.resolve(opts.sources) : null;
   // A rejected lookup (e.g. a transient D1 error) is not cached, so the next reserve() retries it.
   const loadSources = () =>
     (sources ??= credentialSources(env, db, scope.workspaceId).catch((e: unknown) => {

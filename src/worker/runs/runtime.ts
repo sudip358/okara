@@ -12,14 +12,14 @@ import { Db } from "../lib/db";
 import { newId } from "../lib/ids";
 import { iso, systemClock, type Clock } from "../lib/time";
 import type { ProjectRow } from "../platform/access";
-import { resolveProviderKey } from "../platform/credentials";
+import { resolveProviderKey, type ResolvedKey } from "../platform/credentials";
 import { createGscProvider } from "../platform/gsc-client";
 import { createGeminiProvider, geminiConfigured } from "../providers/gemini";
 import { createPerplexityProvider, perplexityConfigured } from "../providers/perplexity";
 import { createTypeSafeProvider } from "../providers/typesafe";
 import type { GeoProvider, WritingProvider } from "../providers/types";
 import { createWriter } from "../providers/writer";
-import { createBudget } from "./budget";
+import { budgetFor, createBudget } from "./budget";
 import { createCallRecorder } from "./calls";
 import type { RunContext, RunLogger } from "./context";
 
@@ -120,9 +120,9 @@ export function createRunLogger(db: Db, run: { id: string; workspaceId: string; 
   };
 }
 
-async function safeKey(env: Env, db: Db, workspaceId: string, provider: ProviderId, log?: RunLogger): Promise<string | null> {
+async function safeKey(env: Env, db: Db, workspaceId: string, provider: ProviderId, log?: RunLogger): Promise<ResolvedKey | null> {
   try {
-    return (await resolveProviderKey(env, db, workspaceId, provider))?.key ?? null;
+    return await resolveProviderKey(env, db, workspaceId, provider);
   } catch {
     await log?.event("runtime", "info", `The saved ${provider} key could not be decrypted; treating ${provider} as not configured.`);
     return null;
@@ -148,7 +148,6 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
 
   const ref = { id: project.id, workspaceId: project.workspace_id };
   const log = createRunLogger(db, { id: run.id, workspaceId: run.workspace_id, projectId: run.project_id }, clock);
-  const budget = createBudget(db, env, { workspaceId: ref.workspaceId, projectId: ref.id, runId: run.id }, clock);
   const calls = createCallRecorder(db, { workspaceId: ref.workspaceId, projectId: ref.id, runId: run.id }, clock);
   const apiFetch = createApiFetch(env, opts.fetchImpl ?? fetch);
   // Wrapped so `ctx.crawlFetch(url)` never invokes the platform fetch with `this = ctx`
@@ -156,20 +155,29 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
   const baseCrawlFetch = opts.crawlFetchImpl ?? fetch;
   const crawlFetch = ((input: RequestInfo | URL, init?: RequestInit) => baseCrawlFetch(input, init)) as typeof fetch;
 
-  const [typesafeKey, writerKey, geminiKey, perplexityKey] = await Promise.all([
+  const [typesafe, writerResolved, gemini, perplexity] = await Promise.all([
     safeKey(env, db, ref.workspaceId, "typesafe", log),
     safeKey(env, db, ref.workspaceId, "writer", log),
     safeKey(env, db, ref.workspaceId, "gemini", log),
     safeKey(env, db, ref.workspaceId, "perplexity", log),
   ]);
+  const typesafeKey = typesafe?.key ?? null;
+  const writerKey = writerResolved?.key ?? null;
+  const geminiKey = gemini?.key ?? null;
+  const perplexityKey = perplexity?.key ?? null;
+  // Budget attribution uses the same resolution that picked the keys (global operator-key caps).
+  const budget = createBudget(db, env, { workspaceId: ref.workspaceId, projectId: ref.id, runId: run.id }, clock, {
+    sources: { typesafe: typesafe?.source ?? null, writer: writerResolved?.source ?? null, gemini: gemini?.source ?? null, perplexity: perplexity?.source ?? null },
+  });
 
-  const decisions = typesafeKey ? createTypeSafeProvider({ apiKey: typesafeKey, model: env.TYPESAFE_MODEL, fetchImpl: apiFetch, calls, budget }) : null;
-  const writer = createWriter(env, writerKey, apiFetch, { calls, budget });
+  const decisions = typesafeKey ? createTypeSafeProvider({ apiKey: typesafeKey, model: env.TYPESAFE_MODEL, fetchImpl: apiFetch, calls, budget: budgetFor(budget, "typesafe") }) : null;
+  // Provider views: global operator-key caps apply only when that provider uses the operator key.
+  const writer = createWriter(env, writerKey, apiFetch, { calls, budget: budgetFor(budget, "writer") });
 
   const geoProviders: GeoProvider[] = [];
   // Model ids come only from configuration; both a key and a valid model id are required.
   if (geminiKey && env.GEMINI_MODEL && geminiConfigured(env, geminiKey)) {
-    geoProviders.push(createGeminiProvider({ apiKey: geminiKey, model: env.GEMINI_MODEL.trim(), fetchImpl: apiFetch, now: clock }));
+    geoProviders.push(createGeminiProvider({ apiKey: geminiKey, model: env.GEMINI_MODEL.trim(), fetchImpl: apiFetch, now: clock, thinkingLevel: env.GEMINI_THINKING_LEVEL }));
   }
   if (perplexityKey && env.PERPLEXITY_MODEL && perplexityConfigured(env, perplexityKey)) {
     geoProviders.push(createPerplexityProvider({ apiKey: perplexityKey, model: env.PERPLEXITY_MODEL.trim(), fetchImpl: apiFetch, now: clock }));
@@ -214,13 +222,15 @@ export async function buildWriterForWorkspace(
   workspaceId: string,
   opts: { projectId?: string | null; fetchImpl?: typeof fetch; clock?: Clock } = {},
 ): Promise<WritingProvider | null> {
-  const key = await safeKey(env, db, workspaceId, "writer");
-  if (!key) return null;
+  const resolved = await safeKey(env, db, workspaceId, "writer");
+  if (!resolved) return null;
   const clock = opts.clock ?? systemClock;
   const projectId = opts.projectId ?? null;
   const calls = createCallRecorder(db, { workspaceId, projectId, runId: null }, clock);
-  const budget = projectId ? createBudget(db, env, { workspaceId, projectId, runId: null }, clock) : null;
-  return createWriter(env, key, createApiFetch(env, opts.fetchImpl ?? fetch), { calls, budget });
+  const budget = projectId
+    ? budgetFor(createBudget(db, env, { workspaceId, projectId, runId: null }, clock, { sources: { writer: resolved.source, typesafe: null, gemini: null, perplexity: null } }), "writer")
+    : null;
+  return createWriter(env, resolved.key, createApiFetch(env, opts.fetchImpl ?? fetch), { calls, budget });
 }
 
 /** Which capabilities are configured for a workspace, without decrypting any key. */

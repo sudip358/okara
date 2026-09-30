@@ -285,7 +285,7 @@ describe("platform-auth: sessions, logout, /me", () => {
     const env = createTestEnv();
     const u = await seedUser(env);
     expect((await app.request("/api/me", { headers: { Cookie: `__Host-okara_session=${u.sessionToken}` } }, env)).status).toBe(401);
-    const prod = createTestEnv({ ENVIRONMENT: "production", APP_ORIGIN: "https://app.example.com", DB: env.DB });
+    const prod = createTestEnv({ ENVIRONMENT: "production", APP_ORIGIN: "https://app.example.com", ALLOWED_EMAIL_DOMAINS: "example.com", DB: env.DB });
     expect((await app.request("https://app.example.com/api/me", { headers: { Cookie: `__Host-okara_session=${u.sessionToken}` } }, prod)).status).toBe(200);
     expect((await app.request("https://app.example.com/api/me", { headers: { Cookie: `okara_session=${u.sessionToken}` } }, prod)).status).toBe(401);
   });
@@ -312,7 +312,7 @@ describe("platform-auth: sessions, logout, /me", () => {
     const me = (await (await app.request("/api/me", { headers: { Cookie: `okara_session=${u.sessionToken}` } }, env)).json()) as { data: { demoModeAvailable: boolean; csrfToken: string } };
     expect(me.data.demoModeAvailable).toBe(true);
     expect(me.data.csrfToken).toBe(u.csrfToken);
-    const prod = createTestEnv({ DEMO_MODE: "true", ENVIRONMENT: "production", APP_ORIGIN: "https://app.example.com", DB: env.DB });
+    const prod = createTestEnv({ DEMO_MODE: "true", ENVIRONMENT: "production", APP_ORIGIN: "https://app.example.com", ALLOWED_EMAIL_DOMAINS: "example.com", DB: env.DB });
     const pme = (await (await app.request("https://app.example.com/api/me", { headers: { Cookie: `__Host-okara_session=${u.sessionToken}` } }, prod)).json()) as { data: { demoModeAvailable: boolean } };
     expect(pme.data.demoModeAvailable).toBe(false);
   });
@@ -396,15 +396,17 @@ describe("platform-auth: dev-login bypass", () => {
   });
 
   it("is impossible in production, even on localhost with the flag set", async () => {
-    for (const appOrigin of ["https://app.example.com", ORIGIN]) {
-      const env = createTestEnv({ ENVIRONMENT: "production", DEV_AUTH_BYPASS: "true", APP_ORIGIN: appOrigin });
+    // https APP_ORIGIN with a matching Origin, so CSRF passes and the route itself must refuse
+    // (an http APP_ORIGIN in production is setup_required and would be refused by CSRF first).
+    for (const appOrigin of ["https://app.example.com", "https://localhost:5173"]) {
+      const env = createTestEnv({ ENVIRONMENT: "production", DEV_AUTH_BYPASS: "true", APP_ORIGIN: appOrigin, ALLOWED_EMAIL_DOMAINS: "example.com" });
       expect((await post(env, "http://localhost/api/auth/dev-login", appOrigin)).status).toBe(404);
       expect((await post(env, "http://127.0.0.1/api/auth/dev-login", appOrigin)).status).toBe(404);
       expect(await countRows(env, "users")).toBe(0);
       expect(await countRows(env, "sessions")).toBe(0);
     }
-    const staging = createTestEnv({ ENVIRONMENT: "staging", DEV_AUTH_BYPASS: "true" });
-    expect((await post(staging)).status).toBe(404);
+    const staging = createTestEnv({ ENVIRONMENT: "staging", DEV_AUTH_BYPASS: "true", APP_ORIGIN: "https://staging.example.com" });
+    expect((await post(staging, "http://localhost/api/auth/dev-login", "https://staging.example.com")).status).toBe(404);
   });
 
   it("is 404 in development unless explicitly enabled, and only on localhost", async () => {
@@ -427,6 +429,16 @@ describe("platform-auth: dev-login bypass", () => {
     expect(me.data.workspaces).toHaveLength(1);
     // Cross-origin POST is still refused by the CSRF layer.
     expect((await post(env, "http://localhost/api/auth/dev-login", "https://evil.example.com")).status).toBe(403);
+  });
+
+  it("refuses with not_allowed (and creates no session) when an allowlist excludes the demo user", async () => {
+    const env = createTestEnv({ ENVIRONMENT: "development", DEV_AUTH_BYPASS: "true", ALLOWED_EMAILS: "owner@example.com" });
+    const res = await post(env);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("not_allowed");
+    expect(await countRows(env, "sessions")).toBe(0);
+    const allowed = createTestEnv({ ENVIRONMENT: "development", DEV_AUTH_BYPASS: "true", ALLOWED_EMAILS: "demo@localhost.invalid" });
+    expect((await post(allowed)).status).toBe(200);
   });
 });
 

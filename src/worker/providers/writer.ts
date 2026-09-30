@@ -6,7 +6,7 @@
 import type { Env } from "../env";
 import type { WritingProvider } from "./types";
 import { createAnthropicWriter } from "./writer-anthropic";
-import { createOpenAiCompatibleWriter, parseReasoningEffort } from "./writer-openai";
+import { createOpenAiCompatibleWriter, parseReasoningEffort, parseReasoningHeadroom, reasoningHeadroomTokens, OPENAI_REASONING_EFFORTS, OPENAI_REASONING_HEADROOM_MAX } from "./writer-openai";
 import type { WriterHooks } from "../writing/metering";
 
 export type WriterKind = "anthropic" | "openai_compatible";
@@ -16,9 +16,13 @@ export interface WriterConfigStatus {
   provider: WriterKind | null;
   model: string | null;
   missing: string[];
+  /** Non-blocking notes (settings that are set but ignored for this provider). */
+  warnings: string[];
 }
 
-export function writerConfigStatus(env: Pick<Env, "WRITER_PROVIDER" | "WRITER_MODEL" | "WRITER_BASE_URL">): WriterConfigStatus {
+type WriterEnv = Pick<Env, "WRITER_PROVIDER" | "WRITER_MODEL" | "WRITER_BASE_URL" | "WRITER_REASONING_EFFORT" | "WRITER_REASONING_HEADROOM_TOKENS">;
+
+export function writerConfigStatus(env: WriterEnv): WriterConfigStatus {
   const missing: string[] = [];
   const raw = env.WRITER_PROVIDER?.trim() ?? "";
   const provider: WriterKind | null = raw === "anthropic" || raw === "openai_compatible" ? raw : null;
@@ -36,11 +40,23 @@ export function writerConfigStatus(env: Pick<Env, "WRITER_PROVIDER" | "WRITER_MO
       }
     }
   }
-  return { configured: missing.length === 0, provider, model, missing };
+  // Optional reasoning settings: an unrecognised value is a config error (like an invalid WRITER_BASE_URL),
+  // not something to drop silently; they only apply to openai_compatible.
+  const warnings: string[] = [];
+  const effort = env.WRITER_REASONING_EFFORT?.trim() ?? "";
+  const headroom = env.WRITER_REASONING_HEADROOM_TOKENS?.trim() ?? "";
+  if (provider === "openai_compatible") {
+    if (effort && !parseReasoningEffort(effort)) {
+      missing.push(`WRITER_REASONING_EFFORT (unrecognised value "${effort}"; use ${OPENAI_REASONING_EFFORTS.join("|")} or leave unset)`);
+    }
+    if (headroom && parseReasoningHeadroom(headroom) === null) {
+      missing.push(`WRITER_REASONING_HEADROOM_TOKENS (unrecognised value "${headroom}"; use a whole number 0-${OPENAI_REASONING_HEADROOM_MAX} or leave unset)`);
+    }
+  } else if (provider && (effort || headroom)) {
+    warnings.push("WRITER_REASONING_EFFORT / WRITER_REASONING_HEADROOM_TOKENS apply only to WRITER_PROVIDER=openai_compatible (ignored).");
+  }
+  return { configured: missing.length === 0, provider, model, missing, warnings };
 }
-
-/** WRITER_REASONING_EFFORT (optional, openai_compatible only) until Env declares it. */
-type WriterEnv = Pick<Env, "WRITER_PROVIDER" | "WRITER_MODEL" | "WRITER_BASE_URL"> & { WRITER_REASONING_EFFORT?: string };
 
 export function createWriter(
   env: WriterEnv,
@@ -51,5 +67,14 @@ export function createWriter(
   const status = writerConfigStatus(env);
   if (!status.configured || !status.provider || !status.model || !apiKey) return null;
   if (status.provider === "anthropic") return createAnthropicWriter({ apiKey, model: status.model, fetchImpl, ...hooks });
-  return createOpenAiCompatibleWriter({ apiKey, model: status.model, baseUrl: env.WRITER_BASE_URL!, fetchImpl, reasoningEffort: parseReasoningEffort(env.WRITER_REASONING_EFFORT), ...hooks });
+  const reasoningEffort = parseReasoningEffort(env.WRITER_REASONING_EFFORT);
+  return createOpenAiCompatibleWriter({
+    apiKey,
+    model: status.model,
+    baseUrl: env.WRITER_BASE_URL!,
+    fetchImpl,
+    reasoningEffort,
+    reasoningHeadroomTokens: reasoningHeadroomTokens(reasoningEffort, env.WRITER_REASONING_HEADROOM_TOKENS),
+    ...hooks,
+  });
 }

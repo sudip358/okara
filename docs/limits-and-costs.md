@@ -80,6 +80,17 @@ official pricing URL and validity window. Estimates use paid Standard-tier list 
 allowances, so they are conservative upper bounds, not invoices. A model outside every rate window is
 treated as unknown until the table is re-verified and the version bumped.
 
+Output budgets that count thinking/reasoning tokens:
+
+- Gemini: `maxOutputTokens` is 8192 (the reservation envelope's output tokens), and thinking tokens count
+  toward it. Gemini 3+ models (and the `gemini-flash-latest` / `gemini-pro-latest` aliases) get
+  `thinkingLevel` `LOW` unless `GEMINI_THINKING_LEVEL` overrides it. Both values are part of the GEO cohort
+  key, so the upgrade that introduced them (and any later change of `GEMINI_THINKING_LEVEL`) starts a new
+  Gemini cohort once; trends restart from that run.
+- OpenAI-compatible writer: `max_completion_tokens` is the caller's answer budget plus
+  `WRITER_REASONING_HEADROOM_TOKENS` (default 0, or 4000 when `WRITER_REASONING_EFFORT` is set). The
+  `writer_tokens` reservation is the prompt estimate plus that same `max_completion_tokens`.
+
 `GET /projects/:pid/usage` reports, for the current UTC day: every call (provider, model, purpose, status,
 cost, estimate flag), `usdActual` (sum of provider-returned costs, or null when none), `usdEstimated` (sum of
 labelled estimates, or null), and `usdUnknownCalls` (count of calls with unknown cost), plus notes that
@@ -105,5 +116,6 @@ Limitations:
 | Page snapshots | Compact extracted evidence only (no raw HTML) |
 | Workflow instance state | Cloudflare Workflows retention only; D1 is the system of record |
 
-Project deletion (`DELETE /projects/:pid`) removes tenant data and revokes integrations; `GET
+Project deletion (`DELETE /projects/:pid`) removes tenant data and deletes the stored Search Console token (Google's
+revoke endpoint is not called, since it would disconnect every project using that Google account); `GET
 /projects/:pid/export` exports it without secrets.

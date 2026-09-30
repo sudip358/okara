@@ -25,7 +25,7 @@ import type { Db } from "../lib/db";
 import { hitRateLimit } from "../platform/rate-limit";
 import type { DecisionProvider } from "../providers/types";
 import { buildDecisionsForWorkspace } from "../redirects/decisions";
-import { createBudget } from "../runs/budget";
+import { budgetFor, createBudget } from "../runs/budget";
 import { createCallRecorder } from "../runs/calls";
 
 export const seoOverviewRoutes = new Hono<AppEnv>();
@@ -56,7 +56,7 @@ async function buyerQueries(c: Context<AppEnv, "/projects/:pid/seo/buyer-queries
   const decisions = project.is_demo === 1 ? null : await decisionsFactory(c.env, db, project.workspace_id, project.id);
   const scope = { workspaceId: project.workspace_id, projectId: project.id, runId: null };
   const clock = () => now;
-  const data = await buildBuyerQueries({ db, project, now, decisions, budget: createBudget(db, c.env, scope, clock), calls: createCallRecorder(db, scope, clock), classify });
+  const data = await buildBuyerQueries({ db, project, now, decisions, budget: budgetFor(createBudget(db, c.env, scope, clock), "typesafe"), calls: createCallRecorder(db, scope, clock), classify });
   return c.json({ data });
 }
 

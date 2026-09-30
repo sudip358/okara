@@ -363,14 +363,15 @@ describe("GSC OAuth", () => {
     expect(cb.headers.get("location")).toContain("gscError=no_refresh_token");
   });
 
-  it("disconnect revokes at Google and deletes the token", async () => {
+  it("disconnect deletes the local token without calling Google revoke (H5)", async () => {
     const p = await createAsA();
     await insertConnection(p, "rt-disconnect");
     const f = fakeFetch((url) => (url === "https://oauth2.googleapis.com/revoke" ? new Response("", { status: 200 }) : json({}, 500)));
     outbound.fetch = f.fn;
     const res = await call(A, "DELETE", `/projects/${p.id}/gsc`);
-    expect(((await res.json()) as { data: { revoked: boolean } }).data.revoked).toBe(true);
-    expect(formOf(f.calls[0]!.init).get("token")).toBe("rt-disconnect");
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { data: { revoked: boolean } }).data.revoked).toBe(false);
+    expect(f.calls).toHaveLength(0);
     expect(await A.db.first("SELECT id FROM oauth_connections WHERE project_id = ?", p.id)).toBeNull();
   });
 });
@@ -545,7 +546,7 @@ describe("export and delete", () => {
     expect(Object.keys(body.data.tables)).toEqual(expect.arrayContaining(["recommendations", "evidence", "geo_observations", "gsc_metrics", "agent_runs", "run_events", "provider_calls"]));
   });
 
-  it("delete removes all tenant data (demo-seeded) and revokes the GSC token", async () => {
+  it("delete removes all tenant data (demo-seeded) and deletes the stored GSC token without a remote revoke", async () => {
     const demoEnv = createTestEnv({ DEMO_MODE: "true", ENVIRONMENT: "development" });
     env = demoEnv;
     A = await seedUser(env);
@@ -563,8 +564,10 @@ describe("export and delete", () => {
     outbound.fetch = f.fn;
     const del = await call(A, "DELETE", `/projects/${p.id}`, undefined, demoEnv);
     expect(del.status).toBe(200);
-    expect(((await del.json()) as { data: { gscRevoked: boolean } }).data.gscRevoked).toBe(true);
-    expect(f.calls.map((c) => c.url)).toEqual(["https://oauth2.googleapis.com/revoke"]);
+    // H5: the local token is deleted; Google's grant is never revoked from here (no outbound call).
+    expect(((await del.json()) as { data: { gscRevoked: boolean } }).data.gscRevoked).toBe(false);
+    expect(f.calls).toHaveLength(0);
+    expect(await A.db.first("SELECT id FROM oauth_connections WHERE project_id = ?", p.id)).toBeNull();
 
     const tables = [
       "context_documents", "oauth_connections", "agent_runs", "run_events", "crawl_runs", "pages", "page_snapshots", "audit_findings",

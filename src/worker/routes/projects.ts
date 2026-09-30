@@ -11,8 +11,8 @@ import { utcDay } from "../lib/time";
 import type { SessionUser } from "../platform/access";
 import { requireProject, requireWorkspaceMember } from "../platform/access";
 import { exportProject } from "../platform/export";
-import { revokeGscToken } from "../platform/gsc-oauth";
-import { rateLimit } from "../platform/rate-limit";
+import { deleteGscToken } from "../platform/gsc-oauth";
+import { clientKey, rateLimit } from "../platform/rate-limit";
 import {
   contextKindSchema,
   contextPutSchema,
@@ -80,9 +80,12 @@ projectRoutes.delete("/projects/:pid", async (c) => {
   const user = userOf(c);
   const db = c.get("db");
   const row = await requireProject(db, user.id, c.req.param("pid"));
-  const gscRevoked = await revokeGscToken(c.env, db, row.workspace_id, row.id, outbound.fetch);
+  // H5: only the locally stored GSC token is deleted. Google's /revoke would end the grant for every
+  // project connected with that Google account, so it is never called; users revoke at
+  // myaccount.google.com. gscRevoked stays in the response (always false) for API compatibility.
+  await deleteGscToken(db, row.workspace_id, row.id);
   await deleteProjectData(db, row.workspace_id, row.id);
-  return c.json({ data: { ok: true, gscRevoked } });
+  return c.json({ data: { ok: true, gscRevoked: false } });
 });
 
 projectRoutes.get("/projects/:pid/export", async (c) => {
@@ -131,7 +134,12 @@ export const VERIFICATION_CHECK_RATE_LIMIT = { limit: 10, windowSeconds: 60 } as
 
 projectRoutes.post(
   "/projects/:pid/verification/check",
-  rateLimit({ key: (c) => `verify_check:${c.req.param("pid") ?? ""}:${c.get("user")?.id ?? "anon"}`, ...VERIFICATION_CHECK_RATE_LIMIT }),
+  // Authenticate before the limiter so unauthenticated requests write no rate_limits rows.
+  async (c, next) => {
+    userOf(c);
+    await next();
+  },
+  rateLimit({ key: (c) => `verify_check:${c.req.param("pid") ?? ""}:${clientKey(c)}`, ...VERIFICATION_CHECK_RATE_LIMIT }),
   async (c) => {
     const user = userOf(c);
     const db = c.get("db");

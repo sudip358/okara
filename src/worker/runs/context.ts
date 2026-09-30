@@ -15,7 +15,8 @@ export interface ProjectRef {
 
 export interface Budget {
   /**
-   * Atomically reserve `amount` of `resource` for this project (and the global cap for usd_micros).
+   * Atomically reserve `amount` of `resource` for this project (and the global operator-key caps for
+   * usd_micros/provider_calls/jev_calls/writer_tokens; see runs/budget.ts).
    * Throws BudgetExceededError when it would exceed a limit. Returns a reservation id to settle.
    */
   reserve(resource: BudgetResource, amount: number): Promise<string>;

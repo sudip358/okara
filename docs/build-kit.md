@@ -52,6 +52,7 @@ Implement one real web-grounded GEO provider first, chosen after reading officia
 AUTHENTICATION AND TENANCY
 Use Google OIDC login with server-side sessions in D1, validated ID tokens (signature, issuer, audience, expiry, nonce), secure HttpOnly SameSite cookies, session rotation, logout, and session expiry. Use a maintained Worker-compatible library where practical.
 Separate basic login consent from Search Console connection consent. For GSC request the minimum webmasters.readonly scope and offline access. Validate OAuth state, use PKCE where applicable, bind callbacks to the initiating session and workspace, and preserve an existing refresh token if a reconnect response omits it. Refresh access tokens server-side and implement disconnect/revocation handling.
+> Amendment (2026-09-30, deploy readiness H5): disconnect and project deletion delete the locally stored token only and do not call Google's revoke endpoint, because a revoke ends the grant for the whole Google account and would disconnect every other project using it. "Revocation handling" means handling a grant the user revoked at Google (`invalid_grant` marks the connection revoked). Users revoke at myaccount.google.com. See docs/api.md, "Google token deletion".
 Encrypt persisted refresh tokens using Web Crypto AES-GCM with a server-side secret, unique random nonce, and a versioned envelope for key rotation. Never roll your own cryptographic algorithm.
 Start with workspaces and memberships; one owner per workspace is sufficient initially. Every project-scoped query and action must enforce authenticated workspace membership on the server. Do not trust workspace/project IDs supplied by the browser. Add cross-tenant tests for reading, updating, exporting, scheduling, and deleting resources.
 Implement CSRF/origin checks for state-changing requests, input limits, rate limits, security headers, and safe rendering of untrusted markdown/HTML.
@@ -256,6 +257,7 @@ ACCEPTANCE TESTS
 - SSRF tests block private, loopback, link-local, metadata, and rebinding targets, including after redirects.
 - Untrusted HTML and raw answers render without script execution (stored-XSS tests).
 - Project export contains all tenant data and no secrets; project deletion removes tenant data and revokes integrations.
+  > Amendment (2026-09-30, H5): "revokes integrations" means the stored tokens and keys are deleted; Google's revoke endpoint is not called (see the authentication amendment above).
 - Demo mode is visibly labelled on every screen and cannot be enabled in production.
 - [A1] A fixture where the brand is absent and a competitor listicle is cited produces a displacement record with entity, URL, source type, and text span.
 - [A6] A provider response with exposed search queries stores them; a response without them shows "not exposed" and stores none.

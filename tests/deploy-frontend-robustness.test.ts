@@ -10,7 +10,7 @@ const webModule = (rel: string) => new URL(`../src/web/${rel}`, import.meta.url)
 type ApiModule = {
   api: <T>(path: string, init?: { method?: string; body?: unknown }) => Promise<T>;
   ApiError: new (...args: never[]) => Error;
-  setCsrfToken: (t: string | null) => void;
+  setCsrfToken: (t: string | null, userId?: string | null) => void;
 };
 const { api, ApiError, setCsrfToken } = (await import(/* @vite-ignore */ webModule("lib/api.ts"))) as ApiModule;
 const { ExternalUrl } = (await import(/* @vite-ignore */ webModule("components/ExternalUrl.tsx"))) as { ExternalUrl: ComponentType<{ url: string }> };
@@ -71,7 +71,7 @@ describe("[L10] api(): 403 csrf_failed refreshes the token from /me and retries 
 
   beforeEach(() => {
     calls = [];
-    setCsrfToken("stale");
+    setCsrfToken("stale", "u1");
   });
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -92,7 +92,7 @@ describe("[L10] api(): 403 csrf_failed refreshes the token from /me and retries 
 
   it("retries the write with the fresh token and returns its data", async () => {
     stub((url, _m, csrf) => {
-      if (url === "/api/me") return json(200, { data: { csrfToken: "fresh" } });
+      if (url === "/api/me") return json(200, { data: { csrfToken: "fresh", user: { id: "u1" } } });
       return csrf === "fresh" ? json(200, { data: { ok: true } }) : json(403, { error: { code: "csrf_failed", message: "CSRF check failed." } });
     });
     await expect(api<{ ok: boolean }>("/projects/p1/runs", { method: "POST", body: {} })).resolves.toEqual({ ok: true });
@@ -104,7 +104,7 @@ describe("[L10] api(): 403 csrf_failed refreshes the token from /me and retries 
   });
 
   it("retries at most once and surfaces the 403 when the token is unchanged or the session is gone", async () => {
-    stub((url) => (url === "/api/me" ? json(200, { data: { csrfToken: "stale" } }) : json(403, { error: { code: "csrf_failed", message: "x" } })));
+    stub((url) => (url === "/api/me" ? json(200, { data: { csrfToken: "stale", user: { id: "u1" } } }) : json(403, { error: { code: "csrf_failed", message: "x" } })));
     await expect(api("/projects/p1/runs", { method: "POST" })).rejects.toMatchObject({ status: 403, code: "csrf_failed" });
     expect(calls).toHaveLength(2);
 

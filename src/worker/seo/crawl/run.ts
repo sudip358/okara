@@ -125,28 +125,55 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
         project.workspaceId,
       )
     : null;
+  // The page reservation an earlier attempt of this run left 'reserved'. Looked up whenever there is a
+  // run id, not only when a crawl_runs row exists: reserve() runs before the row is inserted, so an
+  // attempt that died in between left a reservation but no row.
+  const held = ctx.runId
+    ? await db.first<{ id: string; amount: number }>(
+        `SELECT id, amount FROM usage_reservations
+          WHERE run_id = ? AND project_id = ? AND workspace_id = ? AND resource = 'crawl_pages' AND status = 'reserved' AND id NOT LIKE '%\\_g' ESCAPE '\\'
+          ORDER BY created_at DESC LIMIT 1`,
+        ctx.runId,
+        project.id,
+        project.workspaceId,
+      )
+    : null;
   if (prior && (prior.status === "completed" || prior.status === "partial")) {
     // The crawl already finished (the step failed afterwards): return its stored result, crawl nothing.
+    // If the attempt died between recording the result and settling, settle the reservation now.
+    if (held) {
+      const used = Math.min(Number(held.amount), Number(prior.pages_crawled) + Number(prior.pages_skipped));
+      await ctx.budget.settle(held.id, used).catch(() => undefined);
+    }
     const n = await db.first<{ n: number }>("SELECT COUNT(*) AS n FROM audit_findings WHERE crawl_run_id = ? AND workspace_id = ?", prior.id, project.workspaceId);
     const note = parseJson<string[]>(prior.notes_json, [])[0] ?? "";
     return { crawlRunId: prior.id, pagesCrawled: prior.pages_crawled, pagesSkipped: prior.pages_skipped, findings: Number(n?.n ?? 0), status: prior.status, note };
   }
 
   let reservation: string | null = null;
-  if (prior) {
-    const held = await db.first<{ id: string; amount: number }>(
-      `SELECT id, amount FROM usage_reservations
-        WHERE run_id = ? AND project_id = ? AND workspace_id = ? AND resource = 'crawl_pages' AND status = 'reserved' AND id NOT LIKE '%\\_g' ESCAPE '\\'
-        ORDER BY created_at DESC LIMIT 1`,
-      ctx.runId,
-      project.id,
-      project.workspaceId,
-    );
-    if (held) {
-      reservation = held.id;
-      pageLimit = Math.max(1, Math.min(pageLimit, Number(held.amount)));
+  // On reuse, the settle amount also covers what the interrupted attempt fetched (see settleAmount).
+  let reusedAmount: number | null = null;
+  let priorFetched = 0;
+  if (held) {
+    reservation = held.id;
+    reusedAmount = Number(held.amount);
+    pageLimit = Math.max(1, Math.min(pageLimit, reusedAmount));
+    if (prior) {
+      // Pages the interrupted attempt fetched (recorded snapshots; its evidence is deleted below).
+      const f = await db.first<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM page_snapshots WHERE crawl_run_id = ? AND workspace_id = ? AND (status_code IS NOT NULL OR skipped_reason = 'error')",
+        prior.id,
+        project.workspaceId,
+      );
+      priorFetched = Number(f?.n ?? 0);
     }
   }
+  // What a reused reservation is settled at. If the interrupted attempt had created its crawl_runs row it
+  // may have fetched pages (some still in flight, with no snapshot): at least the full amount, more if
+  // both attempts together fetched more. With no row it died before crawling, so only this attempt counts.
+  const priorMayHaveFetched = prior !== null;
+  const settleAmount = (fetches: number) =>
+    reusedAmount === null || !priorMayHaveFetched ? fetches : Math.max(reusedAmount, fetches + priorFetched);
   if (reservation === null) {
     try {
       reservation = await ctx.budget.reserve("crawl_pages", pageLimit);
@@ -584,7 +611,7 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
       crawlRunId,
       project.workspaceId,
     );
-    await ctx.budget.settle(reservation, fetches);
+    await ctx.budget.settle(reservation, settleAmount(fetches));
     await ctx.log.event("crawl", status === "completed" ? "completed" : "partial", `${note}; ${findings.length} findings.`);
     return { crawlRunId, pagesCrawled: crawled, pagesSkipped: skipped, findings: findings.length, status, note };
   } catch (e) {
@@ -593,7 +620,7 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
     const msg = e instanceof Error ? e.message.slice(0, 300) : "unknown error";
     await markFailed(ctx, crawlRunId, `Crawl failed: ${msg}`).catch(() => undefined);
     // Requests may have been sent: keep what was used counted.
-    await ctx.budget.settle(reservation, fetches).catch(() => undefined);
+    await ctx.budget.settle(reservation, settleAmount(fetches)).catch(() => undefined);
     await ctx.log.event("crawl", "failed", `Crawl failed: ${msg}`).catch(() => undefined);
     return { crawlRunId, pagesCrawled: 0, pagesSkipped: 0, findings: 0, status: "failed", note: `Crawl failed: ${msg}` };
   }

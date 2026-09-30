@@ -755,7 +755,7 @@ export async function generateGeoProposals(ctx: RunContext): Promise<GeoProposal
       c.fit.answer && c.fit.answer.type === "score" && (c.fit.tier === "act" || c.fit.tier === "flag")
         ? { question: GEO_QUESTION_IDS.proposalFit, score: c.fit.answer.score, confidence: c.fit.answer.confidence }
         : null;
-    await saveRecommendation(
+    const savedId = await saveRecommendation(
       ctx,
       {
         agent: "geo",
@@ -784,6 +784,12 @@ export async function generateGeoProposals(ctx: RunContext): Promise<GeoProposal
       },
       inputs.isDemo,
     );
+    if (savedId === null) {
+      // Another attempt filled the daily cap between the re-check and the (atomic) insert.
+      record(c.dedupKey, "rejected", "daily_cap", c.fit, jevMeta);
+      rejected++;
+      continue;
+    }
     record(c.dedupKey, "selected", null, c.fit, jevMeta);
     created++;
   }

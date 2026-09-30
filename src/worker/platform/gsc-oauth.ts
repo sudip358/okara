@@ -214,10 +214,18 @@ export async function handleGscCallback(
  * Google account + OAuth client, i.e. every project (in any workspace) connected with that account, so a
  * per-project disconnect or project delete must never call it. Users revoke the grant themselves at
  * myaccount.google.com (which affects every project connected with that Google account).
- * @deprecated Kept so existing callers compile; delete callers and use disconnectGsc/deleting the row.
+ * @deprecated No production caller; use disconnectGsc (disconnect) or deleteGscToken (project delete).
  */
 export async function revokeGscToken(_env: Env, _db: Db, _workspaceId: string, _projectId: string, _fetchImpl: typeof fetch): Promise<boolean> {
   return false;
+}
+
+/**
+ * Delete this project's stored (encrypted) GSC token only (project delete path). No network call: see
+ * revokeGscToken for why Google's /revoke is never used per project.
+ */
+export async function deleteGscToken(db: Db, workspaceId: string, projectId: string): Promise<void> {
+  await db.run("DELETE FROM oauth_connections WHERE workspace_id = ? AND project_id = ? AND provider = 'google_gsc'", workspaceId, projectId);
 }
 
 /**

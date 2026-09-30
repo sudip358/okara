@@ -11,7 +11,7 @@ import { systemClock, type Clock } from "../lib/time";
 import { resolveProviderKey } from "../platform/credentials";
 import { createTypeSafeProvider } from "../providers/typesafe";
 import type { DecisionProvider } from "../providers/types";
-import { createBudget } from "../runs/budget";
+import { budgetFor, createBudget } from "../runs/budget";
 import { createCallRecorder } from "../runs/calls";
 import { createApiFetch } from "../runs/runtime";
 
@@ -36,6 +36,6 @@ export async function buildDecisionsForWorkspace(
     model: env.TYPESAFE_MODEL,
     fetchImpl: createApiFetch(env, opts.fetchImpl ?? fetch),
     calls: createCallRecorder(db, scope, clock),
-    budget: createBudget(db, env, scope, clock),
+    budget: budgetFor(createBudget(db, env, scope, clock), "typesafe"),
   });
 }

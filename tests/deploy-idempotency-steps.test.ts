@@ -277,7 +277,7 @@ describe("L8: sweepOrphans (cron tick)", () => {
     expect(left.some((x) => x.id === old)).toBe(false);
   });
 
-  it("releases stale 'reserved' reservations of finished runs and returns their amounts to the counters", async () => {
+  it("releases stale 'reserved' quota reservations (crawl_pages) of finished runs and returns their amounts to the counters", async () => {
     const s = await setup();
     const day = FIXED_NOW.toISOString().slice(0, 10);
     const pKey = `project:${s.projectId}`;
@@ -286,10 +286,10 @@ describe("L8: sweepOrphans (cron tick)", () => {
     const active = await newRun(s.db, s.workspaceId, s.projectId, "seo");
     await s.db.run("UPDATE agent_runs SET status = 'running' WHERE id = ?", active);
     const at = (minAgo: number) => new Date(FIXED_NOW.getTime() - minAgo * 60_000).toISOString();
-    await s.db.insert("usage_counters", { scope_key: pKey, day, resource: "provider_calls", used: 10, limit_value: 60 });
-    await s.db.insert("usage_counters", { scope_key: "global", day, resource: "provider_calls", used: 10, limit_value: 3000 });
+    await s.db.insert("usage_counters", { scope_key: pKey, day, resource: "crawl_pages", used: 10, limit_value: 60 });
+    await s.db.insert("usage_counters", { scope_key: "global", day, resource: "crawl_pages", used: 10, limit_value: 3000 });
     const resv = (id: string, scope: string, runId: string | null, amount: number, status: string, created: string) =>
-      s.db.insert("usage_reservations", { id, workspace_id: s.workspaceId, project_id: s.projectId, run_id: runId, scope_key: scope, day, resource: "provider_calls", amount, status, created_at: created, updated_at: created });
+      s.db.insert("usage_reservations", { id, workspace_id: s.workspaceId, project_id: s.projectId, run_id: runId, scope_key: scope, day, resource: "crawl_pages", amount, status, created_at: created, updated_at: created });
     await resv("r1", pKey, finished, 3, "reserved", at(90)); // stranded: released
     await resv("r1_g", "global", finished, 3, "reserved", at(90)); // its global twin: released
     await resv("r2", pKey, active, 2, "reserved", at(90)); // run still active: kept

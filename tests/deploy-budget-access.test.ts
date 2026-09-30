@@ -192,6 +192,18 @@ describe("global caps for operator-key spend", () => {
     await expect(budgetFor(b.budget, "typesafe").reserve("provider_calls", 1)).rejects.toThrow(/Global/);
   });
 
+  it("attributes by the sources the runtime resolved, even if a workspace key is saved mid-step", async () => {
+    const env = createTestEnv({ TYPESAFE_API_KEY: "op", GLOBAL_JEV_CALLS_PER_DAY: "2" });
+    const { db, workspaceId, projectId } = await setupBudget(env);
+    const budget = createBudget(db, env, { workspaceId, projectId, runId: null }, () => FIXED_NOW, {
+      sources: { typesafe: "operator_key", writer: null, gemini: null, perplexity: null },
+    });
+    await saveKey(db, workspaceId, "typesafe"); // saved after the step picked the operator key
+    await budget.reserve("jev_calls", 2);
+    expect(await used(db, GLOBAL_SCOPE_KEY, "jev_calls")).toBe(2);
+    await expect(budget.reserve("jev_calls", 1)).rejects.toBeInstanceOf(BudgetExceededError);
+  });
+
   it("writer_tokens on the operator key count globally; on the workspace's own key they do not", async () => {
     const env = createTestEnv({ WRITER_API_KEY: "op", GLOBAL_WRITER_TOKENS_PER_DAY: "1000" });
     const op = await setupBudget(env);

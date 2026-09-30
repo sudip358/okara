@@ -11,7 +11,7 @@ vi.mock("@worker/geo/analyze", () => ({ analyzeObservation: vi.fn(async () => un
 import { analyzeObservation } from "@worker/geo/analyze";
 import { runGeoBatch, RAW_ANSWER_MAX_CHARS } from "@worker/geo/batch";
 import { cohortKey } from "@worker/geo/cohort";
-import { createGeminiProvider } from "@worker/providers/gemini";
+import { createGeminiProvider, GEMINI_DEFAULT_MAX_OUTPUT_TOKENS, GEMINI_THINKING_LEVEL } from "@worker/providers/gemini";
 import { createPerplexityProvider } from "@worker/providers/perplexity";
 import { reservationMicros, UNKNOWN_RATE_RESERVE_USD_MICROS, type GeoAnswerWithOutcome, type GeoCallOutcome } from "@worker/providers/rates";
 import type { GeoProvider } from "@worker/providers/types";
@@ -179,7 +179,9 @@ describe("runGeoBatch execution", () => {
       request_id: "resp-gemini-grounded-001",
       cost_is_estimate: 1,
     });
-    expect(obs!.cohort_key).toBe(await cohortKey({ promptSetVersion: 1, provider: "gemini", model: "gemini-3.8-flash", groundingMode: "google_search", samplingOptions: { maxOutputTokens: 4096 } }));
+    expect(obs!.cohort_key).toBe(await cohortKey({ promptSetVersion: 1, provider: "gemini", model: "gemini-3.8-flash", groundingMode: "google_search", samplingOptions: gemini.samplingOptions }));
+    // Derived from the provider, but pin the shape: gemini-3.8-flash sends the envelope maxOutputTokens and thinkingLevel LOW.
+    expect(gemini.samplingOptions).toEqual({ maxOutputTokens: GEMINI_DEFAULT_MAX_OUTPUT_TOKENS, thinkingLevel: GEMINI_THINKING_LEVEL });
     const usage = JSON.parse(String(obs!.usage_json));
     expect(usage).toMatchObject({ inputTokens: 21, outputTokens: 300, searchRequests: 2, searchQueriesExposed: true, outcome: "ok", finishReason: "STOP" });
 

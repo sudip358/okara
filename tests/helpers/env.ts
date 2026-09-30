@@ -11,7 +11,6 @@ export function createTestEnv(overrides: Partial<Env> = {}): Env {
     APP_ORIGIN: "http://localhost:5173",
     DEMO_MODE: "false",
     TOKEN_ENCRYPTION_KEY_V1: TEST_KEY_B64,
-    SESSION_SECRET: "test-session-secret",
     GOOGLE_CLIENT_ID: "test-client-id.apps.googleusercontent.com",
     GOOGLE_CLIENT_SECRET: "test-client-secret",
     ...overrides,

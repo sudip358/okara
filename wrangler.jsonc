@@ -26,6 +26,13 @@
     "WRITER_MODEL": "",
     // Required when WRITER_PROVIDER=openai_compatible (https only), e.g. https://api.openai.com/v1.
     "WRITER_BASE_URL": "",
+    // Optional, openai_compatible reasoning models only: none|minimal|low|medium|high|xhigh|max. Empty = not sent.
+    "WRITER_REASONING_EFFORT": "",
+    // Optional, openai_compatible only: extra max_completion_tokens for reasoning. Empty = 0, or 4000 with an effort set.
+    "WRITER_REASONING_HEADROOM_TOKENS": "",
+    // Optional Gemini thinkingLevel override: MINIMAL|LOW|MEDIUM|HIGH or OFF. Empty = LOW for Gemini 3+ ids only.
+    // Changing it starts a new GEO cohort for Gemini.
+    "GEMINI_THINKING_LEVEL": "",
     // Sign-in allowlist, comma-separated and case-insensitive. In production nobody can sign in until one is set.
     "ALLOWED_EMAILS": "",
     "ALLOWED_EMAIL_DOMAINS": "",

@@ -18,6 +18,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_geo_obs_run_prompt_provider
   ON geo_observations(run_id, prompt_id, provider)
   WHERE measurement_type = 'api' AND run_id IS NOT NULL AND prompt_id IS NOT NULL;
 
--- Serves the cron sweep that releases reservations stranded in 'reserved' by a killed step attempt
--- (runs/scheduler.ts sweepStaleReservations): only 'reserved' rows are indexed, so it stays small.
+-- Serves the cron sweep of reservations stranded in 'reserved' by a killed step attempt
+-- (runs/scheduler.ts sweepOrphans): only 'reserved' rows are indexed, so it stays small.
 CREATE INDEX IF NOT EXISTS idx_resv_stale ON usage_reservations(created_at) WHERE status = 'reserved';

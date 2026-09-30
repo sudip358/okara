@@ -137,6 +137,8 @@ integrationRoutes.delete("/projects/:pid/gsc", async (c) => {
   const user = userOf(c);
   const db = c.get("db");
   const p = await requireProject(db, user.id, c.req.param("pid"));
-  const { revoked } = await disconnectGsc(c.env, db, p.workspace_id, p.id, outbound.fetch, c.get("now"));
-  return c.json({ data: { ok: true, revoked } });
+  // Deletes the local token only (no remote revoke at Google, which would end the grant for every
+  // project using that Google account). `revoked` is therefore always false; kept for API compatibility.
+  await disconnectGsc(c.env, db, p.workspace_id, p.id, outbound.fetch, c.get("now"));
+  return c.json({ data: { ok: true, revoked: false } });
 });

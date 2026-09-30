@@ -4,8 +4,11 @@
  * is a compact record (ids and short strings only); full step summaries are persisted in D1.
  * executeStep catches step errors itself, so Workflow retries only cover infrastructure failures
  * (timeout, eviction, a D1 error before the work). A retried step whose record is already saved
- * returns that record without redoing the work (executeStep), and geo.batch skips prompt x provider
- * pairs already observed for the run, so a retry never repeats paid calls that finished.
+ * returns that record without redoing the work (executeStep). geo.batch skips prompt x provider pairs
+ * already observed for the run, so its retry does not repeat finished paid calls; other steps that die
+ * before saving their record re-run their work (seo.crawl reuses its crawl_runs row and reservation;
+ * recommend/proposals may repeat Jev and writer calls, with the daily cap enforced atomically at save).
+ * See docs/architecture.md.
  */
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep, type WorkflowStepConfig } from "cloudflare:workers";
 import type { Env } from "../env";

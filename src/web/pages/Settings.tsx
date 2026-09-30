@@ -114,7 +114,7 @@ export function SettingsPage() {
           }}
         >
           <p className="text-sm text-zinc-700 dark:text-zinc-300">
-            Permanently deletes this project's data (crawls, GSC data, GEO observations, recommendations, run history) and revokes its Search Console connection. This cannot be undone.
+            Permanently deletes this project's data (crawls, GSC data, GEO observations, recommendations, run history) and deletes its stored Search Console token. This cannot be undone. Google access is not revoked: to revoke it, remove this app at myaccount.google.com (that affects every project connected with that Google account).
           </p>
           <div className="max-w-sm">
             <TextField

@@ -55,11 +55,44 @@ export const GEMINI_DEFAULT_MAX_OUTPUT_TOKENS = RESERVATION_ENVELOPE.outputToken
  * not). Sent only to Gemini 3+ ids: thinkingLevel on earlier models is an API error.
  */
 export const GEMINI_THINKING_LEVEL = "LOW";
+/** ThinkingConfig.thinkingLevel enum values (generate-content reference). */
+export const GEMINI_THINKING_LEVELS = ["MINIMAL", "LOW", "MEDIUM", "HIGH"] as const;
+export type GeminiThinkingLevel = (typeof GEMINI_THINKING_LEVELS)[number];
 
-/** True for model ids like "gemini-3-flash-preview" or "gemini-3.8-flash" (major version >= 3). */
+/**
+ * `-latest` aliases documented in the Gemini API changelog as pointing at Gemini 3+ models
+ * (checked 2026-09-30, https://ai.google.dev/gemini-api/docs/changelog): gemini-pro-latest ->
+ * gemini-3-pro-preview (Jan 21, 2026), gemini-flash-latest -> gemini-3.5-flash (May 19, 2026).
+ * Older aliases (gemini-1.5-*-latest) are not listed and stay without thinkingLevel. Google may
+ * hot-swap an alias; GEMINI_THINKING_LEVEL=OFF disables thinkingLevel if one ever moves back.
+ */
+export const GEMINI_THINKING_LEVEL_ALIASES: ReadonlySet<string> = new Set(["gemini-flash-latest", "gemini-pro-latest"]);
+
+/** True for model ids like "gemini-3-flash-preview" or "gemini-3.8-flash" (major version >= 3), or a documented Gemini 3 `-latest` alias. */
 export function supportsThinkingLevel(model: string): boolean {
-  const m = /^(?:models\/)?gemini-(\d+)(?:[.\-]|$)/i.exec(model.trim());
+  const id = model.trim().replace(/^models\//i, "").toLowerCase();
+  if (GEMINI_THINKING_LEVEL_ALIASES.has(id)) return true;
+  const m = /^gemini-(\d+)(?:[.\-]|$)/.exec(id);
   return m !== null && Number(m[1]) >= 3;
+}
+
+/**
+ * thinkingLevel to send for `model`. GEMINI_THINKING_LEVEL (operator override, any model id):
+ * MINIMAL|LOW|MEDIUM|HIGH -> sent as given (case-insensitive); OFF/NONE -> never sent; unset or
+ * unrecognised -> default (LOW for Gemini 3+ ids and documented aliases, nothing otherwise).
+ */
+export function resolveGeminiThinkingLevel(model: string, override?: string | null): GeminiThinkingLevel | null {
+  const v = (override ?? "").trim().toUpperCase();
+  if (v === "OFF" || v === "NONE") return null;
+  if ((GEMINI_THINKING_LEVELS as readonly string[]).includes(v)) return v as GeminiThinkingLevel;
+  return supportsThinkingLevel(model) ? GEMINI_THINKING_LEVEL : null;
+}
+
+/** Human-readable problem with a GEMINI_THINKING_LEVEL value, or null when unset/valid. */
+export function geminiThinkingLevelProblem(raw: string | undefined | null): string | null {
+  const v = (raw ?? "").trim().toUpperCase();
+  if (!v || v === "OFF" || v === "NONE" || (GEMINI_THINKING_LEVELS as readonly string[]).includes(v)) return null;
+  return `GEMINI_THINKING_LEVEL (unsupported value "${String(raw).trim()}"; use ${GEMINI_THINKING_LEVELS.join("|")} or OFF)`;
 }
 
 /** Hosts known to wrap grounding URIs in a redirect. */
@@ -73,6 +106,8 @@ export interface GeminiProviderConfig {
   timeoutMs?: number;
   /** Clock for selecting the dated rate window (defaults to now). */
   now?: () => Date;
+  /** Raw GEMINI_THINKING_LEVEL override; see resolveGeminiThinkingLevel. */
+  thinkingLevel?: string | null;
 }
 
 /** Model ids go into the URL path: allow only plain ids like "gemini-3.8-flash" (optionally "models/..."). */
@@ -224,8 +259,10 @@ export function parseGeminiResponse(body: unknown): ParsedGemini {
 export function createGeminiProvider(config: GeminiProviderConfig): GeoProviderAdapter {
   const model = config.model.trim().replace(/^models\//, "");
   const maxOutputTokens = config.maxOutputTokens ?? GEMINI_DEFAULT_MAX_OUTPUT_TOKENS;
-  const thinkingConfig = supportsThinkingLevel(model) ? { thinkingLevel: GEMINI_THINKING_LEVEL } : null;
-  const samplingOptions: Record<string, unknown> = thinkingConfig ? { maxOutputTokens, thinkingLevel: GEMINI_THINKING_LEVEL } : { maxOutputTokens };
+  const thinkingLevel = resolveGeminiThinkingLevel(model, config.thinkingLevel);
+  const thinkingConfig = thinkingLevel ? { thinkingLevel } : null;
+  // Part of the cohort key: a different thinking level is a different measurement series.
+  const samplingOptions: Record<string, unknown> = thinkingLevel ? { maxOutputTokens, thinkingLevel } : { maxOutputTokens };
   const headers = { "x-goog-api-key": config.apiKey, "Content-Type": "application/json" };
 
   const base = (): Omit<GeoAnswerWithOutcome, "status" | "outcome" | "latencyMs"> => ({

@@ -383,7 +383,7 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
     const d = result.draft;
     // The card shows Jev's tier only with a Jev value (drop/deterministic -> no decision shown).
     const decisionTier: Tier | null = ev.decisionFields ? ev.tier : null;
-    await saveRecommendation(ctx, {
+    const savedId = await saveRecommendation(ctx, {
       agent: "seo",
       scope: p.c.scope,
       target: p.c.target,
@@ -408,6 +408,11 @@ export async function generateSeoRecommendations(ctx: RunContext, opts: Generate
       writerProvider: d.writerProvider,
       writerModel: d.writerModel,
     });
+    if (savedId === null) {
+      // Another attempt filled the daily cap between the re-check and the (atomic) insert.
+      await reject(p, "budget", ev.tier);
+      continue;
+    }
     await recordOutcome(ctx, p, "selected", null, ev.tier);
     created++;
   }

@@ -37,9 +37,14 @@ describe("platform-projects via createApp", () => {
       expect(res.status, `${method} ${path}`).toBe(404);
     }
 
-    const prod = createTestEnv({ ENVIRONMENT: "production", DEMO_MODE: "true" });
+    // Production needs an https APP_ORIGIN (matching Origin) and a sign-in allowlist, so the session and
+    // CSRF checks pass and the demo route itself is what refuses.
+    const prodOrigin = "https://app.example.com";
+    const prod = createTestEnv({ ENVIRONMENT: "production", DEMO_MODE: "true", APP_ORIGIN: prodOrigin, ALLOWED_EMAIL_DOMAINS: "example.com" });
     const u = await seedUser(prod);
-    const demo = await app.request("/api/demo/seed", { method: "POST", headers: { ...authHeaders(u.sessionToken, u.csrfToken), Cookie: `__Host-okara_session=${u.sessionToken}` } }, prod);
+    const me = await app.request(`${prodOrigin}/api/me`, { headers: { Cookie: `__Host-okara_session=${u.sessionToken}` } }, prod);
+    expect(me.status).toBe(200);
+    const demo = await app.request(`${prodOrigin}/api/demo/seed`, { method: "POST", headers: { ...authHeaders(u.sessionToken, u.csrfToken, prodOrigin), Cookie: `__Host-okara_session=${u.sessionToken}` } }, prod);
     expect(demo.status).toBe(404);
   });
 });

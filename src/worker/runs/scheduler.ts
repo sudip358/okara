@@ -23,6 +23,9 @@ export const DISPATCH_LIMIT_PER_TICK = 25;
 /** Bound (project, agent) pairs examined per tick (about 6 D1 queries each; the Worker caps queries per invocation). */
 export const DISPATCH_EXAMINE_PER_TICK = 60;
 
+/** Base32 id alphabet (lib/ids.ts), in sort order: the per-tick rotation pivots over it. */
+const ROTATION_ALPHABET = "234567abcdefghijklmnopqrstuvwxyz";
+
 export const scheduleKey = (projectId: string, agent: AgentKind, now: Date) => `${projectId}:${agent}:${utcDay(now)}`;
 
 export interface DispatchOptions {
@@ -51,15 +54,26 @@ export async function dispatchDueRuns(env: Env, now: Date, opts: DispatchOptions
   // Only (project, agent) pairs still due today: no run for today's key yet, or a pending run nobody has
   // claimed (it was locked on an earlier tick). Pairs never tried come first, so a locked tail cannot
   // starve them; the LIMIT caps pairs examined (and so D1 queries) per tick, not only runs started.
+  // Locked retries are rotated per tick: they are bucketed by a random character of the project id
+  // (ids are random base32), and the bucket that goes first advances with the tick's minute, so when more
+  // than the LIMIT stay locked a different slice is re-examined each tick instead of always the lowest ids.
+  // The agent list comes from AGENTS, so a new agent is scheduled without touching this SQL.
+  const agentsSql = AGENTS.map(() => "SELECT ? AS agent").join(" UNION ALL ");
+  const pivot = ROTATION_ALPHABET[Math.floor(now.getTime() / 60_000) % ROTATION_ALPHABET.length]!;
   const due = await db.all<{ id: string; workspace_id: string; agent: AgentKind }>(
     `SELECT p.id, p.workspace_id, a.agent FROM projects p
-       CROSS JOIN (SELECT 'seo' AS agent UNION ALL SELECT 'geo') a
+       CROSS JOIN (${agentsSql}) a
        LEFT JOIN agent_runs r ON r.idempotency_key = p.id || ':' || a.agent || ':' || ? AND r.project_id = p.id
       WHERE p.schedule_enabled = 1 AND p.is_demo = 0
         AND (r.id IS NULL OR (r.status = 'pending' AND r.workflow_instance_id IS NULL))
-      ORDER BY (r.id IS NOT NULL), p.id, a.agent
+      ORDER BY (r.id IS NOT NULL),
+               CASE WHEN r.id IS NULL OR substr(p.id, -2, 1) >= ? THEN 0 ELSE 1 END,
+               CASE WHEN r.id IS NULL THEN '' ELSE substr(p.id, -2, 1) END,
+               p.id, a.agent
       LIMIT ?`,
+    ...AGENTS,
     utcDay(now),
+    pivot,
     opts.examineLimit ?? DISPATCH_EXAMINE_PER_TICK,
   );
   for (const p of due) {
@@ -128,10 +142,24 @@ export const ORPHANED_MANUAL_RUN_SECONDS = 10 * 60;
 /** A reservation still 'reserved' after this long, with no active run, was stranded by a killed attempt. */
 export const STALE_RESERVATION_SECONDS = 60 * 60;
 
+/**
+ * Resources whose reservation stands for an external, possibly billed provider call. A stranded
+ * reservation of these may mean the call was sent (the attempt died while it was in flight), so the
+ * sweep marks it 'unknown' and leaves the counters as they are, like Budget.markUnknown (runs/budget.ts).
+ */
+export const SPEND_RESOURCES = ["usd_micros", "provider_calls", "jev_calls", "writer_tokens"] as const;
+/** Internal quota resources (no external spend): a stranded reservation is released and its amount returned. */
+export const QUOTA_RESOURCES = ["crawl_pages", "gsc_rows", "geo_prompts"] as const;
+
 export interface OrphanSweepResult {
   manualRunsRemoved: number;
+  /** Stale quota reservations released (amount returned to the counters). */
   reservationsReleased: number;
+  /** Stale spend reservations marked 'unknown' (still counted, conservatively). */
+  reservationsMarkedUnknown: number;
 }
+
+const inList = (xs: readonly string[]) => xs.map((x) => `'${x}'`).join(", ");
 
 /**
  * Cron-tick cleanup of work stranded by a request or step attempt that died midway (called from the
@@ -140,9 +168,13 @@ export interface OrphanSweepResult {
  *   claiming it) are deleted, as the route does for a run that could not take the lock, so they do not
  *   stay pending forever or use up the manual-run quota. They never started, so there is no history.
  * - Budget reservations left 'reserved' (never settled, released or marked unknown) by a killed step
- *   attempt, older than STALE_RESERVATION_SECONDS and not owned by a pending/running run, are released
- *   and their amounts returned to the project and global counters, so they stop blocking later runs.
- *   Both statements run in one D1 batch (a transaction), so a reservation is released at most once.
+ *   attempt, older than STALE_RESERVATION_SECONDS and not owned by a pending/running run:
+ *   - spend resources (SPEND_RESOURCES) become 'unknown' with the counters untouched: the provider call
+ *     may have happened and been billed, so it stays counted (the markUnknown contract);
+ *   - quota resources (QUOTA_RESOURCES) are released and their amounts returned to the project and
+ *     global counters, so they stop blocking later runs. Only counter rows for (scope, day, resource)
+ *     keys that hold such stale rows are touched (idx_resv_reserved_key, migration 0006).
+ *   All statements run in one D1 batch (a transaction), so a reservation is released at most once.
  */
 export async function sweepOrphans(env: Env, now: Date): Promise<OrphanSweepResult> {
   const db = new Db(env.DB);
@@ -154,21 +186,51 @@ export async function sweepOrphans(env: Env, now: Date): Promise<OrphanSweepResu
   const cutoff = iso(addSeconds(now, -STALE_RESERVATION_SECONDS));
   const stale = (t: string) => `${t}.status = 'reserved' AND ${t}.created_at < ?
       AND (${t}.run_id IS NULL OR NOT EXISTS (SELECT 1 FROM agent_runs a WHERE a.id = ${t}.run_id AND a.status IN ('pending', 'running')))`;
-  const found = await db.first<{ n: number }>(`SELECT COUNT(*) AS n FROM usage_reservations r WHERE ${stale("r")}`, cutoff);
-  if (!found?.n) return { manualRunsRemoved: manual.changes, reservationsReleased: 0 };
-  await db.batch([
-    [
+  const quota = inList(QUOTA_RESOURCES);
+  const spend = inList(SPEND_RESOURCES);
+  const found = await db.first<{ q: number | null; s: number | null }>(
+    `SELECT SUM(r.resource IN (${quota})) AS q, SUM(r.resource IN (${spend})) AS s FROM usage_reservations r WHERE ${stale("r")}`,
+    cutoff,
+  );
+  const q = found?.q ?? 0;
+  const sp = found?.s ?? 0;
+  const result = { manualRunsRemoved: manual.changes, reservationsReleased: 0, reservationsMarkedUnknown: 0 };
+  if (!q && !sp) return result;
+  const stamp = iso(now);
+  const stmts: Array<[string, ...unknown[]]> = [];
+  if (q) {
+    stmts.push([
+      // Outer scan limited to the days holding stale quota rows (usage_counters' primary key starts with
+      // scope_key, so the day filter plus EXISTS keeps it to the affected keys, not the whole history).
       `UPDATE usage_counters
           SET used = MAX(0, used - (SELECT COALESCE(SUM(r.amount), 0) FROM usage_reservations r
                                      WHERE r.scope_key = usage_counters.scope_key AND r.day = usage_counters.day
                                        AND r.resource = usage_counters.resource AND ${stale("r")}))
-        WHERE EXISTS (SELECT 1 FROM usage_reservations r
+        WHERE usage_counters.resource IN (${quota})
+          AND usage_counters.day IN (SELECT DISTINCT d.day FROM usage_reservations d
+                                      WHERE d.status = 'reserved' AND d.created_at < ? AND d.resource IN (${quota}))
+          AND EXISTS (SELECT 1 FROM usage_reservations r
                        WHERE r.scope_key = usage_counters.scope_key AND r.day = usage_counters.day
                          AND r.resource = usage_counters.resource AND ${stale("r")})`,
       cutoff,
       cutoff,
-    ],
-    [`UPDATE usage_reservations SET status = 'released', settled_amount = 0, updated_at = ? WHERE ${stale("usage_reservations")}`, iso(now), cutoff],
-  ]);
-  return { manualRunsRemoved: manual.changes, reservationsReleased: found.n };
+      cutoff,
+    ]);
+    stmts.push([
+      `UPDATE usage_reservations SET status = 'released', settled_amount = 0, updated_at = ?
+        WHERE usage_reservations.resource IN (${quota}) AND ${stale("usage_reservations")}`,
+      stamp,
+      cutoff,
+    ]);
+  }
+  if (sp) {
+    stmts.push([
+      `UPDATE usage_reservations SET status = 'unknown', updated_at = ?
+        WHERE usage_reservations.resource IN (${spend}) AND ${stale("usage_reservations")}`,
+      stamp,
+      cutoff,
+    ]);
+  }
+  await db.batch(stmts);
+  return { ...result, reservationsReleased: q, reservationsMarkedUnknown: sp };
 }

@@ -152,9 +152,11 @@ describe("OpenAI-compatible writer headroom (L15)", () => {
 
   it("adds reasoning headroom and sends reasoning_effort only when configured", () => {
     const body = buildOpenAiRequest("m", req);
-    expect(body.max_completion_tokens).toBe(1500 + OPENAI_REASONING_HEADROOM_TOKENS);
+    expect(body.max_completion_tokens).toBe(1500); // no headroom unless reasoning is configured
     expect(body).not.toHaveProperty("reasoning_effort");
-    expect(buildOpenAiRequest("m", req, "low").reasoning_effort).toBe("low");
+    const reasoning = buildOpenAiRequest("m", req, "low");
+    expect(reasoning.reasoning_effort).toBe("low");
+    expect(reasoning.max_completion_tokens).toBe(1500 + OPENAI_REASONING_HEADROOM_TOKENS);
     expect(parseReasoningEffort(" LOW ")).toBe("low");
     expect(parseReasoningEffort("turbo")).toBeNull();
     expect(parseReasoningEffort(undefined)).toBeNull();

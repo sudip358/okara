@@ -42,7 +42,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const load = useCallback(async () => {
     try {
       const m = await api<Me>("/me");
-      setCsrfToken(m.csrfToken);
+      setCsrfToken(m.csrfToken, m.user.id);
       setMe(m);
       setStatus("authenticated");
       setError(null);

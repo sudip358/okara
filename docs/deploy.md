@@ -96,16 +96,28 @@ need more than 10 ms of CPU per step, so agent runs will fail on the free plan. 
    | `TYPESAFE_MODEL` | Jev model alias, default `jev-latest` |
    | `WRITER_PROVIDER`, `WRITER_MODEL` | `anthropic` or `openai_compatible`, plus an exact model id |
    | `WRITER_BASE_URL` | Required for `openai_compatible` (https only), e.g. `https://api.openai.com/v1` |
-   | `WRITER_REASONING_EFFORT` | Optional, `openai_compatible` reasoning models only (`low`, `medium`, ...) |
+   | `WRITER_REASONING_EFFORT` | Optional, `openai_compatible` reasoning models only: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`, sent as `reasoning_effort`. Unset: not sent. Any other value makes the writer `setup_required` with the value named. |
+   | `WRITER_REASONING_HEADROOM_TOKENS` | Optional, `openai_compatible` only: extra `max_completion_tokens` added to each answer budget for reasoning tokens, and reserved in `writer_tokens`. Default 0 when `WRITER_REASONING_EFFORT` is unset, 4000 when it is set. Whole number 0-100000. |
+   | `GEMINI_THINKING_LEVEL` | Optional override for Gemini `thinkingLevel`: `MINIMAL`, `LOW`, `MEDIUM`, `HIGH` (sent for any model id) or `OFF` (never sent). Unset: `LOW` for Gemini 3+ ids and the `gemini-flash-latest` / `gemini-pro-latest` aliases, nothing for older models (where the parameter is an API error). Unrecognised values fall back to the default. |
    | `ALLOWED_EMAILS`, `ALLOWED_EMAIL_DOMAINS` | Sign-in allowlist, comma-separated, case-insensitive, verified Google emails only. **In production nobody can sign in until at least one is set** (`?authError=signup_closed`); other emails get `not_allowed`. Example: `ALLOWED_EMAIL_DOMAINS=example.com` |
    | `GLOBAL_USD_MICROS_PER_DAY` | Priced GEO spend per UTC day across all projects on the operator Gemini/Perplexity keys (default 2,000,000 = $2.00) |
    | `GLOBAL_JEV_CALLS_PER_DAY` | Jev calls per UTC day across all projects on the operator TypeSafe key (default 2,000) |
    | `GLOBAL_PROVIDER_CALLS_PER_DAY` | Provider calls per UTC day across all projects on any operator key (default 3,000) |
    | `GLOBAL_WRITER_TOKENS_PER_DAY` | Writer tokens per UTC day across all projects on the operator writer key (default 1,000,000) |
 
-   The `GLOBAL_*` values in `wrangler.jsonc` are the code defaults (`src/worker/runs/budget.ts`); set them
-   from your real budget. Workspaces using their own keys are bounded only by their project limits
+   The `GLOBAL_*` values in `wrangler.jsonc` are the code defaults (`src/worker/runs/budget.ts`: 2000000,
+   2000, 3000 and 1000000); set them from your real budget. An empty value also means the default. Workspaces using their own keys are bounded only by their project limits
    (`docs/limits-and-costs.md`).
+
+   **Upgrading an existing deployment (Gemini cohorts reset once).** This release sends Gemini
+   `maxOutputTokens` 8192 (was 4096) and, for Gemini 3+ models, `thinkingLevel` `LOW`. Both are part of the GEO
+   cohort key, so the first run after the upgrade starts a new observation series for Gemini, and trends
+   restart from that run. Earlier observations stay stored under the old cohort. Changing
+   `GEMINI_THINKING_LEVEL` later starts another cohort in the same way. Perplexity cohorts are unchanged.
+
+   **Removing a project or disconnecting Search Console** deletes the locally stored Google token only. The
+   app does not call Google's revoke endpoint, because that would end the grant for every project connected
+   with the same Google account. To revoke access at Google, remove the app at myaccount.google.com.
 
 4. **Database**
    ```sh
