@@ -26,6 +26,9 @@
     "WRITER_MODEL": ""
   },
   "observability": { "enabled": true }
+  // Workers Paid only (the free plan allows 10 ms CPU per request/cron/Workflow step and 50 external
+  // subrequests per invocation, which agent runs exceed). Uncomment after upgrading:
+  // ,"limits": { "cpu_ms": 60000, "subrequests": 2000 }
   // Secrets (wrangler secret put): GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, TOKEN_ENCRYPTION_KEY_V1,
   // SESSION_SECRET, and optional operator keys TYPESAFE_API_KEY, GEMINI_API_KEY, PERPLEXITY_API_KEY, WRITER_API_KEY.
 }
