@@ -41,8 +41,8 @@ export interface Judgment {
 }
 
 export class DecisionCallError extends Error {
-  constructor(message: string, public readonly cause?: unknown) {
-    super(message);
+  constructor(message: string, cause?: unknown) {
+    super(message, { cause });
   }
 }
 

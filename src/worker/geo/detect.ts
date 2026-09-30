@@ -125,7 +125,12 @@ function boundaryOk(norm: string, start: number, end: number, alias: string): bo
   const first = codePointAt(alias, 0);
   const last = codePointBefore(alias, alias.length);
   if (isSpacedWordChar(first) && isSpacedWordChar(codePointBefore(norm, start))) return false;
-  if (isSpacedWordChar(last) && isSpacedWordChar(codePointAt(norm, end))) return false;
+  if (isSpacedWordChar(last) && isSpacedWordChar(codePointAt(norm, end))) {
+    // Possessive/genitive "s" without apostrophe (German "Residence Examples Griffe"): allowed for
+    // Latin aliases of 3+ characters when the word ends right after the "s". The span excludes the "s".
+    const genitive = /[a-z]/.test(last ?? "") && [...alias].length >= 3 && norm[end] === "s" && !isSpacedWordChar(codePointAt(norm, end + 1));
+    if (!genitive) return false;
+  }
   return true;
 }
 

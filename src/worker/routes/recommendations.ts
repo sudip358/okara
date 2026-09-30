@@ -19,7 +19,8 @@ import type {
   RecommendationDetail,
   RecommendationStatus,
 } from "@shared/types";
-import { requireUser, type AppEnv } from "../app";
+import type { AppEnv } from "../app";
+import { requireUser } from "../platform/require-user";
 import type { Db } from "../lib/db";
 import { parseJson } from "../lib/db";
 import { badRequest, conflict, notFound } from "../lib/errors";
@@ -190,7 +191,7 @@ async function detail(db: Db, r: RecRow): Promise<RecommendationDetail> {
   );
   const events = await db.all<{ event: string; note: string | null; user_id: string | null; created_at: string }>(
     `SELECT event, note, user_id, created_at FROM recommendation_events
-      WHERE workspace_id = ? AND project_id = ? AND recommendation_id = ? ORDER BY created_at, id`,
+      WHERE workspace_id = ? AND project_id = ? AND recommendation_id = ? ORDER BY created_at, rowid`,
     r.workspace_id,
     r.project_id,
     r.id,
@@ -387,7 +388,7 @@ recommendationRoutes.get("/projects/:pid/attention", async (c) => {
   }
   const events = await db.all(
     `SELECT e.*, r.agent FROM run_events e JOIN agent_runs r ON r.id = e.run_id
-      WHERE e.workspace_id = ? AND e.project_id = ? ORDER BY e.created_at DESC, e.id DESC LIMIT 20`,
+      WHERE e.workspace_id = ? AND e.project_id = ? ORDER BY e.created_at DESC, e.rowid DESC LIMIT 20`,
     project.workspace_id,
     project.id,
   );

@@ -114,7 +114,7 @@ export async function syncGsc(ctx: RunContext, opts: SyncOptions = {}): Promise<
   );
 
   let requests = 0;
-  let outcome: Outcome = { kind: "ok" };
+  let outcome = { kind: "ok" } as Outcome;
   const query = async (req: Omit<GscQueryRequest, "property" | "dataState" | "type">): Promise<GscRow[] | null> => {
     if (outcome.kind !== "ok") return null;
     if (await ctx.isCancelled()) {

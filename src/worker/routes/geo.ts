@@ -15,7 +15,8 @@
  */
 import { Hono } from "hono";
 import { z } from "zod";
-import { type AppEnv, requireUser } from "../app";
+import type { AppEnv } from "../app";
+import { requireUser } from "../platform/require-user";
 import { badRequest, BudgetExceededError, HttpError, setupRequired } from "../lib/errors";
 import { requireProject } from "../platform/access";
 import { buildWriterForWorkspace } from "../runs/runtime";

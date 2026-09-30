@@ -8,7 +8,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../app";
-import { requireUser } from "../app";
+import { requireUser } from "../platform/require-user";
 import { badRequest, HttpError } from "../lib/errors";
 import { requireProject } from "../platform/access";
 import { CSV_MAX_BYTES, importGscCsv } from "../seo/gsc/csv";

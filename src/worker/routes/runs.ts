@@ -10,7 +10,8 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import type { AgentKind, DecisionRecord, RunDetail, RunEvent, UsageSummary } from "@shared/types";
-import { requireUser, type AppEnv } from "../app";
+import type { AppEnv } from "../app";
+import { requireUser } from "../platform/require-user";
 import type { Db } from "../lib/db";
 import { parseJson } from "../lib/db";
 import { badRequest, conflict, HttpError, notFound } from "../lib/errors";
@@ -95,7 +96,7 @@ export function createRunRoutes(deps: RunRouteDeps = {}) {
     const run = await loadRunForUser(db, user.id, c.req.param("id"));
     const events = await db.all(
       `SELECT e.*, r.agent FROM run_events e JOIN agent_runs r ON r.id = e.run_id
-        WHERE e.workspace_id = ? AND e.project_id = ? AND e.run_id = ? ORDER BY e.created_at, e.id`,
+        WHERE e.workspace_id = ? AND e.project_id = ? AND e.run_id = ? ORDER BY e.created_at, e.rowid`,
       run.workspace_id,
       run.project_id,
       run.id,
@@ -118,7 +119,7 @@ export function createRunRoutes(deps: RunRouteDeps = {}) {
     const parsed = manualRunBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw badRequest("Body must be {agent: 'seo' | 'geo'}.");
     const agent = parsed.data.agent;
-    if (project.is_demo === 1) throw badRequest("Demo projects show fixture data; runs are disabled.");
+    if (project.is_demo === 1) throw new HttpError(409, "demo_project", "Demo projects use fixture data; runs are disabled.");
 
     const day = utcDay(now);
     const used = await db.first<{ n: number }>(
