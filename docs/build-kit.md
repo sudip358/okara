@@ -6,9 +6,9 @@ Resources were checked on September 30, 2026. Re-check current official API cont
 
 | Section | Contents | Origin |
 |---|---|---|
-| 1 | Master implementation prompt | Original kit, completed and amended (amendments marked `[A1]`–`[A12]`) |
+| 1 | Master implementation prompt | Original kit, completed and amended (amendments marked `[A1]`–`[A20]`) |
 | 2 | Reusable prompts, decision definitions, and output schemas | Drafted for this kit; validate against fixtures before use |
-| 3 | Reference-product review (Okara video, Ryze video, Okara dashboard) | Review notes: what was adopted, what was rejected, and why |
+| 3 | Reference review (Okara video, Ryze video, Okara dashboard, two open-source Jev SEO repos) | Review notes: what was adopted, what was rejected, and why |
 | 4 | Resources | Official documentation links, verified reachable on September 30, 2026 |
 
 ---
@@ -55,6 +55,7 @@ Separate basic login consent from Search Console connection consent. For GSC req
 Encrypt persisted refresh tokens using Web Crypto AES-GCM with a server-side secret, unique random nonce, and a versioned envelope for key rotation. Never roll your own cryptographic algorithm.
 Start with workspaces and memberships; one owner per workspace is sufficient initially. Every project-scoped query and action must enforce authenticated workspace membership on the server. Do not trust workspace/project IDs supplied by the browser. Add cross-tenant tests for reading, updating, exporting, scheduling, and deleting resources.
 Implement CSRF/origin checks for state-changing requests, input limits, rate limits, security headers, and safe rendering of untrusted markdown/HTML.
+If users bring their own provider keys (Jev, GEO providers, SERP data), store them server-side in the same encrypted envelope as refresh tokens, scoped to the workspace; never in localStorage or other browser storage. Test keys with each provider's free non-inference call where one exists (for Jev, models.list()). Operator-owned keys are never spendable by unauthenticated visitors.
 
 PROJECT ONBOARDING
 User enters website, brand name, aliases, product description, audience, locale/language, competitor names/domains (up to five), site type (ecommerce | saas | publisher | local | other), and optional voice instructions. Build editable shared context from retrieved evidence; require user confirmation of inferred facts. Store context versions so decisions can be reproduced.
@@ -86,6 +87,7 @@ Save prompt-set version, prompt type, locale/language, provider, exact model ID,
 Collect the raw answer, provider-supplied citations/grounding metadata, usage, request ID, and grounding status. Preserve provider evidence rather than asking the writing model to invent citations. Handle incomplete or ungrounded answers explicitly.
 Display all measurements as 'API-sampled visibility', with provider/model labels. API responses are not proof of identical ChatGPT, Gemini, Claude, Perplexity consumer-app answers, Google AI Overview presence, all-user visibility, or market share. Do not label an OpenAI API call 'ChatGPT UI measurement'. Google AI Overviews is not a supported engine unless a real SERP data source is separately enabled and labelled as such.
 Grounding only runs when the provider supports/enables it. Show 'not grounded' if no actual grounding occurred; do not fabricate citations or treat a plain model response as a live search measurement.
+Never ask Jev or any model to predict how likely an engine is to cite a page; citation is measured from real grounded responses only. Detect brand citations by parsed hostname match against verified domains (including subdomains), not substring match on answer text. Self-reported answers and non-grounded model samples are never counted as measurements.
 Use deterministic alias/domain detection followed by optional Jev adjudication of ambiguous mentions. Store exact supporting text spans. Treat page titles, citations, raw user prompts, and response body as separate fields; a brand named only in the input is not a response mention.
 Distinguish any mention, positive recommendation, and citation to the brand's verified domain. Record actual list rank only for a real ordered recommendation list; otherwise use null. A provider citing a competitor does not prove it evaluated our website.
 Sentiment is specific to the passage about the brand: positive, neutral, negative, mixed, or unknown. For no mention, set sentiment not_applicable; for ambiguity use unknown. Do not classify the entire answer's tone as brand sentiment.
@@ -114,12 +116,49 @@ Use Choice, Score, and Noul only as documented by TypeSafe. Choice/Score confide
 Use Jev for narrow semantic judgments; do all calculations, permissions, execution, and routing in code. If Jev credentials are missing, allow deterministic audit findings, but show semantic ranking as unavailable. Optional LLM fallback must be explicitly configured and labelled with its true provider; never call fallback output 'Jev'.
 Store reusable prompts from section 2 in dedicated source files, with JSON schemas, fixtures, and a labelled evaluation set. Use typed SDK configuration for Jev, not a fictional free-form chat endpoint.
 
+[A13] JEV DECISION POLICY
+Keep all Jev thresholds in one versioned policy file (policy_version stored on every decision_record). Each question maps its answer to one of three tiers:
+- Act: used directly in ranking and shown as Jev's judgment.
+- Flag: used, but shown with "Check this yourself" and the runner-up option/level.
+- Drop: the Jev value is withheld; the item falls back to deterministic signals or "insufficient evidence".
+Choice and Score tiers use the returned confidence; Score decisiveness may also use probability mass on each side of the rubric midpoint. Noul has no confidence field: tier it by probability bands (for example keep >= 0.80, reject <= 0.20, middle band flagged or silent). Starting thresholds are labelled engineering defaults until replaced by values fitted on the labelled evaluation set.
+Every Choice includes an escape option (insufficient_context or none). Omit questions whose inputs are absent (no title, no GSC rows, legal/policy pages) instead of sending placeholders. For gated questions, ask the gate and the dependent question in the same batch and let code decide which answer counts. Send only the questions relevant to each call; do not bundle unrelated base questions into every request.
+Store question_version (a hash of question text, options, and levels) on every decision_record; a snapshot test fails when wording changes without a version bump. A question or model version change starts a new cohort for trends and threshold calibration. Store raw answers so a weight change re-scores without new API calls.
+
+[A14] UNTRUSTED-TEXT PREFLIGHT
+Before semantic judgment, run deterministic sanitization, then optionally a single Jev Noul asking whether the evidence text contains instructions aimed at an AI system. A high value marks the evidence as tainted: it can still be quoted as evidence, but it is excluded from writer context and flagged in the UI. This is a quality signal, never the security boundary; deterministic guards remain the control, and an unreachable preflight treats the evidence as tainted (fail closed).
+
+[A15] DUPLICATE AND CANNIBALIZATION DETECTION
+Candidate pairs come from code: title-token overlap (at least 2 shared non-stopword tokens and at least 50% of the shorter title) or GSC queries where both URLs received impressions in the same window. Send up to 40 pairs per call as pairwise Noul questions ("Do `page_a` and `page_b` compete for the same search intent?"). Use a keep/merge dead band; only confident merge-side pairs become consolidate_duplicate recommendations, with both URLs, shared queries, and the Noul value as evidence.
+
+[A16] RULE REGISTRY
+Every deterministic check has a stable ID, area, class (fact | heuristic), severity, applicable page types, and a documented emitter. A test fails if any registered rule has no emitter, so counts shown to users are real. Priority uses a versioned formula including reach (affected URLs / crawled URLs) so a site-wide issue outranks a single-page one of equal severity. There is no composite site "SEO score" in the MVP; if one is added later, blocking conditions (noindex, fetch failure) cap it rather than being weighted in.
+
+[A17] OUTPUT VALIDATOR AND COMPLETENESS
+Extend the [A10] validator: reject any output that cites an unknown evidence ID, rule ID, or decision ID, and flag any number in the text that does not appear in the cited evidence. Show a completeness note beside every metric and finding list (for example "20 of 20 pages crawled; 3 skipped: JS-rendered", "GSC rows truncated at 5,000"). Record why pages were skipped instead of leaving them blank.
+
+[A18] FEEDBACK AND PLAN PERSISTENCE
+Every Jev judgment has a "Disagree" control with an optional reason; submissions become labelled rows for the evaluation set (question_version, model, state hash, Jev answer, human answer). Reruns never wipe recommendation status: dismissed, approved, and implemented items persist and feed the dedup rule.
+
+[A19] AI CRAWLER ACCESS CHECK
+Report, as advisory findings only: /llms.txt presence and basic shape, and robots.txt groups for AI crawlers split into answer/search crawlers and training crawlers, using user-agent tokens taken from each vendor's current documentation (stored in a versioned list with source URLs). Never claim llms.txt or robots settings cause citations. Blocking training crawlers is a business choice, not a defect; only blocking answer/search crawlers the user wants to be cited by is flagged.
+
+[A20] CRAWLER HARDENING (in addition to the SSRF rules above)
+- robots.txt, sitemap, and sitemap-index fetches go through the same SSRF guard, timeouts, and size caps as page fetches. Sitemap URLs and index children must be on the verified host.
+- The user-agent string used for robots matching is the one used for fetching.
+- Follow RFC 9309: select the most specific matching group only (do not union with *), and support * and $ patterns. Honor crawl-delay.
+- Use redirect: "manual", re-validate every hop, and cap hops.
+- Stream response bodies and abort when the size cap is exceeded, instead of reading the full body first.
+- Never scrape search engines or spoof browser user agents. Paid SERP providers fail visibly, never silently falling back to another source.
+
+
 [A10] PRODUCT FACTS AND REGULATED CLAIMS
 Writing output may only state product specifications, certifications (for example UL/ETL listing, damp/wet rating), compatibility (for example dimmer or bulb type), dimensions, finishes, materials, lead times, pricing, and warranty terms that exist in stored project evidence. Missing facts become "[confirm: ...]" placeholders. Health, safety, legal, and financial claims require explicit human review and are never auto-generated. A validator rejects drafts containing numeric specs or certification terms not present in cited evidence.
 
 DATA MODEL
 Create migrations for users, sessions, workspaces, memberships, projects, context_versions, oauth_connections, crawl_runs, pages/page_snapshots, gsc_syncs, gsc_metrics, agent_runs, run_events, evidence, decision_records, recommendations, recommendation_events, geo_prompt_sets, geo_prompts, geo_observations, geo_brand_observations, geo_citations, geo_search_queries, geo_displacements, provider_calls, usage_reservations, and project_limits. Combine tables where justified; do not overengineer prematurely.
 All tenant data must be project/workspace scoped with foreign keys and useful indexes. Store compact extracted page evidence, not unlimited raw HTML. Raw answers need configured size/retention limits and safe rendering. Store exact metric windows, cohort keys, hashes, and timestamps.
+Every tenant table carries workspace_id or is reachable only through a scoped foreign key, and every query filters by it (not just the parent table). Caches of paid third-party data are keyed per workspace unless explicitly documented as shared-safe, and are checked after credential and budget validation.
 decision_records stores every candidate considered per run, including rejected ones, with a reason code (low_fit | duplicate | insufficient_evidence | budget | dismissed_recently | out_of_scope).
 Write daily reports/history to D1 so they survive free Workflow retention. Add project export/deletion, integration disconnect, and retention cleanup. Document what financial/audit metadata is retained.
 
@@ -162,9 +201,9 @@ DELIVERY PROCESS
 First create CLAUDE.md, docs/architecture.md, docs/provider-contracts.md, docs/limits-and-costs.md, and a TASKS.md checklist. Explain the proposed first vertical slice and any essential blockers. Then implement in small milestones; do not spend the whole response merely planning.
 Milestone 1: scaffold, D1 migrations, local labelled fixtures, tenancy/auth skeleton, onboarding, and deterministic audit slice.
 Milestone 2: complete secure real authentication, GSC OAuth/import, verified crawling, page-type classification, evidence storage, and SEO dashboard.
-Milestone 3: real Jev adapter, SEO prioritization, real writing adapter with the product-fact validator, validated recommendations (page and template scope), approval queue, and decision log.
-Milestone 4: one real grounded GEO adapter, versioned prompt sets, entity/sentiment analysis, displacement evidence, engine search-query capture where exposed, reproducible metrics, and trends.
-Milestone 5: second GEO adapter if credentials available, GEO-to-SEO query bridge, side-by-side gap diagnostic, scheduling, usage caps, retries, security review, deployment config, benchmark harness, and tests.
+Milestone 3: real Jev adapter with the versioned decision policy [A13] and preflight [A14], rule registry [A16], duplicate detection [A15], SEO prioritization, real writing adapter with the product-fact validator, validated recommendations (page and template scope), approval queue, and decision log.
+Milestone 4: one real grounded GEO adapter, versioned prompt sets, entity/sentiment analysis, displacement evidence, engine search-query capture where exposed, reproducible metrics, feedback controls [A18], and trends.
+Milestone 5: second GEO adapter if credentials available, GEO-to-SEO query bridge, side-by-side gap diagnostic, AI crawler access check [A19], scheduling, usage caps, retries, security review, deployment config, benchmark harness, and tests.
 Use parallel subagents/worktrees only for independent modules with agreed interfaces. Run tests/build after each milestone and fix failures. Avoid destructive git commands and committing secrets. Keep decisions/blockers recorded so another Claude session can resume.
 
 ACCEPTANCE TESTS
@@ -187,6 +226,15 @@ ACCEPTANCE TESTS
 - [A10] A draft containing a certification or numeric spec absent from evidence is rejected by the validator; missing facts appear as "[confirm: ...]".
 - [A11] No UI route renders a projected outcome value.
 - [A5] The benchmark harness produces latency p50/p95, cost per run, and evaluator agreement for the labelled set; no speed/cost claim exists without it.
+- [A13] A Choice answer below the Flag threshold renders with "Check this yourself" and the runner-up; below Drop, no Jev value is shown. A Noul answer never reads a confidence field. Changing question text without bumping question_version fails the snapshot test.
+- [A14] A crawled page containing "ignore previous instructions" text is marked tainted and excluded from writer context; with Jev unreachable, it is also marked tainted.
+- [A15] Two near-duplicate product pages sharing GSC queries produce one consolidate_duplicate recommendation; a middle-band pair produces none.
+- [A16] Every registered rule has an emitter (registry test); a site-wide missing-canonical issue outranks a single-page one of equal severity.
+- [A17] Output citing an unknown evidence ID, or containing a number absent from evidence, is rejected or flagged; completeness notes render beside metrics.
+- [A18] A dismissed recommendation stays dismissed after a rerun; a "Disagree" submission creates a labelled row.
+- [A19] A robots.txt blocking only training crawlers produces no defect finding.
+- [A20] A Sitemap: line or sitemap-index child pointing to a private, metadata, IPv6 ULA, or v4-mapped address is refused; a redirect to a private IP is refused at that hop; an oversized body is aborted mid-stream; robots group selection matches RFC 9309 examples.
+- A user-supplied provider key is never returned to the browser after saving, and an unauthenticated request cannot spend an operator key.
 ```
 
 ---
@@ -219,10 +267,11 @@ Authoring rules (taken from working open-source Jev integrations; see section 3.
 | ID | Primitive | Question | Options / rubric | Input state |
 |---|---|---|---|---|
 | `seo.query_page_relevance` | Noul | Is this search query a good match for the primary topic of this page? | yes-probability | Query, page title, H1, first 300 characters of main text, page type |
-| `seo.query_intent` | Choice | What is the dominant intent of this search query? | `informational`, `commercial_investigation`, `transactional`, `navigational`, `local` | Query, locale, site type |
-| `seo.intent_page_fit` | Choice | Does this page type serve this intent? | `fits`, `partial_fit`, `mismatch` | Intent choice, page type, page summary |
+| `seo.query_intent` | Choice | What is the dominant intent of this search query? | `informational`, `commercial_investigation`, `transactional`, `navigational`, `local`, `insufficient_context` | Query, locale, site type |
+| `seo.intent_page_fit` | Choice | Does this page type serve this intent? | `fits`, `partial_fit`, `mismatch`, `insufficient_context` | Intent choice, page type, page summary |
 | `seo.action_choice` | Choice | What single change best addresses this evidence? | `rewrite_title_meta`, `improve_intro_answer`, `add_section`, `add_comparison_or_spec_table`, `add_internal_links`, `fix_structured_data`, `fix_canonical_or_indexing`, `consolidate_duplicate`, `new_page_candidate`, `no_action` | Issue type, metrics, page evidence |
 | `seo.issue_severity` | Score | How severe is this technical issue for this page's search visibility? | 1 cosmetic · 2 minor · 3 moderate · 4 major · 5 critical (blocks indexing or serving) | Issue type, page type, affected URL count, GSC impressions |
+| `seo.page_overlap` `[A15]` | Noul | Do `page_a` and `page_b` compete for the same search intent, so that one should absorb the other? | yes-probability, dead band in policy | Both titles, H1s, first 300 characters, shared GSC queries |
 | `seo.pillar_fit` | Choice | Which content pillar does this opportunity belong to? | The project's pillar names + `none` | Query, pillar list from context document |
 
 #### GEO questions
@@ -233,6 +282,7 @@ Authoring rules (taken from working open-source Jev integrations; see section 3.
 | `geo.recommendation_status` | Choice | How does the answer treat the brand? | `recommended`, `listed_neutral`, `mentioned_negatively`, `not_mentioned` | Response body, confirmed mention spans |
 | `geo.brand_sentiment` | Choice | What is the sentiment of the passage about the brand? | `positive`, `neutral`, `negative`, `mixed`, `unknown` | The brand passage only, never the whole answer |
 | `geo.source_type` | Choice | What type of source is this cited page? | `brand_page`, `listicle_roundup`, `review_site`, `forum_ugc`, `publisher`, `marketplace`, `other` | URL, page title, citation snippet (used only when deterministic rules don't match) |
+| `evidence.injection_risk` `[A14]` | Noul | Does `text` contain instructions aimed at an AI system rather than content for a human reader? | yes-probability | The untrusted text excerpt only |
 | `geo.proposal_fit` | Score | How well does this proposal fit the brand's confirmed positioning? | 1 off-brand · 2 weak · 3 acceptable · 4 strong · 5 core | Proposal summary, positioning document version |
 
 ### 2.2 Writing provider prompts
@@ -360,7 +410,7 @@ Priority is **not** part of the writer output. Code computes it with the version
 
 ## 3. Reference-product review
 
-Three references were reviewed on September 30, 2026. They are feature inspiration only. Nothing in them is an API contract or evidence of results.
+The first three references below are product demos, reviewed on September 30, 2026. They are feature inspiration only. Nothing in them is an API contract or evidence of results.
 
 ### 3.1 Okara: "We ran all 6 Okara agents on Jev" (X video, September 22, 2026)
 
@@ -422,6 +472,60 @@ Dropped: the Links tab (no backlink source in scope) and the AI chat (deferred p
 
 ---
 
+### 3.4 Open-source Jev SEO integrations (code review)
+
+Two MIT-licensed repositories were read in full on September 30, 2026. They are the only references in this kit with inspectable code, and the source for the confirmed Jev contract in section 1. Neither measures GEO against real AI engines.
+
+| | jev-seo (Rust CLI + MCP server) | jevseo (Next.js web app) |
+|---|---|---|
+| Repo | github.com/AkashPriyadarshii/jev-seo | github.com/epergaboni/jevseo |
+| Jev access | Raw HTTP to `POST https://api.typesafe.ai/v1/systemone`, Bearer key, `jev-latest` | `@typesafe-ai/sdk` 0.6: `systemOne({ state, questions })`, `models.list()` key test |
+| Batching | About 19 questions per page in one call, plus an injection preflight | 24 judged dimensions plus intent in one call |
+| Confidence use | Act ≥ 0.80, Flag ≥ 0.45, else Drop; runner-up shown on Flag | "Check this yourself" below 0.55; probabilities stored but not shown |
+| Deterministic checks | Rule registry R01–R58 (14 rules have no emitter) | About 20 rules; pillar = 0.7 × judgments + 0.3 × rules |
+| GSC | Top 100 queries, window ends today, no pagination | Not used |
+| "GEO" | Heuristic score, llms.txt/robots check, one optional OpenAI-compatible call | Page-citability rubrics only; no engine calls |
+| Crawl safety | Private-IP blocking with per-hop redirect checks, but check-then-fetch (rebinding possible) | Hostname denylist only; robots/sitemap fetches bypass the guard (blind SSRF) |
+| Evaluation | Protocols written; labelled-set tables empty | No calibration set; Jev/crawl/SERP modules excluded from coverage |
+
+**Adopted into section 1:**
+
+| Pattern | Source | Amendment |
+|---|---|---|
+| Act / Flag / Drop tiers in one versioned policy file, runner-up on Flag, Score decisiveness by probability mass | jev-seo | `[A13]` |
+| Escape option in every Choice; omit questions with absent inputs; gate + dependent question in one batch | both | `[A13]` |
+| `QUESTION_VERSION` with a snapshot test; store raw answers for re-scoring | both | `[A13]` |
+| Descriptive rubric levels, state referenced by backticked path, one judgment per question | jevseo (CONTRIBUTING.md) | Section 2.1 authoring rules |
+| Injection-risk Noul preflight (as a quality signal only) | jev-seo | `[A14]` |
+| Title-token prefilter + pairwise Noul for overlapping pages, with a dead band | both | `[A15]` |
+| Stable rule IDs with fact/heuristic class and reach-weighted priority | jev-seo | `[A16]` |
+| Report validator that rejects unknown IDs; completeness notes | jev-seo | `[A17]` |
+| "Disagree with this judgment" feeding the labelled set (from jevseo's miscalibration issue template) | jevseo | `[A18]` |
+| AI-crawler access check split into answer/search vs training bots | jev-seo | `[A19]` |
+| Budget reservation before dispatch; every attempt counted | jev-seo | Already in section 1 (budgets), made atomic |
+
+**Explicitly avoided (and why):**
+
+| Pattern seen | Problem | Kit rule |
+|---|---|---|
+| Jev asked to "rate citation likelihood for Perplexity, SearchGPT, Gemini" | A model cannot know this; it's a prediction presented as a measurement | GEO: never predict citation likelihood |
+| Citation = host substring in answer text; self-reported answers; non-grounded samples | Not a real measurement | GEO: parsed hostname match, grounded only |
+| Parsing Perplexity's top-level `citations` | Field removed; use `search_results` | Section 4 note |
+| Noul treated as having a confidence field (every Noul flagged) | Contract misuse | `[A13]` |
+| Non-atomic budget reservation; failed/timed-out calls charged $0 | Overspend risk | Budgets: atomic, conservative accounting |
+| GSC window ending today, rowLimit 100, no startRow; gap = impressions × position | Unfinalized data, truncation, unbounded noisy scores | SEO: finalized 28-day windows, pagination, versioned formula |
+| DuckDuckGo scraping with a spoofed user agent; silent fallback from paid SERP | Terms/robots risk; hidden provenance change | `[A20]` |
+| Hostname-only SSRF denylist; robots/sitemap fetches outside the guard; `redirect: "follow"`; full body read before cap | SSRF and memory risk | `[A20]` + SSRF rules |
+| Robots `*` group unioned with the agent group; UA mismatch between robots and fetch | RFC 9309 violation | `[A20]` |
+| No auth, single "local" owner, `ownerId` only on the parent table, shared SERP cache | Cross-tenant exposure | Tenancy + data-model rules |
+| BYO keys in localStorage; operator key spendable by anonymous visitors | XSS key theft; cost abuse | Auth: server-side encrypted keys |
+| Jev as the security gate for file/URL access | Model output is not an access control | `[A14]`: deterministic guards are the control |
+| Jev "opportunity" (predicted gain) shown to users | Projection | `[A11]`: internal ranking signal only |
+| Rules counted in "58-rule audit" that never fire | Inflated claims | `[A16]` registry test |
+| Speed/cost claims without a harness ("£0.0001 per page", "12× cheaper") | Unbenchmarked | `[A5]` |
+
+---
+
 ## 4. Resources
 
 All links returned HTTP 200 on September 30, 2026. Official documentation is authoritative. Third-party guides are marked as such.
@@ -479,3 +583,7 @@ All links returned HTTP 200 on September 30, 2026. Official documentation is aut
 - Okara: https://okara.ai
 - Okara Jev video post: https://x.com/askokara/status/2102319722671047139
 - Ryze AI Jev video post: https://x.com/irabukht/status/2101090579127951694
+
+### Open-source Jev integrations (code reference, MIT)
+- jev-seo (Rust CLI + MCP server): https://github.com/AkashPriyadarshii/jev-seo
+- jevseo (Next.js app; see CONTRIBUTING.md for rubric-writing rules): https://github.com/epergaboni/jevseo
