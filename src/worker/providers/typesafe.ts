@@ -60,7 +60,8 @@ export function createTypeSafeProvider(cfg: TypeSafeProviderConfig): DecisionPro
     const observed: Fetch = async (input, init) => {
       const started = Date.now();
       try {
-        const res = await cfg.fetchImpl(input, init);
+        const fetchImpl = cfg.fetchImpl; // no receiver: safe for the platform fetch on workerd
+        const res = await fetchImpl(input, init);
         attempts.push({ status: res.status, requestId: res.headers.get("x-typesafe-request-id"), latencyMs: Date.now() - started, error: res.ok ? null : `HTTP ${res.status}` });
         return res;
       } catch (e) {

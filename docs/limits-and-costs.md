@@ -22,8 +22,8 @@ Per project (`project_limits`, editable within bounds via `PUT /projects/:pid/li
 Global: `GLOBAL_USD_MICROS_PER_DAY` (default 2,000,000 = $2.00/day) across all projects, checked for every
 `usd_micros` reservation.
 
-Other hard caps: 0-2 new recommendations per agent per project per day; manual runs 3 per project per day
-(HTTP 429 `quota_exceeded`); one active run per project and agent (lock TTL 60 minutes); at most 25 runs
+Other hard caps: 0-2 new recommendations per agent per project per day; manual runs 3 per project per UTC day
+(HTTP 429 `quota_exceeded`; one conditional INSERT, so concurrent requests cannot exceed it); one active run per project and agent (lock TTL 60 minutes); at most 25 runs
 started per cron tick; Jev 12 s timeout per attempt with 2 retries; writers 90 s timeout per attempt with 2
 retries; GEO raw answers capped at 20,000 characters; evidence text capped at 600 characters.
 

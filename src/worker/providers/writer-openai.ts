@@ -109,7 +109,8 @@ export function createOpenAiCompatibleWriter(cfg: OpenAiWriterConfig): WritingPr
     /** Free check: GET {base}/models (no inference). */
     async test() {
       try {
-        const res = await cfg.fetchImpl(`${base}/models`, { method: "GET", headers: { Authorization: `Bearer ${cfg.apiKey}` } });
+        const fetchImpl = cfg.fetchImpl;
+        const res = await fetchImpl(`${base}/models`, { method: "GET", headers: { Authorization: `Bearer ${cfg.apiKey}` } });
         if (res.ok) return { ok: true, detail: "Key accepted by the OpenAI-compatible endpoint." };
         if (res.status === 401 || res.status === 403) return { ok: false, detail: "Key rejected by the writer endpoint." };
         return { ok: false, detail: `Writer endpoint returned HTTP ${res.status}.` };

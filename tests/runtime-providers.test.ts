@@ -11,7 +11,7 @@ import { buildOpenAiRequest } from "@worker/providers/writer-openai";
 import { WriterOutputError } from "@worker/writing/metering";
 import { RECOMMENDATION_V1_JSON_SCHEMA } from "@worker/writing/schemas";
 import { SEO_WRITER_SYSTEM } from "@worker/writing/prompts";
-import { buildRunContext, buildWriterForWorkspace, createApiFetch, OutboundBlockedError } from "@worker/runs/runtime";
+import { API_HOST_ALLOWLIST, buildRunContext, buildWriterForWorkspace, createApiFetch, OutboundBlockedError } from "@worker/runs/runtime";
 import { createRun } from "@worker/runs/runs-service";
 
 type Handler = (url: string, init: RequestInit | undefined) => Response | Promise<Response>;
@@ -105,6 +105,19 @@ describe("TypeSafe adapter", () => {
     await expect(p.decide({ purpose: "p", state: "s", questions: QUESTIONS })).rejects.toBeTruthy();
     expect(seen).toHaveLength(1);
     expect(calls[0]).toMatchObject({ status: "error", costUsd: null });
+  });
+
+  it("a timeout is recorded as 'timeout' with unknown cost and still counted against the budget", async () => {
+    const hang = (async (_u: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+      })) as typeof fetch;
+    const { calls, rec } = recorder();
+    const budget = unlimitedBudget();
+    const p = createTypeSafeProvider({ apiKey: "k", fetchImpl: hang, calls: rec, budget, timeoutMs: 20, maxRetries: 0 });
+    await expect(p.decide({ purpose: "p", state: "s", questions: QUESTIONS })).rejects.toBeTruthy();
+    expect(calls).toEqual([expect.objectContaining({ provider: "typesafe", status: "timeout", costUsd: null })]);
+    expect(budget.reservations.map((x) => `${x.resource}:${x.state}`)).toEqual(["provider_calls:settled", "jev_calls:settled"]);
   });
 
   it("test() uses models.list()", async () => {
@@ -204,7 +217,12 @@ describe("runtime", () => {
     await expect(api("https://user:pw@api.typesafe.ai/")).rejects.toBeInstanceOf(OutboundBlockedError);
     await expect(api("https://api.typesafe.ai:8443/")).rejects.toBeInstanceOf(OutboundBlockedError);
     await expect(api("https://169.254.169.254/latest")).rejects.toBeInstanceOf(OutboundBlockedError);
+    await expect(api("https://cloudflare-dns.com/dns-query")).rejects.toBeInstanceOf(OutboundBlockedError);
+    await expect(api("https://shop.example.com/")).rejects.toBeInstanceOf(OutboundBlockedError); // crawling never uses apiFetch
     expect(seen).toHaveLength(0);
+    for (const host of API_HOST_ALLOWLIST) {
+      expect(["api.typesafe.ai", "generativelanguage.googleapis.com", "api.perplexity.ai", "api.anthropic.com", "oauth2.googleapis.com", "www.googleapis.com", "searchconsole.googleapis.com"]).toContain(host);
+    }
     await api("https://api.typesafe.ai/v1/models");
     await api("https://llm.example.com/v1/chat/completions");
     expect(seen).toHaveLength(2);
@@ -233,6 +251,23 @@ describe("runtime", () => {
     expect(ctx2.geoProviders.map((g) => g.id)).toEqual(["gemini", "perplexity"]);
     await db.run("UPDATE agent_runs SET cancel_requested = 1 WHERE id = ?", runId);
     expect(await ctx2.isCancelled()).toBe(true);
+  });
+
+  it("crawlFetch is the injected platform fetch, called without a receiver", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const pid = await seedProject(env, u.workspaceId);
+    const { runId } = await createRun(new Db(env.DB), { workspaceId: u.workspaceId, projectId: pid, agent: "seo", trigger: "manual", idempotencyKey: "kc", createdBy: null, now: FIXED_NOW });
+    const receivers: unknown[] = [];
+    const platformFetch = function (this: unknown) {
+      receivers.push(this);
+      return Promise.resolve(new Response("ok"));
+    } as unknown as typeof fetch;
+    const ctx = await buildRunContext(env, runId, { fetchImpl: fakeFetch([]).f, crawlFetchImpl: platformFetch });
+    await ctx.crawlFetch("https://shop.example.com/");
+    expect(receivers).toEqual([undefined]);
+    // apiFetch never reaches crawl targets.
+    await expect(ctx.apiFetch("https://shop.example.com/")).rejects.toBeInstanceOf(OutboundBlockedError);
   });
 
   it("buildWriterForWorkspace returns null without a key or model", async () => {

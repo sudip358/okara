@@ -42,9 +42,12 @@ Implemented in `src/worker/providers/writer-anthropic.ts` (raw fetch).
 | Response | `content[]` blocks (`text`; `thinking` blocks ignored), `stop_reason` (`end_turn`, `max_tokens`, `refusal`, ...), `usage.{input_tokens, output_tokens}`, `model`; request id header `request-id` |
 | Credential test | `GET /v1/models/{model}` (verifies key and configured model id, no inference) |
 
-Why not a forced tool: current models (Claude Opus 5.5, Sonnet 5.5, Fable 5.1) return HTTP 400 for
-`tool_choice: {type: "tool" | "any"}`. Structured outputs is the canonical JSON path and works across
-current models. No `tools` are sent. Structured outputs do not accept `minimum/maximum`,
+Why not a forced tool (deviation from the original "forced single output tool with input_schema" plan):
+current models (Claude Opus 5.5, Sonnet 5.5, Fable 5.1) return HTTP 400 for `tool_choice: {type: "tool" |
+"any"}` ("not supported for this model"). Structured outputs (`output_config.format`; the older
+`output_format` parameter is deprecated) is the documented JSON path and is supported on all current models
+(Fable 5/5.1, Opus 5.5/5/4.8, Sonnet 5.5/5, Haiku 4.5). With thinking always on for some models (Opus 5.5),
+`thinking` content blocks may precede the JSON `text` block; only `text` blocks are parsed. No `tools` are sent. Structured outputs do not accept `minimum/maximum`,
 `minLength/maxLength`, or complex array constraints and require `additionalProperties: false`;
 `toProviderSchema()` strips those and zod (`recommendationOutputSchema`) enforces them client-side.
 `stop_reason: "refusal"` and `"max_tokens"` are reported as writer errors (the call is still recorded).

@@ -26,7 +26,7 @@ Specification: `docs/build-kit.md`. API contract: `docs/api.md` + `src/shared/ty
 cron (*/15) ──► dispatchDueRuns ──► agent_runs (idempotency_key = project:agent:YYYY-MM-DD, INSERT OR IGNORE)
                                     │ claim (workflow_instance_id IS NULL) + run_locks (project, agent, expiry)
                                     ▼
-POST /projects/:pid/runs ──► same claim + lock (manual; 3/day/project) 
+POST /projects/:pid/runs ──► same claim + lock (manual; 3/day/project, atomic conditional INSERT)
                                     ▼
              AGENT_RUN.create({id: runId, params: {runId}})   (inline executeRun when the binding is absent)
                                     ▼
@@ -77,9 +77,12 @@ Step semantics:
 - `budget` (atomic reservations), `calls` (provider_calls recorder), `log` (run_events), `isCancelled`.
 - `apiFetch`: allowlisted fetch for provider APIs (`api.typesafe.ai`, `generativelanguage.googleapis.com`,
   `api.perplexity.ai`, `api.anthropic.com`, `oauth2.googleapis.com`, `www.googleapis.com`,
-  `searchconsole.googleapis.com`, `cloudflare-dns.com`, and the configured `WRITER_BASE_URL` host);
-  https only, default port, no URL credentials, `redirect: "manual"`.
-- `crawlFetch`: the platform fetch; the crawler wraps it in its SSRF guard (`seo/ssrf.ts`).
+  `searchconsole.googleapis.com`, and the configured `WRITER_BASE_URL` host); https only, default port, no
+  URL credentials, `redirect: "manual"`. Anything else (including crawl targets) is refused with
+  `OutboundBlockedError`. DNS-over-HTTPS ownership checks run in the verification route with its own fetch,
+  never inside a run.
+- `crawlFetch`: the platform fetch (wrapped so it is never invoked with a foreign `this`, which workerd
+  rejects); the crawler wraps it in its SSRF guard (`seo/ssrf.ts`).
 
 Credentials resolve per workspace (encrypted BYO key first, then operator key) and are decrypted only
 inside the run; a key that cannot be decrypted is treated as not configured and logged.
@@ -90,16 +93,30 @@ Code shortlists candidates and computes priority; Jev answers narrow typed quest
 call per state; Noul has no confidence and is tiered by probability bands in `runs/policy.ts`); the writer
 drafts only from supplied evidence using the prompts in `writing/prompts.ts` and the `recommendation.v1`
 schema in `writing/schemas.ts`; `writing/validate.ts` rejects drafts that cite unknown evidence ids,
+reference rule ids (`SEO-…`, `ECOM-…`, `AI-…`) or decision ids (`dec_…`) the writer was never given [A17],
 contain numbers, dates, certification/spec terms not present in the cited evidence, or guarantee/ranking
 promises, and extracts `[confirm: ...]` placeholders.
+
+Recommendation cards show `decision.fields` with real TypeSafe field names only (`choice`, `confidence`,
+`score`, `noul`), qualified by question id (for example `seo.action_choice.confidence`,
+`geo.proposal_fit.score`); a Noul answer never carries a confidence. Derived values such as the runner-up
+are computed in the UI from the stored raw answer in the decision log.
 
 ## Scheduling
 
 Daily cadence per project and agent. The cron runs every 15 minutes so that a dispatch blocked by an active
-run lock, or a failed Workflow start, is retried the same day; the date-based idempotency key makes a
-second run for the same day impossible. At most 25 runs are started per tick. Demo projects and projects
+run lock is retried the same day; the date-based idempotency key makes a second run for the same day
+impossible. A Workflow instance that fails to start marks that day's run `failed` (with the error) and is
+not retried until the next day. At most 25 runs are started per tick. Demo projects and projects
 with `schedule_enabled = 0` are never scheduled. Each tick also marks stale work as failed: pending
-scheduled runs from earlier days that never started, and `running` runs whose lock expired (2 x TTL).
+scheduled runs from earlier days that never started, runs dispatched to a Workflow instance that never
+started, and `running` runs whose lock expired (2 x TTL, no live lock).
+
+Manual runs (`POST /projects/:pid/runs`) are limited to 3 per project per UTC day with one conditional
+`INSERT … SELECT … WHERE (count of today's manual runs) < 3`, so concurrent requests cannot exceed the
+quota (HTTP 429 `quota_exceeded`); demo projects return 409 `demo_project`; a repeat within the same minute
+for the same agent returns the existing run; a run refused because another run holds the lock is removed so
+it does not consume quota (409).
 
 ## Deviations and known limitations
 
@@ -108,9 +125,12 @@ scheduled runs from earlier days that never started, and `running` runs whose lo
 - **DNS rebinding**: Workers do not expose DNS resolution, so resolve-then-pin is impossible. The SSRF
   guard's primary control is the exact verified-host allowlist plus IP-literal range blocking, manual
   redirects re-validated per hop, streamed size caps, and timeouts (see `seo/ssrf.ts`).
-- **Writer JSON mode**: Anthropic uses structured outputs (`output_config.format` json_schema) rather than a
-  forced tool, because current models (Claude Opus 5.5, Sonnet 5.5, Fable 5.1) reject
-  `tool_choice: {type: "tool"}` with HTTP 400. No tools are sent to either writer.
+- **Writer JSON mode** (deviation from the "forced single output tool" plan): Anthropic uses structured
+  outputs (`output_config.format` json_schema) rather than a forced tool, because current models (Claude
+  Opus 5.5, Sonnet 5.5, Fable 5.1) reject `tool_choice` `{type: "tool"}` / `{type: "any"}` with HTTP 400
+  ("not supported for this model"). Structured outputs work on every current model, including Haiku 4.5,
+  and is the documented path when a forced call only existed to extract JSON. No tools are sent to either
+  writer, so the writer has no tool access.
 - **Perplexity**: uses the Agent API (`/v1/agent`) because Sonar Chat Completions support ended on
   2026-09-27 (see `docs/provider-contracts.md`).
 - **Gemini**: keeps `generateContent` + `groundingMetadata` although the grounding guide now shows the

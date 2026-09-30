@@ -104,7 +104,8 @@ export function createAnthropicWriter(cfg: AnthropicWriterConfig): WritingProvid
     /** Free check: GET /v1/models/{model} verifies both the key and the configured model id. */
     async test() {
       try {
-        const res = await cfg.fetchImpl(`${ANTHROPIC_API_BASE}/v1/models/${encodeURIComponent(cfg.model)}`, {
+        const fetchImpl = cfg.fetchImpl;
+        const res = await fetchImpl(`${ANTHROPIC_API_BASE}/v1/models/${encodeURIComponent(cfg.model)}`, {
           method: "GET",
           headers: { "x-api-key": cfg.apiKey, "anthropic-version": ANTHROPIC_VERSION },
         });

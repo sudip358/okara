@@ -151,7 +151,10 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
   const budget = createBudget(db, env, { workspaceId: ref.workspaceId, projectId: ref.id, runId: run.id }, clock);
   const calls = createCallRecorder(db, { workspaceId: ref.workspaceId, projectId: ref.id, runId: run.id }, clock);
   const apiFetch = createApiFetch(env, opts.fetchImpl ?? fetch);
-  const crawlFetch = opts.crawlFetchImpl ?? fetch;
+  // Wrapped so `ctx.crawlFetch(url)` never invokes the platform fetch with `this = ctx`
+  // (workerd throws "Illegal invocation" for a fetch called on a foreign receiver).
+  const baseCrawlFetch = opts.crawlFetchImpl ?? fetch;
+  const crawlFetch = ((input: RequestInfo | URL, init?: RequestInit) => baseCrawlFetch(input, init)) as typeof fetch;
 
   const [typesafeKey, writerKey, geminiKey, perplexityKey] = await Promise.all([
     safeKey(env, db, ref.workspaceId, "typesafe", log),

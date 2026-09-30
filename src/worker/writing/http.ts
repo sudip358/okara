@@ -68,7 +68,8 @@ export async function requestJson(req: JsonRequest): Promise<{ json: unknown; re
     const started = Date.now();
     let retryAfter: string | null = null;
     try {
-      const res = await req.fetchImpl(req.url, {
+      const fetchImpl = req.fetchImpl; // called without a receiver (workerd requires it for the platform fetch)
+      const res = await fetchImpl(req.url, {
         method: req.method ?? "POST",
         headers: req.headers,
         body: req.body === undefined ? undefined : JSON.stringify(req.body),
