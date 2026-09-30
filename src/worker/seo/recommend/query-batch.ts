@@ -7,8 +7,9 @@
  *   QUERY_BATCH_QUESTIONS questions per systemOne call.
  * - Cache: decision_records rows of this project with the same question id, question_version, and
  *   candidate key `<prefix>:<normalized query>`, answered by a provider within QUERY_CACHE_DAYS days.
- *   Rows with no usable answer are not reused (the query is asked again). Tiers are recomputed from the
- *   stored raw answer with the current policy, so a threshold change re-scores without new calls.
+ *   A stored "no usable answer" (null, i.e. Drop) is reused too, so a query is not re-asked for 7 days
+ *   either way. Tiers are recomputed from the stored raw answer with the current policy, so a threshold
+ *   change re-scores without new calls.
  * - Every asked (query, question) gets a decision_records row (run id when inside a run, else null).
  * - A budget refusal or a failed call stops further calls; queries not asked stay unclassified.
  */
@@ -104,7 +105,7 @@ export async function judgeQueries(
   // 1. Cache.
   const since = iso(new Date(deps.now.getTime() - QUERY_CACHE_DAYS * 86400_000));
   const keys = [...unique.keys()];
-  const hits = new Map<string, Map<string, { answer: DecisionAnswer; provider: string; model: string }>>();
+  const hits = new Map<string, Map<string, { answer: DecisionAnswer | null; provider: string; model: string }>>();
   for (let i = 0; i < keys.length; i += 100) {
     const chunk = keys.slice(i, i + 100);
     for (const s of opts.specs) {
@@ -125,9 +126,8 @@ export async function judgeQueries(
         try {
           answer = (JSON.parse(r.answer_json ?? "{}") as { answer?: DecisionAnswer | null }).answer ?? null;
         } catch {
-          answer = null;
+          continue; // unreadable row: ask again
         }
-        if (!answer) continue;
         const m = hits.get(r.candidate_key) ?? new Map();
         if (!m.has(s.id)) m.set(s.id, { answer, provider: r.provider!, model: r.model ?? "" });
         hits.set(r.candidate_key, m);
@@ -142,7 +142,7 @@ export async function judgeQueries(
       const first = m.get(opts.specs[0]!.id)!;
       const answers: Record<string, QueryAnswer> = {};
       for (const s of opts.specs) {
-        const a = m.get(s.id)!.answer;
+        const a = m.get(s.id)!.answer ?? undefined;
         answers[s.id] = { answer: a, tier: tierFor(s.id, a), questionVersion: versions[s.id]! };
       }
       results.set(k, { query: q, key: k, answers, provider: first.provider, model: first.model, cached: true });

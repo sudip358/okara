@@ -103,6 +103,7 @@ function SeoMetrics({ projectId }: { projectId: string }) {
               />
             </li>
           </ol>
+          {data.brandSplit && <BrandSplitTiles split={data.brandSplit} window={curWindow} />}
           <div className="grid gap-2 sm:grid-cols-3">
             <MetricTile
               label="Average position"
@@ -138,6 +139,34 @@ function SeoMetrics({ projectId }: { projectId: string }) {
         </ul>
       )}
     </div>
+  );
+}
+
+/**
+ * [A23] Brand vs non-brand split of the current window's query rows (deterministic alias match). The
+ * method label from the API is shown verbatim; query-row sums are lower than the property totals above.
+ */
+function BrandSplitTiles({ split, window }: { split: NonNullable<SeoOverview["brandSplit"]>; window: string }) {
+  const part = (label: string, p: NonNullable<SeoOverview["brandSplit"]>["brand"]) => (
+    <MetricTile
+      label={label}
+      value={`${formatNumber(p.clicks)} clicks`}
+      sublabel={`${formatNumber(p.impressions)} impressions · CTR ${formatRatio(p.ctr, "impressions", 2)} · ${formatNumber(p.queries)} ${p.queries === 1 ? "query" : "queries"}`}
+      window={window}
+      source="GSC query rows"
+    />
+  );
+  return (
+    <section aria-label="Brand and non-brand queries" className="space-y-2">
+      <h3 className="text-xs font-semibold text-zinc-800 dark:text-zinc-200">Brand vs non-brand queries</h3>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {part("Brand queries (your brand name or aliases)", split.brand)}
+        {part("Non-brand queries (incl. competitor names)", split.nonBrand)}
+      </div>
+      <p className="text-xs text-zinc-600 dark:text-zinc-400">
+        <span className="font-medium">Method:</span> {split.method}
+      </p>
+    </section>
   );
 }
 

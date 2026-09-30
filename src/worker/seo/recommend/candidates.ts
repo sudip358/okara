@@ -1011,16 +1011,24 @@ class Builder {
     const crawled = Math.max(1, this.inp.crawl.crawledCount);
     const minRank = SEVERITY_RANK[this.cfg.technicalMinSeverity];
     const findings = this.inp.findings.filter((f) => SEVERITY_RANK[f.severity] >= minRank);
-    const groups = new Map<string, { ruleId: string; pageType: PageType | null; template: string | null; templateAffectedUrls: number | null; items: typeof findings }>();
+    const groups = new Map<string, { ruleId: string; pageType: PageType | null; template: string | null; templateAffectedUrls: number | null; items: typeof findings; types: Set<PageType> }>();
     for (const f of findings) {
       const pageType = f.url ? (f.pageType ?? this.pagesByNorm.get(normalizeUrl(f.url))?.pageType ?? "other") : null;
-      const gk = f.url === null ? `${f.ruleId}|site` : f.template ? `${f.ruleId}|tpl:${f.template}` : `${f.ruleId}|type:${pageType}`;
-      const g = groups.get(gk) ?? { ruleId: f.ruleId, pageType, template: f.template, templateAffectedUrls: f.templateAffectedUrls, items: [] };
+      // Registered non-templateable rules (4xx, sitemap health, thin content, ...) group across page types:
+      // >= templateMinUrls URLs sharing the rule become one site-scope candidate, never a template claim.
+      const rule = getRule(f.ruleId);
+      const byRule = !!rule && !rule.templateable && !f.template;
+      const gk = f.url === null ? `${f.ruleId}|site` : f.template ? `${f.ruleId}|tpl:${f.template}` : byRule ? `${f.ruleId}|rule` : `${f.ruleId}|type:${pageType}`;
+      const g = groups.get(gk) ?? { ruleId: f.ruleId, pageType, template: f.template, templateAffectedUrls: f.templateAffectedUrls, items: [], types: new Set<PageType>() };
       g.items.push(f);
+      if (pageType) g.types.add(pageType);
+      if (g.types.size > 1) g.pageType = null;
       groups.set(gk, g);
     }
     const out: Candidate[] = [];
-    for (const [gk, g] of groups) {
+    for (const [groupKey, g] of groups) {
+      // Stable identity (dedup): a rule-level group on one page type keeps the per-type key used before.
+      const gk = groupKey.endsWith("|rule") && g.types.size === 1 ? `${g.ruleId}|type:${[...g.types][0]}` : groupKey;
       const worst = g.items.reduce<Severity>((w, f) => (SEVERITY_RANK[f.severity] > SEVERITY_RANK[w] ? f.severity : w), "advisory");
       const urls = [...new Set(g.items.map((f) => f.url).filter((u): u is string => !!u))];
       const pageImpr = urls.reduce((s, u) => s + (this.pageMetricsCur.get(normalizeUrl(u))?.impressions ?? 0), 0);

@@ -365,3 +365,23 @@ describe("priority is unchanged; reference tiers are never used", () => {
     expect(computePriority(i, "act")).toBe(Math.round(100 * Math.sqrt(0.1) * 0.85 * 100) / 100);
   });
 });
+
+// ------------------------------------------------------------------ sitemap health rules
+describe("sitemap-health rules map to an explicit action and quote the finding's fix", () => {
+  it("all six rules -> fix_canonical_or_indexing; grouped findings become one site candidate", async () => {
+    const { defaultTechnicalAction, findingFixText, sitemapActionText } = await import("@worker/seo/recommend/candidates");
+    for (const id of ["SEO-SITEMAP-URL-ERROR", "SEO-SITEMAP-URL-REDIRECT", "SEO-SITEMAP-URL-NOINDEX", "SEO-SITEMAP-URL-NONCANONICAL", "SEO-SITEMAP-LASTMOD-INVALID", "SEO-SITEMAP-OFFHOST"]) {
+      expect(defaultTechnicalAction(id), id).toBe("fix_canonical_or_indexing");
+    }
+    expect(findingFixText("Listed in the sitemap but returned HTTP 404. Fix: Remove this URL from the sitemap or fix the 404.")).toBe("Remove this URL from the sitemap or fix the 404");
+    expect(sitemapActionText("SEO-TITLE-MISSING", "x", 1, null)).toBeNull();
+    const findings = [U.guide, U.sconces, U.hardware].map((url) => ({ rule: "SEO-SITEMAP-URL-ERROR", severity: "major", url, detail: "Listed in the sitemap but returned HTTP 404. Fix: Remove this URL from the sitemap or fix the 404.", evidence: { status: 404 } }));
+    const s = await scenario({ findings });
+    const { candidates } = await candidatesOf(s);
+    const c = candidates.find((x) => x.issueType === "technical:SEO-SITEMAP-URL-ERROR")!;
+    expect(c).toMatchObject({ scope: "site", defaultAction: "fix_canonical_or_indexing" });
+    expect(c.actionText).toMatch(/^Correct the 3 sitemap entries reported by SEO-SITEMAP-URL-ERROR for the site.*\(for example .*: Remove this URL from the sitemap or fix the 404\); \[confirm: where your platform generates the sitemap\]\.$/);
+    const d = draftOf(c, c.defaultAction, "act");
+    expect(d.ok, d.ok ? "" : d.errors.join("; ")).toBe(true);
+  });
+});

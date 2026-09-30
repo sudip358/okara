@@ -19,8 +19,14 @@ const W = 640;
 const H = 220;
 const PAD = { top: 12, right: 12, bottom: 28, left: 52 };
 
+/** [A23] The API builds the curve from non-brand queries when the project has brand terms and says so in `note`. */
+export function isNonBrandCurve(curve: Pick<DemandCurve, "note">): boolean {
+  return /\bNon-brand queries only\b/.test(curve.note);
+}
+
 export function DemandCurveChart({ curve }: { curve: DemandCurve }) {
   const titleId = useId();
+  const nonBrand = isNonBrandCurve(curve);
   const [showTable, setShowTable] = useState(false);
   const pts = curve.points.filter((p) => p.impressions > 0);
   if (pts.length < 2) {
@@ -57,9 +63,9 @@ export function DemandCurveChart({ curve }: { curve: DemandCurve }) {
   return (
     <figure className="space-y-3">
       <figcaption id={titleId} className="flex flex-wrap items-baseline justify-between gap-2">
-        <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Your search demand curve</span>
+        <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Your search demand curve{nonBrand ? " (non-brand)" : ""}</span>
         <span className="text-xs text-zinc-600 dark:text-zinc-400">
-          {formatNumber(curve.totalQueries)} queries · {formatWindow(curve.window)} · GSC impressions{curve.truncated ? " (row cap reached)" : ""}
+          {formatNumber(curve.totalQueries)} {nonBrand ? "non-brand " : ""}queries · {formatWindow(curve.window)} · GSC impressions{curve.truncated ? " (row cap reached)" : ""}
         </span>
       </figcaption>
       <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full text-zinc-500" role="img" aria-labelledby={titleId} aria-describedby={`${titleId}-desc`}>

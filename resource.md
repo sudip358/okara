@@ -52,6 +52,7 @@ Every external reference used while specifying and building this product, with w
 
 ### TypeSafe Jev
 - Docs: https://docs.typesafe.ai · index: https://docs.typesafe.ai/llms.txt
+- Models and pricing: https://docs.typesafe.ai/models (read 2026-09-30): `jev-1.13.0` at $0.042 per million input tokens, output tokens free; `jev-latest` and `jev-preview` both point to `jev-1.13.0`. Used for labelled cost estimates in `providers/typesafe.ts` (`JEV_RATE_VERSION`).
 - Primitives: https://docs.typesafe.ai/primitives · Confidence: https://docs.typesafe.ai/confidence
 - Patterns: https://docs.typesafe.ai/patterns/confidence-routing · https://docs.typesafe.ai/patterns/composite-scoring
 - Cookbook: https://docs.typesafe.ai/cookbooks/citation_check
@@ -97,7 +98,7 @@ Every external reference used while specifying and building this product, with w
 
 ## 6. Open questions to revisit
 
-- Jev pricing: confirm on TypeSafe's official pricing page so Jev cost estimates stop showing "unknown".
+- Jev cost: estimates are recorded per call but not yet reserved against the daily dollar budget (call caps still apply). Decide whether to add them.
 - Milestone 6 `[A24]`: decide on Slack/email digests, analytics connectors (GA4, Shopify, PostHog), and an MCP server.
 - SERP data provider: needed for Google Page 1 composition, "People also ask", and SERP feature checks. Opt-in only; never scrape.
 - Keyword data source: needed for search volume and keyword difficulty.

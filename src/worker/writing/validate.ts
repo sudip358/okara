@@ -13,7 +13,8 @@
  *  - guarantee / ranking-promise language ("guarantee", "will rank", "ensures inclusion", "#1 ranking")
  *  - [A25] when `opts.titleQuery` is given: a suggested title ("Title: ..." / "Suggested title: ..." line,
  *    `suggested|new|proposed|revised title "..."`, or <title>...</title>) that does not contain every
- *    non-stopword term of that query (case-, accent-, and simple-plural-insensitive; word order free)
+ *    non-stopword term of that query (case-, accent-, and simple-plural-insensitive; word order free);
+ *    a title quoted verbatim from the cited evidence (the current title) is not treated as a suggestion
  * Warnings (shown, not rejected):
  *  - negated guarantee wording ("does not guarantee"), guarantee wording quoted from evidence
  *  - URLs that do not appear in cited evidence
@@ -227,7 +228,10 @@ export function validateDraft(textFields: string[], citedEvidenceIds: string[], 
   if (opts.titleQuery) {
     const need = [...titleTerms(opts.titleQuery)];
     if (need.length) {
-      for (const title of suggestedTitles(fullText.replace(PLACEHOLDER_RE, " "))) {
+      const corpusLower = corpus.toLowerCase();
+      for (const title of suggestedTitles(fullText.replace(PLACEHOLDER_RE, " ").replace(EVIDENCE_REF_RE, " "))) {
+        // A title quoted verbatim from the cited evidence (the page's current title) is not a suggestion.
+        if (title.length >= 3 && corpusLower.includes(title.toLowerCase())) continue;
         const have = titleTerms(title);
         const missingTerms = need.filter((t) => !have.has(t));
         if (missingTerms.length) {
@@ -271,7 +275,13 @@ const TITLE_INLINE_RE = /\b(?:suggested|new|proposed|revised|recommended) (?:pag
 /** Suggested titles written in the draft text (see the header for the recognized forms). */
 export function suggestedTitles(text: string): string[] {
   const out: string[] = [];
-  const clean = (t: string) => t.trim().replace(/^["“'`]+|["”'`]+$/g, "").trim();
+  const clean = (t: string) =>
+    t
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/[\s.;,]+$/, "")
+      .replace(/^["“'`]+|["”'`]+$/g, "")
+      .trim();
   for (const m of text.matchAll(TITLE_LINE_RE)) out.push(clean(m[1] ?? ""));
   for (const m of text.matchAll(TITLE_TAG_RE)) out.push(clean(m[1] ?? ""));
   for (const m of text.matchAll(TITLE_INLINE_RE)) out.push(clean(m[1] ?? ""));

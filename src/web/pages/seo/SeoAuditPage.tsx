@@ -26,6 +26,8 @@ import { PagesTable } from "./components/PagesTable";
 import { CsvImportPanel } from "./components/CsvImportPanel";
 import { PageAuditTable } from "./components/PageAuditTable";
 import { ContentEvidenceTable } from "./components/ContentEvidenceTable";
+import { BuyerQueriesTable } from "./components/BuyerQueriesTable";
+import { TranslationOpportunitiesTable } from "./components/TranslationOpportunitiesTable";
 
 export function SeoAuditPage() {
   const { projectId = "" } = useParams();
@@ -111,6 +113,8 @@ export function SeoAuditPage() {
 
       {projectId ? <PageAuditTable projectId={projectId} /> : null}
       {projectId ? <ContentEvidenceTable projectId={projectId} /> : null}
+      {projectId ? <BuyerQueriesTable projectId={projectId} /> : null}
+      {projectId ? <TranslationOpportunitiesTable projectId={projectId} /> : null}
 
       {projectId ? <RobotsAdvisor projectId={projectId} /> : null}
 
