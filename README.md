@@ -60,6 +60,7 @@ Model IDs always come from configuration. None are hard-coded.
 - [`docs/architecture.md`](docs/architecture.md), [`docs/provider-contracts.md`](docs/provider-contracts.md),
   [`docs/limits-and-costs.md`](docs/limits-and-costs.md)
 - [`eval/README.md`](eval/README.md): labelled evaluation set and benchmark harness
+- [`resource.md`](resource.md): every external reference used, what was taken from it, and where it landed
 
 ## What the metrics mean
 
