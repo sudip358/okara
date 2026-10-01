@@ -271,6 +271,20 @@ describe("platform-auth: provider key tests", () => {
     expect(r.json!.data).toMatchObject({ ok: false });
   });
 
+  it("uses a redirect mode the Workers runtime accepts and never follows a 3xx", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    let mode: string | undefined;
+    setCredentialTestFetch(async (_input, init) => {
+      mode = init?.redirect;
+      return new Response(null, { status: 302, headers: { Location: "https://elsewhere.example/" } });
+    });
+    const r = await call(env, u, "POST", `${base(u)}/typesafe/test`, { apiKey: SECRET });
+    // workerd rejects redirect "error" before sending; that made every key test fail as a network error.
+    expect(mode).toBe("manual");
+    expect(r.json!.data).toMatchObject({ ok: false, detail: expect.stringContaining("redirect (HTTP 302)") });
+  });
+
   it("rate-limits the test route", async () => {
     const env = createTestEnv();
     const u = await seedUser(env);

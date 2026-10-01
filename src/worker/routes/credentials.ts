@@ -197,7 +197,9 @@ export async function testProviderKey(env: Env, provider: ProviderId, apiKey: st
     res = await outboundFetch(url, {
       method: "GET",
       headers: { ...headers, Accept: "application/json" },
-      redirect: "error",
+      // "manual", not "error": the Workers runtime rejects redirect "error" before sending, which made every
+      // key test report "could not reach the provider". A 3xx is treated as a failure below, never followed.
+      redirect: "manual",
       signal: AbortSignal.timeout(10_000),
     });
   } catch {
@@ -205,6 +207,7 @@ export async function testProviderKey(env: Env, provider: ProviderId, apiKey: st
   }
   // Never echo the provider's response body: it is untrusted and could reflect request data.
   await res.body?.cancel().catch(() => undefined);
+  if (res.status >= 300 && res.status < 400) return { ok: false, detail: `Provider answered with a redirect (HTTP ${res.status}); not followed.` };
   if (res.ok) return { ok: true, detail: "Key accepted (model list request succeeded)." };
   if (res.status === 401 || res.status === 403) return { ok: false, detail: `Key rejected by provider (HTTP ${res.status}).` };
   if (res.status === 429) return { ok: null, detail: "Provider rate-limited the test request; key not confirmed. Try again later." };
