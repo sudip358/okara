@@ -1,9 +1,10 @@
-/** "Run now" for an agent: POST /projects/:pid/runs {agent}. Surfaces quota / setup errors. OWNED BY: web-shell. */
+/** "Run now" for an agent: POST /projects/:pid/runs {agent}. Surfaces quota / setup errors; opens the Activity window for the started run. OWNED BY: web-shell. */
 import type { AgentKind, RunSummary } from "@shared/types";
 import { api, errorMessage, isRateLimited, isSetupRequired } from "@web/lib/api";
 import { useMutation } from "@web/lib/hooks";
 import { agentLabel } from "@web/lib/format";
 import { Button, type ButtonSize } from "./ui";
+import { openActivity } from "./activity/bus";
 
 export function RunNowButton({
   projectId,
@@ -28,7 +29,10 @@ export function RunNowButton({
         disabled={disabled}
         onClick={async () => {
           const run = await m.run();
-          if (run) onStarted?.(run);
+          if (run) {
+            onStarted?.(run);
+            openActivity({ projectId, runId: run.id });
+          }
         }}
       >
         Run {agentLabel(agent)} now

@@ -91,32 +91,35 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
     policy_version: "demo-fixture", summary_json: JSON.stringify({ demo: true, label: DEMO_LABEL, observations: 10, failed: 1, recommendations: 2 }),
     created_by: userId, created_at: at(65), started_at: at(65), finished_at: at(58),
   });
-  const seoSteps: Array<[string, string, string]> = [
-    ["validate_project", "completed", "Project validated."],
-    ["reserve_budget", "completed", "Budget reserved (demo: no real spend)."],
-    ["fetch_gsc", "completed", `Imported ${DEMO_GSC_ROWS.length} query/page rows per 28-day window.`],
-    ["crawl", "completed", "8 of 8 pages crawled; 0 skipped."],
-    ["shortlist", "completed", "3 candidates shortlisted."],
-    ["decisions", "completed", "3 candidates judged; 1 rejected (low_fit)."],
-    ["generate_proposals", "completed", "2 recommendations drafted."],
-    ["validate_evidence", "completed", "All evidence IDs resolved."],
-    ["persist_summary", "completed", "Run summary saved."],
+  // Step events are timed (minutes ago) to fall after the rows each step produced, so the run's activity
+  // replay (runs/activity.ts) reads in order: GSC sync -> page reads -> decisions -> proposals for SEO,
+  // engine answers -> analysis -> decisions -> proposals for GEO. All of it is labelled demo data.
+  const seoSteps: Array<[string, string, string, number]> = [
+    ["validate_project", "completed", "Project validated.", 124.95],
+    ["reserve_budget", "completed", "Budget reserved (demo: no real spend).", 124.9],
+    ["fetch_gsc", "completed", `Imported ${DEMO_GSC_ROWS.length} query/page rows per 28-day window.`, 123.95],
+    ["crawl", "completed", "8 of 8 pages crawled; 0 skipped.", 121.05],
+    ["shortlist", "completed", "3 candidates shortlisted.", 120.95],
+    ["decisions", "completed", "3 candidates judged; 1 rejected (low_fit).", 120.3],
+    ["generate_proposals", "completed", "2 recommendations drafted.", 119.2],
+    ["validate_evidence", "completed", "All evidence IDs resolved.", 118.5],
+    ["persist_summary", "completed", "Run summary saved.", 118.05],
   ];
-  const geoSteps: Array<[string, string, string]> = [
-    ["validate_project", "completed", "Project validated."],
-    ["reserve_budget", "completed", "Budget reserved (demo: no real spend)."],
-    ["run_prompts", "partial", "10 prompt runs: 9 ok, 1 failed (simulated timeout)."],
-    ["analyze", "completed", "Brand mentions, citations, and displacements extracted."],
-    ["decisions", "completed", "3 candidates judged; 1 rejected (insufficient_evidence)."],
-    ["generate_proposals", "completed", "2 proposals drafted."],
-    ["persist_summary", "completed", "Run summary saved."],
+  const geoSteps: Array<[string, string, string, number]> = [
+    ["validate_project", "completed", "Project validated.", 64.95],
+    ["reserve_budget", "completed", "Budget reserved (demo: no real spend).", 64.9],
+    ["run_prompts", "partial", "10 prompt runs: 9 ok, 1 failed (simulated timeout).", 59.45],
+    ["analyze", "completed", "Brand mentions, citations, and displacements extracted.", 59.4],
+    ["decisions", "completed", "3 candidates judged; 1 rejected (insufficient_evidence).", 59.1],
+    ["generate_proposals", "completed", "2 proposals drafted.", 58.6],
+    ["persist_summary", "completed", "Run summary saved.", 58.1],
   ];
-  seoSteps.forEach(([step, status, message], i) =>
-    ins("run_events", { id: newId("evt"), ...base, run_id: seoRun, step, status, message: `[${DEMO_LABEL}] ${message}`, created_at: at(125 - i * 0.7) }),
-  );
-  geoSteps.forEach(([step, status, message], i) =>
-    ins("run_events", { id: newId("evt"), ...base, run_id: geoRun, step, status, message: `[${DEMO_LABEL}] ${message}`, created_at: at(65 - i * 0.9) }),
-  );
+  for (const [step, status, message, minutesAgo] of seoSteps) {
+    ins("run_events", { id: newId("evt"), ...base, run_id: seoRun, step, status, message: `[${DEMO_LABEL}] ${message}`, created_at: at(minutesAgo) });
+  }
+  for (const [step, status, message, minutesAgo] of geoSteps) {
+    ins("run_events", { id: newId("evt"), ...base, run_id: geoRun, step, status, message: `[${DEMO_LABEL}] ${message}`, created_at: at(minutesAgo) });
+  }
 
   // ------------------------------------------------------------ GSC: 28-day finalized windows
   const today = utcDay(now);
@@ -176,13 +179,15 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
   });
   const snapshotByPath = new Map<string, string>();
   const pageByPath = new Map<string, string>();
-  for (const p of DEMO_PAGES) {
+  for (const [pageIndex, p] of DEMO_PAGES.entries()) {
+    // Page reads spread over the crawl window (123 -> 121 minutes ago) for the activity replay.
+    const fetchedAt = at(122.9 - pageIndex * 0.2);
     const pageId = newId("pg");
     const snapId = newId("snap");
     const url = `${DEMO_ORIGIN}${p.path}`;
     pageByPath.set(p.path, pageId);
     snapshotByPath.set(p.path, snapId);
-    ins("pages", { id: pageId, ...base, url, page_type: p.pageType, page_type_method: p.method, first_seen_at: at(123), last_crawled_at: at(122) });
+    ins("pages", { id: pageId, ...base, url, page_type: p.pageType, page_type_method: p.method, first_seen_at: at(123), last_crawled_at: fetchedAt });
     ins("page_snapshots", {
       id: snapId, ...base, page_id: pageId, crawl_run_id: crawlId, status_code: 200, final_url: url,
       content_hash: await hashJson({ demo: true, path: p.path }), skipped_reason: null, title: p.title, meta_description: p.metaDescription,
@@ -190,7 +195,7 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
       jsonld_types_json: JSON.stringify(p.jsonldTypes), jsonld_issues_json: JSON.stringify(p.jsonldIssues),
       internal_links_json: JSON.stringify(DEMO_PAGES.filter((o) => o.path !== p.path).slice(0, 4).map((o) => `${DEMO_ORIGIN}${o.path}`)),
       word_count: p.wordCount, main_text_excerpt: p.excerpt, first_paragraph: p.firstParagraph || null, author: null, last_updated: null,
-      outbound_citations: 0, table_count: 0, fetched_at: at(122),
+      outbound_citations: 0, table_count: 0, fetched_at: fetchedAt,
     });
   }
   const findingIds: string[] = [];
@@ -221,7 +226,8 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
     perplexity: await cohortKey({ promptSetVersion: 1, provider: "perplexity", model: DEMO_MODEL, groundingMode: GROUNDING.perplexity, samplingOptions: null }),
   };
   const observationIds: string[][] = [];
-  let minute = 64;
+  // Answers 30 s apart from 64 to 59.5 minutes ago, inside the run window, before the run_prompts event.
+  let minute = 64.5;
   for (let pi = 0; pi < DEMO_ANSWERS.length; pi++) {
     observationIds.push([]);
     for (const a of DEMO_ANSWERS[pi]!) {
@@ -277,7 +283,7 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
   for (const run of [seoRun, geoRun]) {
     ins("provider_calls", {
       id: newId("call"), ...base, run_id: run, provider: "typesafe", model: DEMO_MODEL, purpose: "decisions (demo fixture)", status: "ok",
-      request_id: null, cost_usd: null, cost_is_estimate: 1, rate_version: null, latency_ms: null, error: null, created_at: at(run === seoRun ? 120 : 60),
+      request_id: null, cost_usd: null, cost_is_estimate: 1, rate_version: null, latency_ms: null, error: null, created_at: at(run === seoRun ? 120.8 : 59.35),
     });
   }
 
@@ -306,12 +312,16 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
   const eLamp = await ev(geoRun, "crawl", snapshotByPath.get("/products/brass-table-lamp")!, null, "/products/brass-table-lamp does not state bulb compatibility.");
 
   // ------------------------------------------------------------ decisions and recommendations
-  const decision = (runId: string, agent: "seo" | "geo", candidateKey: string, outcome: "selected" | "rejected", reason: string | null, answer: unknown, tier: string) =>
+  // Decisions of one run are 6 s apart (after that run's Jev call row) so the replay lists them in order.
+  const decisionCount: Record<string, number> = {};
+  const decision = (runId: string, agent: "seo" | "geo", candidateKey: string, outcome: "selected" | "rejected", reason: string | null, answer: unknown, tier: string) => {
+    const n = (decisionCount[runId] = (decisionCount[runId] ?? 0) + 1);
     ins("decision_records", {
       id: newId("dec"), ...base, run_id: runId, agent, candidate_key: candidateKey, question_id: `${agent}.action_choice`, question_version: "demo-fixture",
       policy_version: "demo-fixture", provider: DEMO_MODEL, model: DEMO_MODEL, state_hash: null, answer_json: JSON.stringify(answer), tier,
-      outcome, reason_code: reason, created_at: at(runId === seoRun ? 120 : 60),
+      outcome, reason_code: reason, created_at: at((runId === seoRun ? 120.8 : 59.35) - n * 0.1),
     });
+  };
   decision(seoRun, "seo", `demo:${pid}:template:product:offer`, "selected", null, { type: "choice", choice: "add_offer_markup", confidence: 0.86, probabilities: { add_offer_markup: 0.86, insufficient_context: 0.14 } }, "act");
   decision(seoRun, "seo", `demo:${pid}:url:sofas:meta`, "selected", null, { type: "choice", choice: "rewrite_snippet", confidence: 0.64, probabilities: { rewrite_snippet: 0.64, none: 0.36 } }, "flag");
   decision(seoRun, "seo", "template:collection:intro", "rejected", "low_fit", { type: "choice", choice: "none", confidence: 0.71, probabilities: { add_intro: 0.29, none: 0.71 } }, "act");

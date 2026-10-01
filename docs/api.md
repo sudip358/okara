@@ -64,6 +64,8 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | POST | /projects/:pid/runs | runtime | body `{agent}`; manual run (quota-limited) → `RunSummary` |
 | POST | /runs/:id/cancel | runtime | `RunSummary` |
 | GET | /projects/:pid/usage | runtime | `UsageSummary` |
+| GET | /projects/:pid/runs/:runId/activity?after=&limit= | runtime | `RunActivity` (live activity window; see "Run activity") |
+| GET | /projects/:pid/activity/current | runtime | `{runs: [{id, agent, status}]}` |
 | GET | /projects/:pid/geo/prompts | geo-analysis | `GeoPromptSet` (active) |
 | PUT | /projects/:pid/geo/prompts | geo-analysis | body `{prompts:[{text,promptType,stage,approved}]}`; new version |
 | POST | /projects/:pid/geo/prompts/generate | geo-analysis | writer-generated brand-blind suggestions (unapproved) |
@@ -205,3 +207,54 @@ lanes can be saved through `PUT /workspaces/:wid/credentials/:provider`. The sha
 (`routes/recommendations.ts`), and `GeoResults` lanes and the checklist provider list use the same list.
 `decide.ts` `SELF_ACCOUNTING_PROVIDERS` lists Jev decision providers only; GEO engines are accounted by
 `geo/batch.ts`. Demo seed data has no rows for the new lanes.
+
+## Run activity (live activity window; types in `src/shared/types.ts`)
+
+Read-only views over the stored rows of ONE run, so the UI can show an agent working in real time and replay
+a finished run. Nothing is simulated: every item is a row the run wrote. Both routes resolve the project with
+`requireProject()`; every query filters `workspace_id`, `project_id` and `run_id`, has a `LIMIT`, and keeps
+dynamic `IN` lists under D1's 100 bound parameters. No provider call, no Jev, no budget. Builder:
+`src/worker/runs/activity.ts`; routes: `src/worker/routes/activity.ts`.
+
+### GET /projects/:pid/runs/:runId/activity?after=<cursor>&limit=<n> → `RunActivity`
+- 404 unless the run belongs to this project and workspace. `limit` defaults to 80, max 200; a malformed
+  `after` is 400.
+- `items` (ascending by `(at, id)`), one per stored row:
+  | kind | source | id | at | notes |
+  |---|---|---|---|---|
+  | `step` | `run_events` | `evt:<id>` | `created_at` | title = stored message; `provider` set for `geo_batch:<engine>` steps |
+  | `page_read` | `page_snapshots` via `crawl_runs.run_id` + `pages` | `snap:<id>` | `fetched_at` | detail `"200 · 1,240 words"` or `"Skipped: <reason>"`; `url` = page URL |
+  | `engine_answer` | `geo_observations` (+ `geo_brand_observations`, `geo_citations`) | `obs:<id>` | `created_at` | `outcome` cited/named/missing/failed; `latencyMs` from the `geo_answer` provider call joined on `request_id`; `costUsd` from the observation |
+  | `jev_decision` | `decision_records` | `dec:<id>` | `created_at` | `outcome` = stored tier (act/flag/drop; null for n/a); detail `tier · question_id [· rejected (reason)]` |
+  | `provider_call` | `provider_calls` | `call:<id>` | `created_at` | every call except `geo_answer%` (those are the engine answers, not listed twice) |
+- Answer outcome uses the AI engine board's definition (`answerOutcome`): `cited` = own-site citation
+  (self brand row `cited`), `named` = brand mentioned without own-site citation, `missing` = neither; failed
+  and incomplete answers are `failed` (never absences); an `ok` answer not yet analysed has outcome `null`
+  ("awaiting analysis") and is not counted. "Cited instead" is the first non-own-site citation host.
+- Untrusted text (prompts, messages, errors, URLs) is plain text clipped to 160 characters; render as text.
+- Cursor: opaque encoding of the last item's `(at, id)`. Each source selects rows with
+  `(at, '<prefix>:' || id) > cursor`, ordered and limited; the sources are merge-sorted and cut to `limit`.
+  With no new items the request's cursor is echoed (null when none was given). Without `after`, items start
+  at the beginning of the run, so a client pages forward until `items` is empty and then polls.
+- `totals` always cover the whole run regardless of `after`:
+  `spend.usd` = sum of `provider_calls.cost_usd` of the run; null when the run has calls but none is priced
+  (unknown is never $0); 0 only when the run made no calls. `unknownCalls` = calls with null cost;
+  `isEstimate` = any priced call is an estimate. `pagesRead` = snapshots without `skipped_reason`;
+  `pagesPlanned` = `crawl_runs.pages_limit` (null without a crawl). `answers` and `decisions` count by
+  outcome / tier. No aggregated score, no projections, no rate such as prompts per second.
+- `lanes` (GEO runs only): one per engine that answered or logged a `geo_batch:<engine>` step in this run,
+  plus, while the run is active, each engine configured now (presence only); board order. `state`: `done`
+  (lane step finished, or the run ended with answers), `asking` (lane started or has answers, run active),
+  `queued` (run active, lane not started), `idle` (otherwise). `done` = answers stored; `planned` = approved
+  prompts of the run's prompt set (the set its answers came from; the active set before any answer), capped
+  by `project_limits.geo_prompts_per_run` exactly like `geo/batch.ts`; null when unknown. `lastLatencyMs` from
+  the lane's latest linked call.
+- `queued` (GEO runs, while active): up to 12 not-yet-observed (prompt, engine) pairs, asking lanes first.
+- `nowReading`: the latest page snapshot while the run is active and its crawl (`crawl_runs.status`) is
+  `running`; null otherwise.
+- `run.elapsedMs` = `finished_at` (or now, while active) − `started_at`; null before start.
+
+### GET /projects/:pid/activity/current → `{runs: Array<{id, agent, status}>}`
+Active runs (`pending`/`running`) of the project, newest first (max 10); when none, the most recent finished
+run of each agent so the window can replay it. Demo projects return their two demo runs (labelled simulated;
+demo rows carry the run id and a time spread so the replay reads in order, with costs and latencies null).

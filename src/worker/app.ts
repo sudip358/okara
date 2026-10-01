@@ -26,6 +26,7 @@ import { linkRoutes } from "./routes/links";
 import { recommendationRoutes } from "./routes/recommendations";
 import { runRoutes } from "./routes/runs";
 import { demoRoutes } from "./routes/demo";
+import { activityRoutes } from "./routes/activity";
 
 export interface AppVariables {
   db: Db;
@@ -68,6 +69,7 @@ export function createApp() {
   app.route("/", recommendationRoutes);
   app.route("/", runRoutes);
   app.route("/", demoRoutes);
+  app.route("/", activityRoutes);
 
   app.notFound((c) => c.json({ error: { code: "not_found", message: "Not found." } }, 404));
   app.onError((err, c) => {

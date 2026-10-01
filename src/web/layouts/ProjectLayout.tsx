@@ -4,6 +4,7 @@ import { Link, NavLink, Outlet, useParams } from "react-router";
 import { ApiError } from "@web/lib/api";
 import { ProjectProvider, projectPath, useProjectLoader } from "@web/lib/project-context";
 import { useSession } from "@web/lib/session";
+import { ActivityLauncher } from "@web/components/activity/ActivityWindow";
 import { Badge, DemoBanner, EmptyState, ErrorState, LoadingState, buttonClass, cx } from "@web/components/ui";
 
 const NAV: Array<{ to: string; label: string; end?: boolean; group?: string }> = [
@@ -65,6 +66,9 @@ export function ProjectLayout() {
             <div className="mt-1.5 flex flex-wrap gap-1">
               {project.isDemo && <Badge tone="demo">Demo</Badge>}
               {project.verifiedAt ? <Badge tone="success">Verified</Badge> : <Badge tone="warning">Unverified</Badge>}
+            </div>
+            <div className="mt-2">
+              <ActivityLauncher projectId={projectId} isDemo={project.isDemo} />
             </div>
           </div>
           <nav aria-label="Project">

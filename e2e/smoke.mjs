@@ -123,6 +123,105 @@ if (P) {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
   check("no horizontal overflow at 390px", !overflow);
   await shot("90-mobile-overview");
+
+  // ---- Live Activity window (button in the project shell, role="log" feed, Esc closes) ----
+  const pid = P.split("/").pop();
+  const unwrap = (b) => (b && typeof b === "object" && "data" in b && b.data && typeof b.data === "object" ? b.data : b);
+  const apiGet = async (path) => {
+    const r = await page.request.get(`${BASE}/api${path}`).catch((e) => ({ status: () => 0, json: async () => null, text: async () => String(e) }));
+    const ct = r.headers?.()["content-type"] ?? "";
+    const body = await r.json().catch(() => null);
+    return { status: r.status(), json: /json/.test(ct) || body !== null, body: unwrap(body) };
+  };
+  const DURATION = /\b\d+h \d{2}m\b|\b\d+m \d{2}s\b|\b\d+(\.\d+)?\s?(s|ms|sec|min)\b|\b\d{1,2}:\d{2}(:\d{2})?\b/;
+  /** Opens the Activity window on the current page; returns { panel, log } locators or null. */
+  const openActivity = async (label) => {
+    const btn = page.getByRole("button", { name: /activity/i }).first();
+    if (!(await btn.count())) { check(`activity: ${label} open`, false, 'no button matching /activity/i in the project shell'); return null; }
+    await btn.click();
+    const log = page.getByRole("log").first();
+    const ok = await log.waitFor({ state: "visible", timeout: 8000 }).then(() => true).catch(() => false);
+    if (!ok) { check(`activity: ${label} open`, false, 'clicking Activity did not show a role="log" feed within 8s'); return null; }
+    check(`activity: ${label} open`, true, 'role="log" visible');
+    const dialog = page.getByRole("dialog").filter({ has: page.getByRole("log") }).first();
+    const panel = (await dialog.count()) ? dialog : log.locator("xpath=ancestor::*[self::aside or self::section or @role='dialog' or @role='complementary' or @role='region'][1]");
+    return { panel: (await panel.count()) ? panel : log, log };
+  };
+
+  step = "activity-api";
+  let replayRunId = null;
+  {
+    const cur = await apiGet(`/projects/${pid}/activity/current`);
+    const runs = cur.body?.runs;
+    check("activity: GET /activity/current returns 200 JSON with runs[]", cur.status === 200 && cur.json && Array.isArray(runs),
+      `HTTP ${cur.status} json=${cur.json} runs=${Array.isArray(runs) ? runs.length : typeof runs}`);
+    replayRunId = Array.isArray(runs) && runs[0]?.id ? runs[0].id : null;
+    if (!replayRunId) {
+      // Fall back to the latest run from the run history API so the feed endpoint can still be exercised.
+      const hist = await apiGet(`/projects/${pid}/runs`);
+      const list = Array.isArray(hist.body) ? hist.body : hist.body?.runs ?? hist.body?.items ?? [];
+      replayRunId = list[0]?.id ?? null;
+    }
+    if (!replayRunId) check("activity: GET /runs/:id/activity returns items[] + cursor", false, "no run id available (activity/current runs[] empty and /runs empty)");
+    else {
+      const first = await apiGet(`/projects/${pid}/runs/${replayRunId}/activity?limit=5`);
+      const items = first.body?.items;
+      const hasCursorField = !!first.body && "cursor" in first.body;
+      const cursor = first.body?.cursor ?? null;
+      check("activity: GET /runs/:id/activity returns items[] + cursor", first.status === 200 && Array.isArray(items) && hasCursorField && (items.length === 0 || typeof cursor === "string"),
+        `HTTP ${first.status} run=${replayRunId} items=${Array.isArray(items) ? items.length : typeof items} cursor=${hasCursorField ? JSON.stringify(cursor) : "missing"}`);
+      check("activity: demo replay run has at least one stored item", Array.isArray(items) && items.length > 0, `run=${replayRunId} items=${Array.isArray(items) ? items.length : "n/a"}`);
+      if (typeof cursor === "string" && Array.isArray(items)) {
+        const next = await apiGet(`/projects/${pid}/runs/${replayRunId}/activity?after=${encodeURIComponent(cursor)}&limit=200`);
+        const ids = new Set(items.map((i) => i.id));
+        const nextItems = Array.isArray(next.body?.items) ? next.body.items : null;
+        const dupes = (nextItems ?? []).filter((i) => ids.has(i.id)).map((i) => i.id);
+        const selfDupes = (nextItems ?? []).length - new Set((nextItems ?? []).map((i) => i.id)).size;
+        check("activity: ?after=<cursor> returns no duplicate item ids", next.status === 200 && !!nextItems && dupes.length === 0 && selfDupes === 0,
+          `HTTP ${next.status} newer=${nextItems?.length ?? "n/a"} dupes=${JSON.stringify(dupes.slice(0, 5))} withinPageDupes=${selfDupes}`);
+      } else check("activity: ?after=<cursor> returns no duplicate item ids", false, `no cursor returned by first page (cursor=${JSON.stringify(cursor)})`);
+    }
+  }
+
+  step = "activity-ui";
+  await page.setViewportSize({ width: 1360, height: 900 });
+  await page.goto(`${BASE}${P}`, { waitUntil: "networkidle" });
+  const nActBtn = await page.getByRole("button", { name: /activity/i }).count();
+  check("activity: Activity button on project overview", nActBtn > 0, nActBtn ? `${nActBtn} button(s) named /activity/i` : 'no button matching /activity/i');
+  const opened = await openActivity("desktop");
+  if (opened) {
+    const { panel, log } = opened;
+    const itemSel = log.locator(':scope > li, :scope > ol > li, :scope > ul > li, [role="listitem"], [role="article"], article');
+    const t0 = Date.now();
+    let nItems = 0;
+    while (Date.now() - t0 < 10000) { nItems = (await itemSel.count()) || (await log.locator(":scope > *").count()); if (nItems > 0) break; await page.waitForTimeout(500); }
+    check("activity: feed shows at least one item for the last demo run", nItems > 0, `role="log" has ${nItems} items after 10s`);
+    const header = ((await panel.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ");
+    const logText = ((await log.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ");
+    const headText = header.replace(logText, " ");
+    check("activity: header shows agent (SEO/GEO)", /\b(SEO|GEO)\b/.test(headText), `header="${headText.slice(0, 160)}"`);
+    const dur = headText.match(DURATION)?.[0];
+    check("activity: header shows duration/elapsed time", !!dur, dur ? `found "${dur}"` : `header="${headText.slice(0, 160)}"`);
+    await shot("activity-desktop");
+    await page.keyboard.press("Escape");
+    const closed = await log.waitFor({ state: "hidden", timeout: 3000 }).then(() => true).catch(() => false);
+    check("activity: Esc closes the panel", closed, closed ? 'role="log" hidden after Escape' : 'role="log" still visible 3s after Escape');
+  } else {
+    await shot("activity-desktop");
+    check("activity: feed shows at least one item for the last demo run", false, "panel did not open");
+    check("activity: Esc closes the panel", false, "panel did not open");
+  }
+
+  step = "activity-mobile";
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${BASE}${P}`, { waitUntil: "networkidle" });
+  const openedM = await openActivity("mobile 390px");
+  await page.waitForTimeout(800);
+  const overflowM = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+  check("activity: no horizontal overflow at 390px with window open", !!openedM && !overflowM,
+    openedM ? `scrollWidth=${await page.evaluate(() => document.documentElement.scrollWidth)} innerWidth=390` : "panel did not open");
+  await shot("activity-mobile");
+  if (openedM) await page.keyboard.press("Escape");
 }
 
 writeFileSync(`${OUT}report.json`, JSON.stringify({ base: BASE, project: P, checks, failures }, null, 2));
