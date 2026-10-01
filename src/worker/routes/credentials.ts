@@ -4,14 +4,19 @@
  *   PUT    /workspaces/:wid/credentials/:provider       -> owner only; body {apiKey}; stored AES-GCM encrypted
  *   POST   /workspaces/:wid/credentials/:provider/test  -> body {apiKey?}; free, non-inference test call
  *   DELETE /workspaces/:wid/credentials/:provider       -> owner only
- * Keys are decrypted only server-side, never returned, and never logged.
+ *   POST   /workspaces/:wid/credentials/:provider/models -> owner only; body {apiKey?}; ProviderModelList from the
+ *                                                         provider's documented list endpoint (typed key, else the
+ *                                                         saved workspace key, else the operator key)
+ *   PUT    /workspaces/:wid/credentials/:provider/model  -> owner only; body {model: string | null}; the workspace's
+ *                                                         model for that provider (null = back to the operator default)
+ * Model routes exist for typesafe, gemini, perplexity, openai_geo and anthropic_geo (not the writer, which has
+ * its own custom provider flow). Keys are decrypted only server-side, never returned, and never logged.
  */
-import { TYPESAFE_DEFAULT_MODEL_ALIAS } from "../providers/typesafe";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../app";
 import type { Env } from "../env";
-import type { CapabilityState, IntegrationsStatus } from "@shared/types";
+import type { CapabilityState, IntegrationsStatus, ModelSelectableProviderId, ProviderModelList } from "@shared/types";
 import type { Db } from "../lib/db";
 import { decryptSecret, encryptionConfigured, encryptSecret } from "../lib/crypto";
 import { badRequest, notFound, setupRequired, unauthorized } from "../lib/errors";
@@ -20,8 +25,23 @@ import { iso } from "../lib/time";
 import { requireWorkspaceMember, requireWorkspaceOwner, type SessionUser } from "../platform/access";
 import { credentialAad, OPERATOR_KEY_ENV, type CredentialProviderId } from "../platform/credentials";
 import { isValidAnthropicModelId } from "../providers/anthropic-geo";
+import { isValidGeminiModelId } from "../providers/gemini";
 import { isValidOpenAiModelId } from "../providers/openai-geo";
+import { isValidPerplexityModelId } from "../providers/perplexity";
 import { rateLimit } from "../platform/rate-limit";
+import { isMissingTableError } from "../platform/custom-providers";
+import {
+  MODEL_ID_FORMAT,
+  MUST_SUPPORT,
+  isModelProvider,
+  listProviderModels,
+  loadWorkspaceModels,
+  normalizeModelId,
+  rateKnownFor,
+  resolveAllModels,
+  type ResolvedModels,
+} from "../platform/provider-models";
+import { createApiFetch } from "../runs/runtime";
 
 export type ProviderStatus = IntegrationsStatus["providers"][number];
 
@@ -29,14 +49,6 @@ type ProviderId = CredentialProviderId;
 
 export const PROVIDERS: readonly ProviderId[] = ["typesafe", "gemini", "perplexity", "openai_geo", "anthropic_geo", "writer"];
 
-const MODEL_ENV: Record<ProviderId, keyof Env> = {
-  typesafe: "TYPESAFE_MODEL",
-  gemini: "GEMINI_MODEL",
-  perplexity: "PERPLEXITY_MODEL",
-  writer: "WRITER_MODEL",
-  openai_geo: "OPENAI_GEO_MODEL",
-  anthropic_geo: "ANTHROPIC_GEO_MODEL",
-};
 
 /** Disclosure shown next to each provider: what project data is sent to it. */
 export const DATA_SENT: Record<ProviderId, string> = {
@@ -93,24 +105,44 @@ interface CredentialRow {
 
 /** Status of every provider for a workspace. Exported for routes/integrations.ts. Never includes keys. */
 export async function listProviderStatuses(env: Env, db: Db, workspaceId: string): Promise<ProviderStatus[]> {
-  const rows = await db.all<CredentialRow>(
-    "SELECT provider, key_hint, last_tested_at, last_test_ok, last_test_detail FROM provider_credentials WHERE workspace_id = ?",
-    workspaceId,
-  );
+  const [rows, saved] = await Promise.all([
+    db.all<CredentialRow>(
+      "SELECT provider, key_hint, last_tested_at, last_test_ok, last_test_detail FROM provider_credentials WHERE workspace_id = ?",
+      workspaceId,
+    ),
+    loadWorkspaceModels(db, workspaceId),
+  ]);
   const byProvider = new Map(rows.map((r) => [r.provider, r]));
-  return PROVIDERS.map((p) => statusFor(env, p, byProvider.get(p) ?? null));
+  const models = resolveAllModels(env, saved);
+  return PROVIDERS.map((p) => statusFor(env, p, byProvider.get(p) ?? null, models));
 }
 
-function statusFor(env: Env, provider: ProviderId, row: CredentialRow | null): ProviderStatus {
+/** The model the runtime would use (workspace selection > env > none; TypeSafe > jev-latest), and where it comes from. */
+function modelFor(env: Env, provider: ProviderId, models: ResolvedModels): { model: string | null; source: ProviderStatus["modelSource"] } {
+  if (provider === "writer") return { model: envStr(env, "WRITER_MODEL"), source: envStr(env, "WRITER_MODEL") ? "operator" : null };
+  return models[provider];
+}
+
+function modelValid(provider: ProviderId, model: string): boolean {
+  switch (provider) {
+    case "gemini":
+      return isValidGeminiModelId(model);
+    case "perplexity":
+      return isValidPerplexityModelId(model);
+    case "openai_geo":
+      return isValidOpenAiModelId(model);
+    case "anthropic_geo":
+      return isValidAnthropicModelId(model);
+    default:
+      return true;
+  }
+}
+
+function statusFor(env: Env, provider: ProviderId, row: CredentialRow | null, models: ResolvedModels): ProviderStatus {
   const operatorKey = envStr(env, OPERATOR_KEY_ENV[provider]);
   const source: ProviderStatus["source"] = row ? "workspace_key" : operatorKey ? "operator_key" : "none";
-  // TypeSafe falls back to the documented `jev-latest` alias (same rule as the runtime's resolveTypeSafeModel).
-  const model = envStr(env, MODEL_ENV[provider]) ?? (provider === "typesafe" ? TYPESAFE_DEFAULT_MODEL_ALIAS : null);
-  const configured =
-    model !== null &&
-    (provider !== "writer" || writerProvider(env) !== null) &&
-    (provider !== "openai_geo" || isValidOpenAiModelId(model)) &&
-    (provider !== "anthropic_geo" || isValidAnthropicModelId(model));
+  const { model, source: modelSource } = modelFor(env, provider, models);
+  const configured = model !== null && (provider !== "writer" || writerProvider(env) !== null) && modelValid(provider, model);
   let state: CapabilityState;
   if (source === "none" || !configured) state = "setup_required";
   else if (row && row.last_test_ok === 0) state = "error";
@@ -125,8 +157,15 @@ function statusFor(env: Env, provider: ProviderId, row: CredentialRow | null): P
     lastTestOk: row && row.last_test_ok !== null ? row.last_test_ok === 1 : null,
     lastTestDetail: row?.last_test_detail ?? null,
     model,
+    modelSource: modelSource ?? null,
+    rateKnown: provider === "writer" ? null : rateKnownFor(provider, model),
     dataSent: DATA_SENT[provider],
   };
+}
+
+async function statusOf(env: Env, db: Db, workspaceId: string, provider: ProviderId): Promise<ProviderStatus> {
+  const [row, saved] = await Promise.all([rowFor(db, workspaceId, provider), loadWorkspaceModels(db, workspaceId)]);
+  return statusFor(env, provider, row, resolveAllModels(env, saved));
 }
 
 // ------------------------------------------------------------------ provider test calls
@@ -323,8 +362,7 @@ credentialRoutes.put(
       }
       throw e;
     }
-    const row = await rowFor(db, wid, provider);
-    return c.json({ data: statusFor(c.env, provider, row) });
+    return c.json({ data: await statusOf(c.env, db, wid, provider) });
   },
 );
 

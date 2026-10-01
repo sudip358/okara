@@ -44,7 +44,8 @@ export const DEFAULT_GLOBAL_WRITER_TOKENS_PER_DAY = 1_000_000;
  */
 export const RUNS_PER_AGENT_PER_DAY = 1 + 3;
 /** GEO prompt executions count once per prompt per enabled provider (up to four engine lanes). */
-export const MAX_GEO_PROVIDERS = 4;
+/** Built-in GEO engines (4) plus at most 2 custom GEO engines per workspace (platform/custom-providers.ts). */
+export const MAX_GEO_PROVIDERS = 6;
 /** Engineering default: writer tokens (input + output) per project per day. No DB column yet. */
 export const DEFAULT_WRITER_TOKENS_PER_DAY = 200_000;
 
@@ -155,7 +156,13 @@ export const projectScopeKey = (projectId: string) => `project:${projectId}`;
 export const GLOBAL_SCOPE_KEY = "global";
 
 const PROVIDER_VIEW = Symbol("budget.forProvider");
-type ProviderAwareBudget = Budget & { [PROVIDER_VIEW]: (provider: CredentialProviderId) => Budget };
+/**
+ * A workspace custom provider (custom GEO engine, "custom_geo:<id>"): always the tenant's own key, so the
+ * global operator-key caps never apply; project limits do.
+ */
+export const WORKSPACE_CUSTOM_PROVIDER = "workspace_custom" as const;
+type BudgetProvider = CredentialProviderId | typeof WORKSPACE_CUSTOM_PROVIDER;
+type ProviderAwareBudget = Budget & { [PROVIDER_VIEW]: (provider: BudgetProvider) => Budget };
 
 /**
  * A view of `budget` whose reservations are attributed to `provider`'s credential, so the global
@@ -164,7 +171,9 @@ type ProviderAwareBudget = Budget & { [PROVIDER_VIEW]: (provider: CredentialProv
  */
 export function budgetFor(budget: Budget, provider: string): Budget {
   const view = (budget as Partial<ProviderAwareBudget>)[PROVIDER_VIEW];
-  return view && (PROVIDER_IDS as readonly string[]).includes(provider) ? view(provider as CredentialProviderId) : budget;
+  if (!view) return budget;
+  if (provider.startsWith("custom_geo:")) return view(WORKSPACE_CUSTOM_PROVIDER);
+  return (PROVIDER_IDS as readonly string[]).includes(provider) ? view(provider as CredentialProviderId) : budget;
 }
 
 export function createBudget(
@@ -252,14 +261,15 @@ export function createBudget(
     return claimed;
   }
 
-  async function reserve(resource: BudgetResource, amount: number, provider: CredentialProviderId | null): Promise<string> {
+  async function reserve(resource: BudgetResource, amount: number, provider: BudgetProvider | null): Promise<string> {
     if (!Number.isFinite(amount) || amount < 0) throw new Error(`Invalid reservation amount: ${amount}`);
     const amt = Math.ceil(amount);
     const day = utcDay(clock());
     const limits = await loadProjectLimits(db, scope.workspaceId, scope.projectId);
     const pKey = projectScopeKey(scope.projectId);
     const globalLimit = globalDailyLimit(resource, env);
-    const withGlobal = globalLimit !== null && spendsOperatorKey(resource, provider, await loadSources());
+    const withGlobal =
+      globalLimit !== null && provider !== WORKSPACE_CUSTOM_PROVIDER && spendsOperatorKey(resource, provider, await loadSources());
     await upsertCounter(pKey, day, resource, dailyLimit(resource, limits));
     if (!(await tryIncrement(pKey, day, resource, amt))) {
       throw new BudgetExceededError(resource, `Project daily limit reached for ${resource}.`);
@@ -318,7 +328,7 @@ export function createBudget(
       await claim(reservationId, "unknown", ["reserved"], null);
     },
 
-    [PROVIDER_VIEW]: (provider: CredentialProviderId): Budget => ({
+    [PROVIDER_VIEW]: (provider: BudgetProvider): Budget => ({
       reserve: (resource, amount) => reserve(resource, amount, provider),
       settle: (id, actual) => budget.settle(id, actual),
       release: (id) => budget.release(id),

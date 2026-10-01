@@ -20,6 +20,8 @@
  *     source_type_method 'unknown' / brand_key NULL; analyzeObservation classifies them in place.
  *     host = parsed hostname, or for Gemini redirect-wrapped URIs the domain given in the title
  *     ('' when it cannot be resolved).
+ *   - Custom GEO engines (custom_geo:<id>, geo/custom-lanes.ts) are lanes like the others, but reserve no
+ *     usd_micros (tenant key, unknown price) and always store grounded = 0 (mention rate only).
  *   - Calls run sequentially per provider, at most two provider lanes concurrently, no retries and no
  *     repeat sampling (one sample per prompt x provider).
  *   - Idempotent per run: a Workflow retry of this step skips prompt x provider pairs already observed
@@ -38,6 +40,7 @@ import { outcomeOf, reservationMicros, scrub, usdToMicros, type GeoCallOutcome }
 import { citationHost } from "../providers/gemini";
 import { cohortKey } from "./cohort";
 import { analyzeObservation } from "./analyze";
+import { isCustomGeoId } from "./custom-lanes";
 
 export interface GeoBatchSummary { observations: number; failed: number; grounded: number; providers: string[]; status: "completed" | "partial" | "failed" | "setup_required"; note: string }
 
@@ -84,8 +87,8 @@ export async function runGeoBatch(ctx: RunContext): Promise<GeoBatchSummary> {
   const providerIds = providers.map((p) => p.id);
 
   if (providers.length === 0) {
-    await ctx.log.event("geo_batch", "skipped", "No GEO provider is configured; add a Gemini, Perplexity, OpenAI or Anthropic key and model.");
-    return summary([], "setup_required", "No GEO provider is configured. Add a Gemini, Perplexity, OpenAI (OPENAI_GEO_MODEL) or Anthropic (ANTHROPIC_GEO_MODEL) API key and model id.");
+    await ctx.log.event("geo_batch", "skipped", "No GEO provider is configured; add a Gemini, Perplexity, OpenAI or Anthropic key and choose a model, or add a custom GEO engine.");
+    return summary([], "setup_required", "No GEO provider is configured. Add a Gemini, Perplexity, OpenAI or Anthropic API key and choose a model on the Integrations page (or set OPENAI_GEO_MODEL / ANTHROPIC_GEO_MODEL / GEMINI_MODEL / PERPLEXITY_MODEL), or add a custom GEO engine.");
   }
 
   const set = await db.first<{ id: string; version: number }>(
@@ -199,7 +202,10 @@ type OneResult = "ok" | "failed" | "stopped" | "duplicate";
 const isUniqueViolation = (e: unknown) => /UNIQUE constraint failed/i.test(String((e as Error)?.message ?? e));
 
 async function runOne(ctx: RunContext, provider: GeoProvider, prompt: PromptRow, promptSetId: string, promptSetVersion: number, state: BatchState): Promise<OneResult> {
-  const reservedUsd = reservationMicros(provider.id, provider.model, ctx.clock());
+  // A custom GEO engine (custom_geo:<id>) runs on the tenant's own key at an unknown price: it reserves
+  // geo_prompts and provider_calls like every engine, but no usd_micros (no rate exists and none is guessed).
+  const custom = isCustomGeoId(provider.id);
+  const reservedUsd = custom ? 0 : reservationMicros(provider.id, provider.model, ctx.clock());
 
   // 1. Reserve before sending.
   const held: Array<{ resource: "geo_prompts" | "provider_calls" | "usd_micros"; id: string }> = [];
@@ -208,7 +214,7 @@ async function runOne(ctx: RunContext, provider: GeoProvider, prompt: PromptRow,
   try {
     held.push({ resource: "geo_prompts", id: await budget.reserve("geo_prompts", 1) });
     held.push({ resource: "provider_calls", id: await budget.reserve("provider_calls", 1) });
-    held.push({ resource: "usd_micros", id: await budget.reserve("usd_micros", reservedUsd) });
+    if (!custom) held.push({ resource: "usd_micros", id: await budget.reserve("usd_micros", reservedUsd) });
   } catch (e) {
     for (const h of held) await ctx.budget.release(h.id);
     if (e instanceof BudgetExceededError) {
@@ -232,17 +238,17 @@ async function runOne(ctx: RunContext, provider: GeoProvider, prompt: PromptRow,
   }
 
   // 3. Settle / release / markUnknown.
-  const [gp, pc, usd] = held as [(typeof held)[0], (typeof held)[0], (typeof held)[0]];
+  const [gp, pc, usd] = held as [(typeof held)[0], (typeof held)[0], (typeof held)[0] | undefined];
   if (outcome === "ok") {
     await ctx.budget.settle(gp.id, 1);
     await ctx.budget.settle(pc.id, 1);
-    await ctx.budget.settle(usd.id, answer.costUsd === null ? reservedUsd : usdToMicros(answer.costUsd));
+    if (usd) await ctx.budget.settle(usd.id, answer.costUsd === null ? reservedUsd : usdToMicros(answer.costUsd));
   } else if (outcome === "not_sent") {
     for (const h of held) await ctx.budget.release(h.id);
   } else if (outcome === "rejected") {
     await ctx.budget.settle(gp.id, 1);
     await ctx.budget.settle(pc.id, 1);
-    await ctx.budget.settle(usd.id, 0);
+    if (usd) await ctx.budget.settle(usd.id, 0);
   } else {
     for (const h of held) await ctx.budget.markUnknown(h.id);
   }

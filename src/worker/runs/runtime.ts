@@ -1,8 +1,11 @@
 /**
  * Runtime assembly: builds the RunContext every agent step receives.
  * - Credentials resolve through resolveProviderKey (workspace BYO key, then operator key).
- * - Providers are constructed only when both a key and a configured model exist; otherwise they are
- *   null / absent and steps report setup_required. Nothing is ever faked.
+ * - Providers are constructed only when both a key and a model exist; otherwise they are null / absent and
+ *   steps report setup_required. Nothing is ever faked. Models resolve through platform/provider-models.ts:
+ *   the workspace's selection > the operator env var > none (TypeSafe: > the documented jev-latest alias).
+ * - Custom GEO engines (workspace custom providers with role 'geo') become extra GEO lanes, each with its
+ *   own guarded fetch that admits only that provider's host (never the shared apiFetch).
  * - `apiFetch` is an allowlisted fetch for provider APIs only; `crawlFetch` is the platform fetch,
  *   which the crawler wraps in its SSRF guard (src/worker/seo/ssrf.ts).
  */
@@ -13,7 +16,10 @@ import { newId } from "../lib/ids";
 import { iso, systemClock, type Clock } from "../lib/time";
 import type { ProjectRow } from "../platform/access";
 import { resolveProviderKey, type CredentialProviderId, type ResolvedKey } from "../platform/credentials";
-import { cleanModelId, resolveCustomWriter, selectedCustomWriter, validateCustomBaseUrl } from "../platform/custom-providers";
+import { cleanModelId, listCustomGeoEngines, resolveCustomProviderRow, resolveCustomWriter, selectedCustomWriter, validateCustomBaseUrl } from "../platform/custom-providers";
+import { loadWorkspaceModels, resolveAllModels, resolveWorkspaceModels } from "../platform/provider-models";
+import { customGeoLaneLabel, customGeoProviderId } from "../geo/custom-lanes";
+import { createCustomGeoProvider } from "../providers/custom-geo";
 import { createGscProvider } from "../platform/gsc-client";
 import { anthropicGeoConfigured, createAnthropicGeoProvider } from "../providers/anthropic-geo";
 import { createGeminiProvider, geminiConfigured } from "../providers/gemini";
@@ -172,6 +178,7 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
   const baseCrawlFetch = opts.crawlFetchImpl ?? fetch;
   const crawlFetch = ((input: RequestInfo | URL, init?: RequestInit) => baseCrawlFetch(input, init)) as typeof fetch;
 
+  const [models, customGeoRows] = await Promise.all([resolveWorkspaceModels(env, db, ref.workspaceId), listCustomGeoEngines(db, ref.workspaceId)]);
   const [typesafe, writerResolved, gemini, perplexity, openaiGeo, anthropicGeo] = await Promise.all([
     safeKey(env, db, ref.workspaceId, "typesafe", log),
     custom.status === "none" ? safeKey(env, db, ref.workspaceId, "writer", log) : Promise.resolve(null),
@@ -198,7 +205,9 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
     },
   });
 
-  const decisions = typesafeKey ? createTypeSafeProvider({ apiKey: typesafeKey, model: env.TYPESAFE_MODEL, fetchImpl: apiFetch, calls, budget: budgetFor(budget, "typesafe") }) : null;
+  const decisions = typesafeKey
+    ? createTypeSafeProvider({ apiKey: typesafeKey, model: models.typesafe.model ?? undefined, fetchImpl: apiFetch, calls, budget: budgetFor(budget, "typesafe") })
+    : null;
   // Provider views: global operator-key caps apply only when that provider uses the operator key.
   const writerHooks = { calls, budget: budgetFor(budget, "writer") };
   const writer =
@@ -212,18 +221,43 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
   }
 
   const geoProviders: GeoProvider[] = [];
-  // Model ids come only from configuration; both a key and a valid model id are required.
-  if (geminiKey && env.GEMINI_MODEL && geminiConfigured(env, geminiKey)) {
-    geoProviders.push(createGeminiProvider({ apiKey: geminiKey, model: env.GEMINI_MODEL.trim(), fetchImpl: apiFetch, now: clock, thinkingLevel: env.GEMINI_THINKING_LEVEL }));
+  // Model ids come only from the workspace's selection or the operator's configuration; both a key and a
+  // valid model id are required.
+  const gm = models.gemini.model;
+  if (geminiKey && gm && geminiConfigured(env, geminiKey, gm)) {
+    geoProviders.push(createGeminiProvider({ apiKey: geminiKey, model: gm, fetchImpl: apiFetch, now: clock, thinkingLevel: env.GEMINI_THINKING_LEVEL }));
   }
-  if (perplexityKey && env.PERPLEXITY_MODEL && perplexityConfigured(env, perplexityKey)) {
-    geoProviders.push(createPerplexityProvider({ apiKey: perplexityKey, model: env.PERPLEXITY_MODEL.trim(), fetchImpl: apiFetch, now: clock }));
+  const pm = models.perplexity.model;
+  if (perplexityKey && pm && perplexityConfigured(env, perplexityKey, pm)) {
+    geoProviders.push(createPerplexityProvider({ apiKey: perplexityKey, model: pm, fetchImpl: apiFetch, now: clock }));
   }
-  if (openaiGeoKey && env.OPENAI_GEO_MODEL && openaiGeoConfigured(env, openaiGeoKey)) {
-    geoProviders.push(createOpenAiGeoProvider({ apiKey: openaiGeoKey, model: env.OPENAI_GEO_MODEL.trim(), fetchImpl: apiFetch, now: clock }));
+  const om = models.openai_geo.model;
+  if (openaiGeoKey && om && openaiGeoConfigured(env, openaiGeoKey, om)) {
+    geoProviders.push(createOpenAiGeoProvider({ apiKey: openaiGeoKey, model: om, fetchImpl: apiFetch, now: clock }));
   }
-  if (anthropicGeoKey && env.ANTHROPIC_GEO_MODEL && anthropicGeoConfigured(env, anthropicGeoKey)) {
-    geoProviders.push(createAnthropicGeoProvider({ apiKey: anthropicGeoKey, model: env.ANTHROPIC_GEO_MODEL.trim(), fetchImpl: apiFetch, now: clock }));
+  const am = models.anthropic_geo.model;
+  if (anthropicGeoKey && am && anthropicGeoConfigured(env, anthropicGeoKey, am)) {
+    geoProviders.push(createAnthropicGeoProvider({ apiKey: anthropicGeoKey, model: am, fetchImpl: apiFetch, now: clock }));
+  }
+  // Custom GEO engines: ungrounded lanes (mention rate only), each reaching only its own host.
+  for (const row of customGeoRows) {
+    const use = await resolveCustomProviderRow(env, db, ref.workspaceId, row);
+    if (!use) continue;
+    if (use.status === "unusable") {
+      await log.event("runtime", "info", `The custom GEO engine ${use.host} cannot be used: ${use.detail} Its lane is skipped until it is fixed.`);
+      continue;
+    }
+    const p = use.provider;
+    geoProviders.push(
+      createCustomGeoProvider({
+        id: customGeoProviderId(p.id),
+        label: customGeoLaneLabel(p.label, p.host),
+        model: p.model,
+        baseUrl: p.baseUrl,
+        apiKey: p.key,
+        fetchImpl: createApiFetch(env, opts.fetchImpl ?? fetch, [p.host]),
+      }),
+    );
   }
 
   let gsc: RunContext["gsc"] = null;
@@ -317,22 +351,36 @@ export async function writerStatusForWorkspace(env: Env, db: Db, workspaceId: st
   };
 }
 
+export type CapabilityPresence = Record<CredentialProviderId, boolean> & {
+  /** Provider ids ("custom_geo:<id>") of the workspace's custom GEO engines whose saved config validates. */
+  customGeoEngines: string[];
+};
+
 /** Which capabilities are configured for a workspace, without decrypting any key. */
-export async function capabilityPresence(env: Env, db: Db, workspaceId: string): Promise<Record<CredentialProviderId, boolean>> {
-  const [rows, customWriter] = await Promise.all([
+export async function capabilityPresence(env: Env, db: Db, workspaceId: string): Promise<CapabilityPresence> {
+  const [rows, customWriter, saved, customGeo] = await Promise.all([
     db.all<{ provider: CredentialProviderId }>("SELECT provider FROM provider_credentials WHERE workspace_id = ?", workspaceId),
     selectedCustomWriter(db, workspaceId),
+    loadWorkspaceModels(db, workspaceId),
+    listCustomGeoEngines(db, workspaceId),
   ]);
-  const saved = new Set(rows.map((r) => r.provider));
+  const models = resolveAllModels(env, saved);
+  const savedKeys = new Set(rows.map((r) => r.provider));
   const op = (v: string | undefined) => typeof v === "string" && v.trim().length > 0;
   return {
-    typesafe: saved.has("typesafe") || op(env.TYPESAFE_API_KEY),
+    typesafe: savedKeys.has("typesafe") || op(env.TYPESAFE_API_KEY),
     // A selected custom writer is the workspace's writer (its own key).
-    writer: customWriter !== null || saved.has("writer") || op(env.WRITER_API_KEY),
+    writer: customWriter !== null || savedKeys.has("writer") || op(env.WRITER_API_KEY),
     // Presence only (no decryption): a saved BYO key stands in as "some key".
-    gemini: geminiConfigured(env, saved.has("gemini") ? "saved" : null),
-    perplexity: perplexityConfigured(env, saved.has("perplexity") ? "saved" : null),
-    openai_geo: openaiGeoConfigured(env, saved.has("openai_geo") ? "saved" : null),
-    anthropic_geo: anthropicGeoConfigured(env, saved.has("anthropic_geo") ? "saved" : null),
+    gemini: geminiConfigured(env, savedKeys.has("gemini") ? "saved" : null, models.gemini.model),
+    perplexity: perplexityConfigured(env, savedKeys.has("perplexity") ? "saved" : null, models.perplexity.model),
+    openai_geo: openaiGeoConfigured(env, savedKeys.has("openai_geo") ? "saved" : null, models.openai_geo.model),
+    anthropic_geo: anthropicGeoConfigured(env, savedKeys.has("anthropic_geo") ? "saved" : null, models.anthropic_geo.model),
+    customGeoEngines: customGeo
+      .filter((r) => {
+        const check = validateCustomBaseUrl(r.base_url, env.APP_ORIGIN);
+        return check.ok && check.host === r.host && cleanModelId(r.model) !== null;
+      })
+      .map((r) => customGeoProviderId(r.id)),
   };
 }

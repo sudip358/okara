@@ -43,6 +43,11 @@ export function isMissingTableError(e: unknown): boolean {
   return /no such table/i.test(String((e as Error)?.message ?? e));
 }
 
+/** True when workspace_custom_providers has no `role` column yet (code deployed before migration 0011). */
+export function isMissingRoleColumnError(e: unknown): boolean {
+  return /no such column:?\s*"?role/i.test(String((e as Error)?.message ?? e));
+}
+
 // ------------------------------------------------------------------ base URL validation
 
 export type BaseUrlRejectReason =
@@ -334,9 +339,15 @@ export async function testCustomProvider(fetchImpl: typeof fetch, baseUrl: strin
 
 // ------------------------------------------------------------------ rows
 
+export type CustomProviderRole = "writer" | "geo";
+
+/** Most custom GEO engine lanes (role 'geo') per workspace; counted separately from writer rows. */
+export const MAX_CUSTOM_GEO_ENGINES = 2;
+
 export interface CustomProviderRow {
   id: string;
   workspace_id: string;
+  role: CustomProviderRole;
   label: string;
   base_url: string;
   host: string;
@@ -352,11 +363,29 @@ export interface CustomProviderRow {
 
 /** Columns selected everywhere a row leaves the database without its key. */
 export const CUSTOM_PROVIDER_COLUMNS =
-  "id, workspace_id, label, base_url, host, model, key_hint, is_writer, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at";
+  "id, workspace_id, role, label, base_url, host, model, key_hint, is_writer, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at";
+/** The same columns before migration 0011 (every row was a writer). */
+const LEGACY_COLUMNS =
+  "id, workspace_id, 'writer' AS role, label, base_url, host, model, key_hint, is_writer, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at";
+
+/**
+ * Run a query that selects provider columns and may filter by role, falling back to the pre-0011 schema (no
+ * role column: every row is a writer) so the writer keeps working when code is deployed before the
+ * migration. `roleIs(r)` is an SQL condition on the role; `r` is always one of the two fixed literals.
+ */
+export async function withRoleColumns<T>(fn: (columns: string, roleIs: (r: CustomProviderRole) => string) => Promise<T>): Promise<T> {
+  try {
+    return await fn(CUSTOM_PROVIDER_COLUMNS, (r) => `role = '${r === "geo" ? "geo" : "writer"}'`);
+  } catch (e) {
+    if (!isMissingRoleColumnError(e)) throw e;
+    return fn(LEGACY_COLUMNS, (r) => (r === "geo" ? "0 = 1" : "1 = 1"));
+  }
+}
 
 export function toCustomProviderStatus(row: CustomProviderRow): CustomProviderStatus {
   return {
     id: row.id,
+    role: row.role === "geo" ? "geo" : "writer",
     label: row.label,
     baseUrl: row.base_url,
     host: row.host,
@@ -371,19 +400,39 @@ export function toCustomProviderStatus(row: CustomProviderRow): CustomProviderSt
   };
 }
 
+/** Every custom provider of the workspace (writers and GEO engines), oldest first. */
 export async function listCustomProviders(db: Db, workspaceId: string): Promise<CustomProviderRow[]> {
-  return db.all<CustomProviderRow>(
-    `SELECT ${CUSTOM_PROVIDER_COLUMNS} FROM workspace_custom_providers WHERE workspace_id = ? ORDER BY created_at, id LIMIT ${MAX_CUSTOM_PROVIDERS * 2}`,
-    workspaceId,
+  return withRoleColumns((cols) =>
+    db.all<CustomProviderRow>(
+      `SELECT ${cols} FROM workspace_custom_providers WHERE workspace_id = ? ORDER BY created_at, id LIMIT ${(MAX_CUSTOM_PROVIDERS + MAX_CUSTOM_GEO_ENGINES) * 2}`,
+      workspaceId,
+    ),
   );
+}
+
+/** The workspace's custom GEO engines (role 'geo'), oldest first; [] before migrations 0010/0011. No decryption. */
+export async function listCustomGeoEngines(db: Db, workspaceId: string): Promise<CustomProviderRow[]> {
+  try {
+    return await withRoleColumns((cols, roleIs) =>
+      db.all<CustomProviderRow>(
+        `SELECT ${cols} FROM workspace_custom_providers WHERE workspace_id = ? AND ${roleIs("geo")} ORDER BY created_at, id LIMIT ${MAX_CUSTOM_GEO_ENGINES}`,
+        workspaceId,
+      ),
+    );
+  } catch (e) {
+    if (isMissingTableError(e)) return [];
+    throw e;
+  }
 }
 
 /** The workspace's selected custom writer, without decrypting anything. null = the default writer (or no table yet). */
 export async function selectedCustomWriter(db: Db, workspaceId: string): Promise<CustomProviderRow | null> {
   try {
-    return await db.first<CustomProviderRow>(
-      `SELECT ${CUSTOM_PROVIDER_COLUMNS} FROM workspace_custom_providers WHERE workspace_id = ? AND is_writer = 1`,
-      workspaceId,
+    return await withRoleColumns((cols, roleIs) =>
+      db.first<CustomProviderRow>(
+        `SELECT ${cols} FROM workspace_custom_providers WHERE workspace_id = ? AND is_writer = 1 AND ${roleIs("writer")}`,
+        workspaceId,
+      ),
     );
   } catch (e) {
     if (isMissingTableError(e)) return null;
@@ -406,6 +455,30 @@ export type CustomWriterResolution =
   /** Selected but unusable (stored URL no longer validates, or the key cannot be decrypted). Never falls back. */
   | { status: "unusable"; id: string; label: string; host: string; model: string; detail: string };
 
+export type CustomProviderUse =
+  | { status: "ready"; provider: ResolvedCustomProvider }
+  | { status: "unusable"; id: string; label: string; host: string; model: string; detail: string };
+
+/** Re-validate a saved row and decrypt its key (writer or GEO engine). Never falls back to anything else. */
+export async function resolveCustomProviderRow(env: Env, db: Db, workspaceId: string, row: CustomProviderRow): Promise<CustomProviderUse | null> {
+  const base = { id: row.id, label: row.label, host: row.host, model: row.model };
+  const check = validateCustomBaseUrl(row.base_url, env.APP_ORIGIN);
+  if (!check.ok || check.host !== row.host) {
+    return { status: "unusable", ...base, detail: `The saved base URL is no longer accepted (${check.ok ? "host mismatch" : check.message}). Re-enter it.` };
+  }
+  const model = cleanModelId(row.model);
+  if (!model) return { status: "unusable", ...base, detail: "The saved model id is invalid. Choose a model again." };
+  const enc = await db.first<{ key_enc: string }>("SELECT key_enc FROM workspace_custom_providers WHERE workspace_id = ? AND id = ?", workspaceId, row.id);
+  if (!enc) return null;
+  let key: string;
+  try {
+    key = await decryptSecret(env, enc.key_enc, customProviderAad(workspaceId, row.id));
+  } catch {
+    return { status: "unusable", ...base, detail: "The saved API key could not be decrypted. Re-enter it." };
+  }
+  return { status: "ready", provider: { id: row.id, label: row.label, baseUrl: check.baseUrl, host: check.host, model, key } };
+}
+
 /**
  * The selected custom writer with its decrypted key, re-validated before use. When a custom writer is
  * selected but unusable, callers report setup_required instead of silently switching to the default writer
@@ -414,24 +487,5 @@ export type CustomWriterResolution =
 export async function resolveCustomWriter(env: Env, db: Db, workspaceId: string): Promise<CustomWriterResolution> {
   const row = await selectedCustomWriter(db, workspaceId);
   if (!row) return { status: "none" };
-  const base = { id: row.id, label: row.label, host: row.host, model: row.model };
-  const check = validateCustomBaseUrl(row.base_url, env.APP_ORIGIN);
-  if (!check.ok || check.host !== row.host) {
-    return { status: "unusable", ...base, detail: `The saved base URL is no longer accepted (${check.ok ? "host mismatch" : check.message}). Re-enter it.` };
-  }
-  const model = cleanModelId(row.model);
-  if (!model) return { status: "unusable", ...base, detail: "The saved model id is invalid. Choose a model again." };
-  const enc = await db.first<{ key_enc: string }>(
-    "SELECT key_enc FROM workspace_custom_providers WHERE workspace_id = ? AND id = ?",
-    workspaceId,
-    row.id,
-  );
-  if (!enc) return { status: "none" };
-  let key: string;
-  try {
-    key = await decryptSecret(env, enc.key_enc, customProviderAad(workspaceId, row.id));
-  } catch {
-    return { status: "unusable", ...base, detail: "The saved API key could not be decrypted. Re-enter it." };
-  }
-  return { status: "ready", provider: { id: row.id, label: row.label, baseUrl: check.baseUrl, host: check.host, model, key } };
+  return (await resolveCustomProviderRow(env, db, workspaceId, row)) ?? { status: "none" };
 }
