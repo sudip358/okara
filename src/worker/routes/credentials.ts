@@ -218,7 +218,8 @@ export async function testProviderKey(env: Env, provider: ProviderId, apiKey: st
 
 export const credentialRoutes = new Hono<AppEnv>();
 
-const keySchema = z
+/** API key field rules shared with routes/custom-providers.ts: 8-400 printable ASCII characters after trimming. */
+export const keySchema = z
   .string()
   .transform((s) => s.trim())
   .pipe(
@@ -243,7 +244,8 @@ function providerParam(c: Context<AppEnv>): ProviderId {
   return p as ProviderId;
 }
 
-async function jsonBody(c: Context<AppEnv>): Promise<unknown> {
+/** JSON body of at most 4 KiB ({} when empty). Shared with routes/custom-providers.ts. */
+export async function jsonBody(c: Context<AppEnv>): Promise<unknown> {
   const text = await c.req.text();
   if (text.length > 4096) throw badRequest("Request body too large.");
   if (!text.trim()) return {};

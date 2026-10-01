@@ -1,10 +1,13 @@
 /**
  * Project export: every project-scoped table as JSON, filtered by workspace_id AND project_id.
  * Secrets are never exported: no oauth_connections.refresh_token_enc, no provider_credentials, no OAuth
- * states, no project verification token. `_json` columns are decoded for readability.
+ * states, no project verification token, no custom provider key (key_enc) or key hint. `_json` columns are
+ * decoded for readability. The workspace's custom providers (base URL, model, writer selection) are
+ * included as workspace-level integration metadata, selected column by column.
  */
 import type { Db, Row } from "../lib/db";
 import { iso } from "../lib/time";
+import { isMissingTableError } from "./custom-providers";
 
 export const EXPORT_FORMAT = "okara-project-export";
 export const EXPORT_VERSION = 1;
@@ -77,12 +80,23 @@ export async function exportProject(db: Db, workspaceId: string, projectId: stri
     projectId,
   );
   tables.oauth_connections = integrations;
+  // Workspace-level custom providers: configuration only; key_enc and key_hint are never selected.
+  try {
+    tables.workspace_custom_providers = await db.all(
+      `SELECT id, label, base_url, host, model, is_writer, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at
+         FROM workspace_custom_providers WHERE workspace_id = ? ORDER BY created_at, id`,
+      workspaceId,
+    );
+  } catch (e) {
+    if (!isMissingTableError(e)) throw e;
+    tables.workspace_custom_providers = [];
+  }
   return {
     format: EXPORT_FORMAT,
     version: EXPORT_VERSION,
     exportedAt: iso(now),
     notes: [
-      "Secrets are excluded: OAuth refresh tokens, provider API keys, and verification tokens are never exported.",
+      "Secrets are excluded: OAuth refresh tokens, provider API keys (including custom provider keys), and verification tokens are never exported.",
       "Raw answers and page evidence are untrusted third-party text.",
     ],
     project: project ? decode(project) : null,

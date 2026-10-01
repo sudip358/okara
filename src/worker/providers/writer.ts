@@ -78,3 +78,33 @@ export function createWriter(
     ...hooks,
   });
 }
+
+/**
+ * Writer for a workspace custom provider (platform/custom-providers.ts): the same OpenAI-compatible Chat
+ * Completions implementation (json_schema structured output, metered per attempt), with the provider's own
+ * base URL, model id and key. No reasoning_effort is sent and no reasoning headroom is added (those are
+ * operator settings for the default writer). `fetchImpl` must be the guarded API fetch with the provider's
+ * host admitted. Cost is recorded as unknown (no invented prices). The host is chosen by the workspace owner,
+ * not the operator, so the response body read is capped (CUSTOM_WRITER_MAX_RESPONSE_BYTES) and the key is
+ * scrubbed from every stored error message (writing/http.ts).
+ */
+/** Response body cap per draft attempt; output is already bounded by max_completion_tokens, so 2 MiB is ample. */
+export const CUSTOM_WRITER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+
+export function createCustomProviderWriter(
+  provider: { key: string; model: string; baseUrl: string },
+  fetchImpl: typeof fetch,
+  hooks: WriterHooks = {},
+): WritingProvider {
+  return createOpenAiCompatibleWriter({
+    apiKey: provider.key,
+    model: provider.model,
+    baseUrl: provider.baseUrl,
+    fetchImpl,
+    reasoningEffort: null,
+    reasoningHeadroomTokens: 0,
+    truncationHint: "If the custom provider's model is a reasoning model, choose a non-reasoning model for the writer.",
+    maxResponseBytes: CUSTOM_WRITER_MAX_RESPONSE_BYTES,
+    ...hooks,
+  });
+}

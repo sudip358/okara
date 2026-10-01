@@ -74,6 +74,7 @@ What each caller reserves:
 | Gemini | **Estimate** from the versioned rate table (tokens + grounding fees), `cost_is_estimate = 1`, `rate_version` stored |
 | TypeSafe (Jev) | **Unknown** (NULL): no verified per-call price is configured. Bounded by `provider_calls` / `jev_calls` caps |
 | Writers (Anthropic / OpenAI-compatible) | **Unknown** (NULL): the model id is configuration and no verified rate table exists for it. Bounded by call and `writer_tokens` caps |
+| Workspace custom writer (OpenAI-compatible, owner-entered base URL) | **Unknown** (NULL), even if the response carries a cost field. Spend is on the workspace's own key: project `writer_tokens` / `provider_calls` limits apply, the `GLOBAL_*` operator caps do not |
 
 Rates live in `src/worker/providers/rates.ts` (`RATE_VERSION = "geo-rates-2026-09-30.1"`), each with its
 official pricing URL and validity window. Estimates use paid Standard-tier list prices and ignore free

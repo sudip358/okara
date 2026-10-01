@@ -19,7 +19,7 @@ import type { AppEnv } from "../app";
 import { requireUser } from "../platform/require-user";
 import { badRequest, BudgetExceededError, HttpError, setupRequired } from "../lib/errors";
 import { requireProject } from "../platform/access";
-import { buildWriterForWorkspace } from "../runs/runtime";
+import { buildWriterForWorkspace, writerStatusForWorkspace } from "../runs/runtime";
 import { writerConfigStatus } from "../providers/writer";
 import { contentPillars, generatePromptSuggestions, getActivePromptSet, MAX_PROMPT_LENGTH, MAX_PROMPTS_PER_SET, savePromptSet } from "../geo/prompts";
 import { buildDisplacementSummary, buildGeoResults, buildObservationDetail, buildSearchQuerySummary } from "../geo/results";
@@ -72,10 +72,16 @@ geoRoutes.post("/projects/:pid/geo/prompts/generate", async (c) => {
   const db = c.get("db");
   const project = await requireProject(db, user.id, c.req.param("pid"));
   const status = writerConfigStatus(c.env);
-  const writer = status.configured ? await buildWriterForWorkspace(c.env, db, project.workspace_id, { projectId: project.id }) : null;
+  const workspaceWriter = await writerStatusForWorkspace(c.env, db, project.workspace_id);
+  const custom = workspaceWriter.source === "custom" ? workspaceWriter.custom : null;
+  const writer = custom || status.configured ? await buildWriterForWorkspace(c.env, db, project.workspace_id, { projectId: project.id }) : null;
   if (!writer) {
     throw setupRequired(
-      status.configured ? "Add a writing-provider API key to generate prompt suggestions." : `Writing provider not configured (missing: ${status.missing.join(", ")}).`,
+      custom
+        ? `The custom writer (${custom.host}) cannot be used; re-enter its base URL and API key on the integrations page.`
+        : status.configured
+          ? "Add a writing-provider API key to generate prompt suggestions."
+          : `Writing provider not configured (missing: ${status.missing.join(", ")}).`,
     );
   }
   try {

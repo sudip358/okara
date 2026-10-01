@@ -71,13 +71,16 @@ Step semantics:
   `jev-latest` alias), else `null` (semantic ranking shown as unavailable).
 - `writer`: Anthropic Messages or an OpenAI-compatible endpoint when `WRITER_PROVIDER`, `WRITER_MODEL`
   (and `WRITER_BASE_URL` for openai_compatible) and a key exist, else `null` (setup required). There is no
-  default model id.
+  default model id. When the workspace selected one of its custom OpenAI-compatible providers
+  (`platform/custom-providers.ts`, table `workspace_custom_providers`), that provider's base URL, model and
+  key are used instead; if it cannot be used, `writer` is `null` (no fallback to the default writer).
 - `geoProviders`: Gemini and/or Perplexity, only when a key and a configured model id exist.
 - `gsc`: Search Console client when the project has a connected OAuth token.
 - `budget` (atomic reservations), `calls` (provider_calls recorder), `log` (run_events), `isCancelled`.
 - `apiFetch`: allowlisted fetch for provider APIs (`api.typesafe.ai`, `generativelanguage.googleapis.com`,
   `api.perplexity.ai`, `api.anthropic.com`, `oauth2.googleapis.com`, `www.googleapis.com`,
-  `searchconsole.googleapis.com`, and the configured `WRITER_BASE_URL` host); https only, default port, no
+  `searchconsole.googleapis.com`, the configured `WRITER_BASE_URL` host, and, for this workspace only, the
+  host of its selected custom writer); https only, default port, no
   URL credentials, `redirect: "manual"`. Anything else (including crawl targets) is refused with
   `OutboundBlockedError`. DNS-over-HTTPS ownership checks run in the verification route with its own fetch,
   never inside a run.

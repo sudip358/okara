@@ -12,6 +12,7 @@ import { loadSession, securityHeaders, csrfProtection } from "./platform/securit
 
 import { authRoutes } from "./routes/auth";
 import { credentialRoutes } from "./routes/credentials";
+import { customProviderRoutes } from "./routes/custom-providers";
 import { projectRoutes } from "./routes/projects";
 import { integrationRoutes } from "./routes/integrations";
 import { seoRoutes } from "./routes/seo";
@@ -55,6 +56,7 @@ export function createApp() {
 
   app.route("/", authRoutes);
   app.route("/", credentialRoutes);
+  app.route("/", customProviderRoutes);
   app.route("/", projectRoutes);
   app.route("/", integrationRoutes);
   app.route("/", seoRoutes);

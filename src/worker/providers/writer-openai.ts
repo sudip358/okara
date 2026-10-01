@@ -38,6 +38,10 @@ export interface OpenAiWriterConfig extends WriterHooks {
   reasoningEffort?: OpenAiReasoningEffort | null;
   /** Extra completion tokens for reasoning (see reasoningHeadroomTokens); defaults from reasoningEffort. */
   reasoningHeadroomTokens?: number;
+  /** Replaces the env-variable advice in the truncation error (workspace custom providers have no env settings). */
+  truncationHint?: string;
+  /** Cap on the response body read per attempt (workspace custom providers: hosts the operator does not control). */
+  maxResponseBytes?: number;
 }
 
 /**
@@ -113,6 +117,8 @@ export interface OpenAiLimitInfo {
   /** Reasoning headroom included in it. */
   headroomTokens?: number;
   reasoningEffort?: OpenAiReasoningEffort | null;
+  /** Advice appended to the truncation error instead of the WRITER_REASONING_* hint. */
+  hint?: string;
 }
 
 function truncationMessage(outputTokens: number, limit: OpenAiLimitInfo): string {
@@ -120,7 +126,9 @@ function truncationMessage(outputTokens: number, limit: OpenAiLimitInfo): string
   const parts = [`hit ${cap}`];
   if (limit.headroomTokens !== undefined) parts.push(`including ${limit.headroomTokens} reasoning headroom tokens`);
   if (outputTokens) parts.push(`${outputTokens} completion tokens used, reasoning tokens included`);
-  const hint = limit.reasoningEffort
+  const hint = limit.hint
+    ? limit.hint
+    : limit.reasoningEffort
     ? `The model spent the budget reasoning at WRITER_REASONING_EFFORT=${limit.reasoningEffort}: lower it (e.g. low or minimal) or raise WRITER_REASONING_HEADROOM_TOKENS.`
     : "If WRITER_MODEL is a reasoning model, set WRITER_REASONING_EFFORT (e.g. low), which also adds reasoning headroom (WRITER_REASONING_HEADROOM_TOKENS); otherwise use a non-reasoning model.";
   return `Writer output was truncated: finish_reason "length" (${parts.join("; ")}). ${hint}`;
@@ -174,8 +182,11 @@ export function createOpenAiCompatibleWriter(cfg: OpenAiWriterConfig): WritingPr
             requestIdHeader: "x-request-id",
             onAttempt,
             sleep: cfg.sleep,
+            maxResponseBytes: cfg.maxResponseBytes,
+            // An error body may echo the key in a format redact() does not know; never store it.
+            secrets: [cfg.apiKey],
           });
-          const parsed = parseOpenAiResponse((r.json ?? {}) as ChatResponse, cfg.model, { maxCompletionTokens, headroomTokens, reasoningEffort });
+          const parsed = parseOpenAiResponse((r.json ?? {}) as ChatResponse, cfg.model, { maxCompletionTokens, headroomTokens, reasoningEffort, hint: cfg.truncationHint });
           return { result: parsed.result, failure: parsed.failure, requestId: r.requestId, latencyMs: r.latencyMs };
         },
       );

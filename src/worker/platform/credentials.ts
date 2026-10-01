@@ -7,6 +7,7 @@ import type { Env } from "../env";
 import type { Db } from "../lib/db";
 import { decryptSecret } from "../lib/crypto";
 import type { ProviderIdWithGeoEngines } from "@shared/types";
+import { selectedCustomWriter } from "./custom-providers";
 
 /**
  * Every provider with a credential. Includes the two API GEO engine lanes (openai_geo, anthropic_geo);
@@ -49,15 +50,20 @@ export type CredentialSource = ResolvedKey["source"];
 /**
  * Which credential each provider would use for this workspace, mirroring resolveProviderKey's
  * precedence (saved workspace key, then operator key) without decrypting anything. null = no key.
+ * A selected workspace custom writer (platform/custom-providers.ts) is the writer's workspace key.
  * Budgets use this to apply the global (operator) daily caps only to operator-key spend.
  */
 export async function credentialSources(env: Env, db: Db, workspaceId: string): Promise<Record<CredentialProviderId, CredentialSource | null>> {
-  const rows = await db.all<{ provider: CredentialProviderId }>("SELECT provider FROM provider_credentials WHERE workspace_id = ?", workspaceId);
+  const [rows, customWriter] = await Promise.all([
+    db.all<{ provider: CredentialProviderId }>("SELECT provider FROM provider_credentials WHERE workspace_id = ?", workspaceId),
+    selectedCustomWriter(db, workspaceId),
+  ]);
   const saved = new Set(rows.map((r) => r.provider));
   const out = {} as Record<CredentialProviderId, CredentialSource | null>;
   for (const provider of Object.keys(OPERATOR_KEY_ENV) as CredentialProviderId[]) {
     const op = env[OPERATOR_KEY_ENV[provider]];
     out[provider] = saved.has(provider) ? "workspace_key" : typeof op === "string" && op.trim() ? "operator_key" : null;
   }
+  if (customWriter) out.writer = "workspace_key";
   return out;
 }

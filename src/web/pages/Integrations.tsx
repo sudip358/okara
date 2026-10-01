@@ -1,5 +1,6 @@
 /**
- * Integrations: ownership verification, Google Search Console, workspace provider keys.
+ * Integrations: ownership verification, Google Search Console, workspace provider keys, and the writer's
+ * provider type (default writer or a custom OpenAI-compatible provider; see integrations/CustomWriter.tsx).
  * Keys are write-only: never displayed after save (only the server-provided hint). OWNED BY: web-shell.
  */
 import { useId, useState } from "react";
@@ -24,6 +25,7 @@ import {
   buttonClass,
   cx,
 } from "@web/components/ui";
+import { WriterProviderRow } from "./integrations/CustomWriter";
 
 type ProviderStatus = IntegrationsStatus["providers"][number];
 
@@ -389,8 +391,8 @@ function ProviderKeysCard({ workspaceId, fallback, onChange }: { workspaceId: st
         <div className="space-y-3">
           {list.error !== null && <ErrorState error={list.error} onRetry={list.reload} title="Could not load workspace keys" />}
           <ul className="space-y-3">
-            {providers.map((p) => (
-              <li key={p.provider}>
+            {providers.map((p) => {
+              const row = (
                 <ProviderRow
                   workspaceId={workspaceId}
                   p={p}
@@ -400,8 +402,14 @@ function ProviderKeysCard({ workspaceId, fallback, onChange }: { workspaceId: st
                     onChange();
                   }}
                 />
-              </li>
-            ))}
+              );
+              return (
+                <li key={p.provider}>
+                  {/* The writer row adds the provider type choice: default writer or a custom OpenAI-compatible provider. */}
+                  {p.provider === "writer" ? <WriterProviderRow workspaceId={workspaceId} writer={p} defaultPanel={row} onChange={onChange} /> : row}
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}

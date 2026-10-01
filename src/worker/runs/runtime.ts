@@ -13,6 +13,7 @@ import { newId } from "../lib/ids";
 import { iso, systemClock, type Clock } from "../lib/time";
 import type { ProjectRow } from "../platform/access";
 import { resolveProviderKey, type CredentialProviderId, type ResolvedKey } from "../platform/credentials";
+import { cleanModelId, resolveCustomWriter, selectedCustomWriter, validateCustomBaseUrl } from "../platform/custom-providers";
 import { createGscProvider } from "../platform/gsc-client";
 import { anthropicGeoConfigured, createAnthropicGeoProvider } from "../providers/anthropic-geo";
 import { createGeminiProvider, geminiConfigured } from "../providers/gemini";
@@ -20,7 +21,7 @@ import { createOpenAiGeoProvider, openaiGeoConfigured } from "../providers/opena
 import { createPerplexityProvider, perplexityConfigured } from "../providers/perplexity";
 import { createTypeSafeProvider } from "../providers/typesafe";
 import type { GeoProvider, WritingProvider } from "../providers/types";
-import { createWriter } from "../providers/writer";
+import { createCustomProviderWriter, createWriter, writerConfigStatus } from "../providers/writer";
 import { budgetFor, createBudget } from "./budget";
 import { createCallRecorder } from "./calls";
 import type { RunContext, RunLogger } from "./context";
@@ -29,7 +30,8 @@ import type { RunContext, RunLogger } from "./context";
 /**
  * Provider API hosts reachable from runs, plus the configured WRITER_BASE_URL host. Nothing else:
  * crawling uses crawlFetch (SSRF guard), and DNS-over-HTTPS verification runs in its own route with
- * its own fetch, not in agent runs.
+ * its own fetch, not in agent runs. A workspace's custom provider host is added per run/request only for
+ * that workspace (see createApiFetch's `extraHosts`), never globally.
  */
 export const API_HOST_ALLOWLIST: readonly string[] = [
   "api.typesafe.ai",
@@ -44,7 +46,12 @@ export const API_HOST_ALLOWLIST: readonly string[] = [
 
 export class OutboundBlockedError extends Error {}
 
-export function allowedApiHosts(env: Pick<Env, "WRITER_BASE_URL">): Set<string> {
+/**
+ * Allowlisted hosts. `extraHosts` are the hosts of the custom providers the current workspace uses
+ * (platform/custom-providers.ts); each is re-checked with the custom base URL rules (public hostname, no IP
+ * literal, no local name) so nothing else can be smuggled in.
+ */
+export function allowedApiHosts(env: Pick<Env, "WRITER_BASE_URL">, extraHosts: Iterable<string> = []): Set<string> {
   const hosts = new Set(API_HOST_ALLOWLIST);
   const base = env.WRITER_BASE_URL?.trim();
   if (base) {
@@ -55,16 +62,20 @@ export function allowedApiHosts(env: Pick<Env, "WRITER_BASE_URL">): Set<string> 
       // invalid base URL: not added; the writer factory reports it as setup_required
     }
   }
+  for (const h of extraHosts) {
+    const check = typeof h === "string" ? validateCustomBaseUrl(`https://${h}`) : null;
+    if (check?.ok && check.host === h.toLowerCase()) hosts.add(check.host);
+  }
   return hosts;
 }
 
 /**
  * Fetch that only reaches allowlisted provider API hosts over https on the default port, never
  * follows redirects (a 3xx is returned to the caller, not followed to another host), and refuses
- * URLs with embedded credentials.
+ * URLs with embedded credentials. `extraHosts`: the current workspace's custom provider hosts in use.
  */
-export function createApiFetch(env: Pick<Env, "WRITER_BASE_URL">, baseFetch: typeof fetch = fetch): typeof fetch {
-  const hosts = allowedApiHosts(env);
+export function createApiFetch(env: Pick<Env, "WRITER_BASE_URL">, baseFetch: typeof fetch = fetch, extraHosts: Iterable<string> = []): typeof fetch {
+  const hosts = allowedApiHosts(env, extraHosts);
   const guarded = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     let url: URL;
@@ -152,7 +163,10 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
   const ref = { id: project.id, workspaceId: project.workspace_id };
   const log = createRunLogger(db, { id: run.id, workspaceId: run.workspace_id, projectId: run.project_id }, clock);
   const calls = createCallRecorder(db, { workspaceId: ref.workspaceId, projectId: ref.id, runId: run.id }, clock);
-  const apiFetch = createApiFetch(env, opts.fetchImpl ?? fetch);
+  // A selected custom writer replaces the default writer for this workspace; its host (and only its host)
+  // joins this run's allowlist. Selected but unusable -> no writer (setup_required), never a silent fallback.
+  const custom = await resolveCustomWriter(env, db, ref.workspaceId);
+  const apiFetch = createApiFetch(env, opts.fetchImpl ?? fetch, custom.status === "ready" ? [custom.provider.host] : []);
   // Wrapped so `ctx.crawlFetch(url)` never invokes the platform fetch with `this = ctx`
   // (workerd throws "Illegal invocation" for a fetch called on a foreign receiver).
   const baseCrawlFetch = opts.crawlFetchImpl ?? fetch;
@@ -160,7 +174,7 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
 
   const [typesafe, writerResolved, gemini, perplexity, openaiGeo, anthropicGeo] = await Promise.all([
     safeKey(env, db, ref.workspaceId, "typesafe", log),
-    safeKey(env, db, ref.workspaceId, "writer", log),
+    custom.status === "none" ? safeKey(env, db, ref.workspaceId, "writer", log) : Promise.resolve(null),
     safeKey(env, db, ref.workspaceId, "gemini", log),
     safeKey(env, db, ref.workspaceId, "perplexity", log),
     safeKey(env, db, ref.workspaceId, "openai_geo", log),
@@ -176,7 +190,7 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
   const budget = createBudget(db, env, { workspaceId: ref.workspaceId, projectId: ref.id, runId: run.id }, clock, {
     sources: {
       typesafe: typesafe?.source ?? null,
-      writer: writerResolved?.source ?? null,
+      writer: custom.status === "ready" ? "workspace_key" : (writerResolved?.source ?? null),
       gemini: gemini?.source ?? null,
       perplexity: perplexity?.source ?? null,
       openai_geo: openaiGeo?.source ?? null,
@@ -186,7 +200,16 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
 
   const decisions = typesafeKey ? createTypeSafeProvider({ apiKey: typesafeKey, model: env.TYPESAFE_MODEL, fetchImpl: apiFetch, calls, budget: budgetFor(budget, "typesafe") }) : null;
   // Provider views: global operator-key caps apply only when that provider uses the operator key.
-  const writer = createWriter(env, writerKey, apiFetch, { calls, budget: budgetFor(budget, "writer") });
+  const writerHooks = { calls, budget: budgetFor(budget, "writer") };
+  const writer =
+    custom.status === "ready"
+      ? createCustomProviderWriter(custom.provider, apiFetch, writerHooks)
+      : custom.status === "none"
+        ? createWriter(env, writerKey, apiFetch, writerHooks)
+        : null;
+  if (custom.status === "unusable") {
+    await log.event("runtime", "info", `The workspace's custom writer (${custom.host}) is selected but cannot be used: ${custom.detail} Drafting is unavailable until it is fixed.`);
+  }
 
   const geoProviders: GeoProvider[] = [];
   // Model ids come only from configuration; both a key and a valid model id are required.
@@ -234,7 +257,8 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
 
 /**
  * Writer for request-scoped routes (e.g. GEO prompt generation). Calls are recorded against the
- * workspace (and project when given); budgets apply only when a projectId is supplied.
+ * workspace (and project when given); budgets apply only when a projectId is supplied. A selected custom
+ * writer is used instead of the default writer (null when it is unusable; never a fallback).
  */
 export async function buildWriterForWorkspace(
   env: Env,
@@ -242,25 +266,69 @@ export async function buildWriterForWorkspace(
   workspaceId: string,
   opts: { projectId?: string | null; fetchImpl?: typeof fetch; clock?: Clock } = {},
 ): Promise<WritingProvider | null> {
-  const resolved = await safeKey(env, db, workspaceId, "writer");
-  if (!resolved) return null;
+  const custom = await resolveCustomWriter(env, db, workspaceId);
+  if (custom.status === "unusable") return null;
+  const resolved: ResolvedKey | null = custom.status === "none" ? await safeKey(env, db, workspaceId, "writer") : null;
+  if (custom.status === "none" && !resolved) return null;
   const clock = opts.clock ?? systemClock;
   const projectId = opts.projectId ?? null;
   const calls = createCallRecorder(db, { workspaceId, projectId, runId: null }, clock);
+  const source = custom.status === "ready" ? "workspace_key" : resolved!.source;
   const budget = projectId
-    ? budgetFor(createBudget(db, env, { workspaceId, projectId, runId: null }, clock, { sources: { writer: resolved.source } }), "writer")
+    ? budgetFor(createBudget(db, env, { workspaceId, projectId, runId: null }, clock, { sources: { writer: source } }), "writer")
     : null;
-  return createWriter(env, resolved.key, createApiFetch(env, opts.fetchImpl ?? fetch), { calls, budget });
+  if (custom.status === "ready") {
+    return createCustomProviderWriter(custom.provider, createApiFetch(env, opts.fetchImpl ?? fetch, [custom.provider.host]), { calls, budget });
+  }
+  return createWriter(env, resolved!.key, createApiFetch(env, opts.fetchImpl ?? fetch), { calls, budget });
+}
+
+export interface WorkspaceWriterStatus {
+  /** "custom" when the workspace selected one of its custom providers as writer. */
+  source: "default" | "custom";
+  /** A writer can be built: configuration and a key are present (presence only; nothing is decrypted). */
+  configured: boolean;
+  /** What is missing when not configured (env names, or the custom provider problem). */
+  missing: string[];
+  custom: { id: string; host: string; model: string } | null;
+}
+
+/** Writer readiness for a workspace without decrypting any key (agent state, setup messages). */
+export async function writerStatusForWorkspace(env: Env, db: Db, workspaceId: string): Promise<WorkspaceWriterStatus> {
+  const custom = await selectedCustomWriter(db, workspaceId);
+  if (custom) {
+    const check = validateCustomBaseUrl(custom.base_url, env.APP_ORIGIN);
+    const ok = check.ok && check.host === custom.host && cleanModelId(custom.model) !== null;
+    return {
+      source: "custom",
+      configured: ok,
+      missing: ok ? [] : ["a valid base URL and model for the custom writer (re-save it on the integrations page)"],
+      custom: { id: custom.id, host: custom.host, model: custom.model },
+    };
+  }
+  const status = writerConfigStatus(env);
+  const saved = await db.first<{ n: number }>("SELECT COUNT(*) AS n FROM provider_credentials WHERE workspace_id = ? AND provider = 'writer'", workspaceId);
+  const hasKey = (saved?.n ?? 0) > 0 || (typeof env.WRITER_API_KEY === "string" && env.WRITER_API_KEY.trim().length > 0);
+  return {
+    source: "default",
+    configured: status.configured && hasKey,
+    missing: [...status.missing, ...(hasKey ? [] : ["a writer API key"])],
+    custom: null,
+  };
 }
 
 /** Which capabilities are configured for a workspace, without decrypting any key. */
 export async function capabilityPresence(env: Env, db: Db, workspaceId: string): Promise<Record<CredentialProviderId, boolean>> {
-  const rows = await db.all<{ provider: CredentialProviderId }>("SELECT provider FROM provider_credentials WHERE workspace_id = ?", workspaceId);
+  const [rows, customWriter] = await Promise.all([
+    db.all<{ provider: CredentialProviderId }>("SELECT provider FROM provider_credentials WHERE workspace_id = ?", workspaceId),
+    selectedCustomWriter(db, workspaceId),
+  ]);
   const saved = new Set(rows.map((r) => r.provider));
   const op = (v: string | undefined) => typeof v === "string" && v.trim().length > 0;
   return {
     typesafe: saved.has("typesafe") || op(env.TYPESAFE_API_KEY),
-    writer: saved.has("writer") || op(env.WRITER_API_KEY),
+    // A selected custom writer is the workspace's writer (its own key).
+    writer: customWriter !== null || saved.has("writer") || op(env.WRITER_API_KEY),
     // Presence only (no decryption): a saved BYO key stands in as "some key".
     gemini: geminiConfigured(env, saved.has("gemini") ? "saved" : null),
     perplexity: perplexityConfigured(env, saved.has("perplexity") ? "saved" : null),

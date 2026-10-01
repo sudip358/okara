@@ -17,6 +17,13 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | PUT | /workspaces/:wid/credentials/:provider | platform-auth | body `{apiKey}`; `:provider` is `typesafe`, `gemini`, `perplexity`, `openai_geo`, `anthropic_geo` or `writer` (migration 0008 widens the CHECK); stores encrypted; returns provider status |
 | POST | /workspaces/:wid/credentials/:provider/test | platform-auth | body `{apiKey?}` (tests the typed key if given, else saved); `{ok, detail}` |
 | DELETE | /workspaces/:wid/credentials/:provider | platform-auth | `{ok:true}` |
+| GET | /workspaces/:wid/custom-providers | platform-auth | `CustomProvidersResponse` (member; never keys, only `keyHint`). See "Custom providers" |
+| POST | /workspaces/:wid/custom-providers | platform-auth | owner; body `CustomProviderInput` `{label?, baseUrl, model, apiKey, useAsWriter?}`; 201 `CustomProvidersResponse`; 409 over 5 per workspace |
+| PATCH | /workspaces/:wid/custom-providers/:id | platform-auth | owner; body `{label?, baseUrl?, model?, apiKey?}` (key optional = keep; required when the host changes); `CustomProvidersResponse` |
+| DELETE | /workspaces/:wid/custom-providers/:id | platform-auth | owner; `CustomProvidersResponse` (the writer reverts to the default when it was selected) |
+| POST | /workspaces/:wid/custom-providers/:id/test | platform-auth | member; `GET {base}/models` with the saved key; `{ok, detail}` (recorded as last test) |
+| POST | /workspaces/:wid/custom-providers/models | platform-auth | owner; body `{baseUrl, apiKey}` or `{providerId}`; `CustomProviderModelList` |
+| PUT | /workspaces/:wid/writer-source | platform-auth | owner; body `{source: "default" \| "custom:<id>"}`; `CustomProvidersResponse` |
 | GET | /workspaces/:wid/projects | platform-projects | `Project[]` |
 | POST | /workspaces/:wid/projects | platform-projects | body `ProjectInput`; `Project` |
 | GET | /projects/:pid | platform-projects | `Project` |
@@ -84,6 +91,68 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | PUT | /projects/:pid/pages/:pageId/checklist/:itemId | checklists | body `{checked, note?}` for manual items on that page |
 | PUT | /projects/:pid/checklists/:kind/:itemId | checklists | body `{checked, note?}` for manual items; returns `ChecklistItem` |
 | POST | /demo/seed | platform-projects | DEMO_MODE only, never production: creates a labelled demo project with fixture data |
+
+## Custom providers (OpenAI-compatible writer)
+
+Routes: `src/worker/routes/custom-providers.ts`; rules: `src/worker/platform/custom-providers.ts`; table
+`workspace_custom_providers` (migration 0010); types `CustomProviderStatus`, `CustomProvidersResponse`,
+`CustomProviderModelList`, `CustomProviderInput`, `WriterSource` in `src/shared/types.ts`. Contract:
+docs/provider-contracts.md, "Custom OpenAI-compatible provider".
+
+- A workspace owner adds a provider with a base URL, an API key and a model id, at most 5 per workspace
+  (enforced in the INSERT itself). Saving (`useAsWriter` defaults to true) makes it the workspace writer;
+  `PUT /workspaces/:wid/writer-source` switches between `"default"` (the operator-configured writer:
+  `WRITER_PROVIDER` / `WRITER_MODEL` with the workspace or operator writer key) and `"custom:<id>"`. One
+  writer per workspace (partial unique index); deleting the selected provider reverts to the default.
+- Base URL (400 `bad_request`, `details: {field: "baseUrl", reason}`): https only (`not_https`), no user
+  name or password (`credentials`), default port only (`port`), no query or fragment (`query`), no IP literal
+  of any form, v4 or v6, public or not (`ip_literal`), a public hostname: a dot, LDH labels, an alphabetic or
+  `xn--` TLD, not `localhost`, `.local`, `.localdomain`, `.internal`, `.lan`, `.home.arpa`, `.intranet`,
+  `.corp`, `.home`, `.private`, `.test`, `.example`, `.invalid`, `.onion`, `.alt`, `.arpa`, cluster
+  service-discovery suffixes (`.svc`, `.cluster`, `.consul`, `.docker`, `.kube`, `.k8s`), loopback
+  wildcard-DNS services (`nip.io`, `sslip.io`, `xip.io`, `localtest.me`, `lvh.me`, `vcap.me`,
+  `localhost.direct`), and no name that spells an IPv4 address in four dot- or dash-separated groups
+  (`127.0.0.1.example.com`, `10-0-0-1.example.com`) (`local_host`, `not_public_host`), never the
+  `APP_ORIGIN` host (`own_origin`), at most 300 characters (`too_long`). Names are not resolved; a public
+  name pointing at a private address is covered by Workers egress (see docs/provider-contracts.md).
+  Normalised: lowercase punycode host (IDN accepted), trailing slashes and a pasted `/chat/completions`,
+  `/completions` or `/models` suffix removed. Re-validated before every use.
+- Other 400s name their field: `apiKey` (8-400 printable ASCII; `key_required` when a PATCH changes the
+  host without a new key: a saved key is only ever sent to the host it was saved for), `model` (1-200
+  characters, no control characters), `label` (optional, up to 60 characters; defaults to the host). Input
+  values are never echoed. Unknown fields are 400. 412 `setup_required` without `TOKEN_ENCRYPTION_KEY_V1` or
+  before migration 0010 is applied.
+- `POST .../models` fetches `GET {baseUrl}/models` server-side with `Authorization: Bearer <key>`, 10 s
+  timeout (headers and body), `redirect: "manual"`, through the guarded API fetch with only that host added;
+  body read capped at 8 MiB. Returns `{ok, detail, models, total, truncated}`: `ok` true (model list received;
+  the key was not rejected, which is not proof it works: some providers list models without checking the
+  key), false (rejected 401/403, HTTP n, redirect not followed, network error or timeout, or a 2xx answer
+  that is not a model list, e.g. an HTML page because the base URL lacks `/v1`) or null (429, not
+  confirmed).
+  Accepted shapes: `{data: [{id}]}`, `{models: [{id | name}]}`, a bare array of objects or strings; ids are
+  deduped, sorted case-insensitively, capped at 500 (`truncated`), and ids over 200 characters or with control
+  characters are dropped. A recognised but empty list, or one too large to read (`models: []`, `ok` true),
+  means "type a model id". The
+  provider's body is never echoed; model ids are untrusted plain text. With `{providerId}` the stored key is
+  decrypted and sent only to the stored host. Rate limit 10 per minute per user and workspace.
+- `POST .../:id/test` has the same outcomes, records `last_tested_*`, and notes whether the saved model is
+  listed. Members may test; every write and the model fetch are owner-only. Every route checks
+  `requireWorkspaceMember` / `requireWorkspaceOwner` and filters by `workspace_id`; another workspace's id is
+  404.
+- Runs and request-scoped writers (`runs/runtime.ts` `buildRunContext`, `buildWriterForWorkspace`): a selected,
+  valid custom provider replaces the default writer, and its host (only the selected provider's host, only for
+  that workspace) joins the run's `apiFetch` allowlist. A selected provider that cannot be used (stored URL
+  no longer valid, key not decryptable) leaves the workspace without a writer (`setup_required`, a
+  `runtime` run event), never a silent fallback to the default writer.
+- Budget: `writer_tokens` and `provider_calls` are attributed to the workspace's own key (project limits
+  only, never the `GLOBAL_*` operator caps). Cost is recorded as unknown (`cost_usd` NULL).
+- Untrusted host: a draft response body over 2 MiB is cancelled and fails the attempt without a retry
+  (`Response exceeded 2097152 bytes.`), and the key is scrubbed from every stored error message
+  (`provider_calls.error`, run events, draft errors) even when the provider echoes it in a format the
+  generic redaction does not know.
+- Export: `GET /projects/:pid/export` includes `tables.workspace_custom_providers` (id, label, base URL, host,
+  model, writer flag, last test, timestamps); `key_enc` and `key_hint` are never selected. Rows are deleted
+  with their workspace (`ON DELETE CASCADE`).
 
 ## Sign-in errors
 

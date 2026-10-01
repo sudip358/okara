@@ -143,6 +143,60 @@ export interface IntegrationsStatus {
   }>;
 }
 
+// ------------------------------------------------------------------ custom (OpenAI-compatible) providers
+/**
+ * Which writer a workspace uses: the operator-configured default (WRITER_PROVIDER / WRITER_MODEL with the
+ * workspace's or the operator's writer key), or one of the workspace's custom providers.
+ */
+export type WriterSource = "default" | `custom:${string}`;
+
+/** A workspace custom provider as the API returns it. The API key is never included (only its last 4 characters). */
+export interface CustomProviderStatus {
+  id: string;
+  label: string;
+  /** Normalised https base URL; `/models` and `/chat/completions` are appended to it. */
+  baseUrl: string;
+  host: string;
+  /** Untrusted provider-defined id; render as plain text. */
+  model: string;
+  keyHint: string;
+  /** True when this provider is the workspace's writer. */
+  isWriter: boolean;
+  lastTestedAt: string | null;
+  lastTestOk: boolean | null;
+  lastTestDetail: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CustomProvidersResponse {
+  providers: CustomProviderStatus[];
+  writerSource: WriterSource;
+  maxProviders: number;
+  /** Only the workspace owner can add, change, select or remove custom providers. */
+  canManage: boolean;
+  /** Disclosure: what data a custom writer receives. */
+  dataSent: string;
+}
+
+/** POST /workspaces/:wid/custom-providers/models. `models` are untrusted ids (plain text). */
+export interface CustomProviderModelList {
+  ok: boolean | null;
+  detail: string;
+  models: string[];
+  total: number;
+  truncated: boolean;
+}
+
+export interface CustomProviderInput {
+  label?: string;
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  /** Select it as the workspace writer (default true). */
+  useAsWriter?: boolean;
+}
+
 // ------------------------------------------------------------------ metrics primitives
 export interface Ratio {
   numerator: number;

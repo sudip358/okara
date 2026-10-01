@@ -28,8 +28,7 @@ import { badRequest, conflict, notFound } from "../lib/errors";
 import { newId } from "../lib/ids";
 import { iso, utcDay } from "../lib/time";
 import { requireProject, type ProjectRow } from "../platform/access";
-import { writerConfigStatus } from "../providers/writer";
-import { capabilityPresence, type RunRow } from "../runs/runtime";
+import { capabilityPresence, writerStatusForWorkspace, type RunRow } from "../runs/runtime";
 import { toRunSummary } from "../runs/runs-service";
 import { mapDecision, mapEvent } from "./runs";
 import { anyGeoEngineConfigured } from "../geo/engines";
@@ -235,9 +234,9 @@ async function detail(db: Db, r: RecRow): Promise<RecommendationDetail> {
 
 async function agentState(c: { env: AppEnv["Bindings"] }, db: Db, project: ProjectRow, agent: AgentKind): Promise<CapabilityState> {
   if (project.is_demo === 1) return "demo";
-  const caps = await capabilityPresence(c.env, db, project.workspace_id);
-  const writerReady = caps.writer && writerConfigStatus(c.env).configured;
-  if (!writerReady) return "setup_required";
+  const [caps, writer] = await Promise.all([capabilityPresence(c.env, db, project.workspace_id), writerStatusForWorkspace(c.env, db, project.workspace_id)]);
+  // Default writer: a key plus WRITER_PROVIDER/WRITER_MODEL; a selected custom writer brings its own config.
+  if (!writer.configured) return "setup_required";
   if (agent === "seo") {
     const gsc = await db.first<{ status: string }>(
       "SELECT status FROM oauth_connections WHERE workspace_id = ? AND project_id = ? AND provider = 'google_gsc'",

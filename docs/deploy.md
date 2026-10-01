@@ -129,6 +129,9 @@ need more than 10 ms of CPU per step, so agent runs will fail on the free plan. 
    ```sh
    npm run db:migrate:remote
    ```
+   Migration `0010_workspace_custom_providers.sql` adds workspace custom (OpenAI-compatible) writer providers.
+   Until it is applied, the custom provider routes return `setup_required` and every workspace keeps the
+   default writer.
 
 5. **Deploy**
    ```sh

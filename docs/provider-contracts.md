@@ -69,6 +69,36 @@ optional fields do not satisfy; outputs are validated with zod regardless. `WRIT
 and its host is added to the outbound allowlist. Compatible servers that only accept the older
 `max_tokens` parameter are not supported without a change.
 
+## Custom OpenAI-compatible provider — workspace writer (`workspace_custom_providers`)
+
+Added 2026-10-01. A workspace owner can make any OpenAI-compatible endpoint (for example OpenRouter, Groq,
+Together, DeepSeek, Mistral, or a self-hosted gateway) the workspace's writer from the Integrations page by
+entering a base URL and an API key, fetching the provider's models, and picking one. Rules:
+`src/worker/platform/custom-providers.ts`; routes: `src/worker/routes/custom-providers.ts`; writer:
+`createCustomProviderWriter` in `src/worker/providers/writer.ts` (the same implementation as
+`WRITER_PROVIDER=openai_compatible`, `src/worker/providers/writer-openai.ts`).
+
+| Item | Contract |
+|---|---|
+| Docs | The OpenAI API reference is the shape relied on: https://platform.openai.com/docs/api-reference/models/list, https://platform.openai.com/docs/api-reference/chat/create. Each provider documents its own base URL and model ids; none is hardcoded here |
+| Model list | `GET {baseUrl}/models`, `Authorization: Bearer <key>`, `Accept: application/json`; response `{ object: "list", data: [{ id, ... }] }`. Also accepted: `{ models: [{ id \| name }] }` and a bare array (gateways that differ). Used for "Fetch models" and the Test button (no inference, no cost). A 2xx answer that is not one of those shapes (an HTML page because the base URL lacks `/v1`, a gateway's `200 {"error": ...}`, an empty body) is a failure ("not an OpenAI-style model list; check the base URL"), never "key accepted". A model list only shows that the key was **not rejected**: some providers list models without checking the key (self-hosted vLLM/Ollama, some hosted catalogues), so the first draft is the final check, and the wording says so |
+| Drafting | `POST {baseUrl}/chat/completions`, body as the OpenAI-compatible writer: `{ model, messages: [system, user], max_completion_tokens, response_format: { type: "json_schema", json_schema: { name, schema, strict: false } } }`. No `reasoning_effort`, no reasoning headroom, no `tools` |
+| Response | `choices[0].message.content` (JSON text), `refusal`, `finish_reason`, `usage.{prompt_tokens, completion_tokens}`, `model`; request id header `x-request-id` |
+| Base URL | Validated before saving and before every use: https, no credentials, no IP literal, public hostname (dot, LDH labels, alphabetic or IDN TLD, no local/reserved suffix, no cluster service-discovery suffix such as `.svc` / `.cluster` / `.consul` / `.docker`, no loopback wildcard-DNS service such as `nip.io` / `sslip.io` / `xip.io` / `localtest.me` / `lvh.me`, no IPv4 address spelled in the name such as `127.0.0.1.example.com` or `10-0-0-1.example.com`), default port, no query/fragment, not the app's own host. Names are **not resolved**: the residual risk (a public name whose DNS points at a private address) is covered by Workers egress, which cannot reach private addresses, the same as the crawler note in `src/worker/seo/ssrf.ts`. Under local `npm run dev` that egress protection does not exist, so only use trusted base URLs there. See docs/api.md "Custom providers" |
+| Hosts | Only the selected provider's host, only for its workspace, joins `ctx.apiFetch` (`createApiFetch(env, fetch, [host])`); `redirect: "manual"`, a 3xx is a failure |
+| Timeouts and sizes | Model list and test: 10 s (headers and body), body capped at 8 MiB. Drafting: the writer's 90 s per attempt, 2 retries (408/429/5xx/network); the response body is capped at 2 MiB per attempt (`CUSTOM_WRITER_MAX_RESPONSE_BYTES`; output is already bounded by `max_completion_tokens`): a larger body is cancelled, recorded as `Response exceeded 2097152 bytes.` and not retried (status `unknown` for a 2xx, since the provider may bill for it, so the `writer_tokens` reservation is kept) |
+| Keys | AES-GCM envelope, AAD `workspace_custom_providers:<workspace_id>:<id>`; never returned, logged or exported; a stored key is only sent to the host it was saved for (a host change requires re-entering the key). A provider error body that echoes the key (in any format, e.g. `gsk_...`, also JSON-escaped or URL-encoded) has the key replaced by `[redacted]` before it is stored in `provider_calls.error` or reaches run events (`requestJson` `secrets`, on top of the generic `redact()` patterns; applies to every OpenAI-compatible writer) |
+| Cost | Unknown (`cost_usd` NULL): the model and its price are third-party configuration and no rate table exists. A `usage.cost` field in a response is not read |
+| Budget | `provider_calls` and `writer_tokens` reserved per attempt like every writer, attributed to the workspace's own key: project limits apply, the operator `GLOBAL_*` caps do not |
+
+Limits: the endpoint must support `response_format` `json_schema` and `max_completion_tokens` (servers that only
+accept `max_tokens` or `json_object` fail the draft, recorded as a writer error, never faked). A reasoning
+model may spend the completion budget on reasoning; the truncation error then says to pick a non-reasoning
+model. A provider without a `/models` endpoint still works: the model id is typed by hand (the Test button
+then reports the HTTP status of `/models`). Outputs are validated with zod and the product-fact validator like
+every writer draft. Data sent is the writer's disclosure (`DATA_SENT.writer`): stored evidence, confirmed
+context documents, brand and competitor names; never credentials or raw Search Console exports.
+
 ## Gemini API with Grounding with Google Search — GEO
 
 Implemented in `src/worker/providers/gemini.ts` (geo-providers module).
