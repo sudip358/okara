@@ -57,7 +57,7 @@ describe("platform-auth: provider credentials", () => {
     const { status, json, text } = await call(env, u, "GET", base(u));
     expect(status).toBe(200);
     const list = json!.data as ProviderStatus[];
-    expect(list.map((p) => p.provider)).toEqual(["typesafe", "gemini", "perplexity", "writer"]);
+    expect(list.map((p) => p.provider)).toEqual(["typesafe", "gemini", "perplexity", "openai_geo", "anthropic_geo", "writer"]);
     const ts = list.find((p) => p.provider === "typesafe")!;
     expect(ts).toMatchObject({ source: "none", state: "setup_required", keyHint: null, model: "jev-latest", lastTestOk: null });
     const gem = list.find((p) => p.provider === "gemini")!;

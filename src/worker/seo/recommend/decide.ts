@@ -220,6 +220,9 @@ function addKindQuestions(c: Candidate, inputs: CandidateInputs, state: Record<s
  * budgets per attempt and write provider_calls themselves; for any other implementation (or one
  * that sets `recordsCalls: false`) this module reserves and records around the call instead, so
  * nothing is double counted and nothing goes unaccounted.
+ * These are DecisionProvider (Jev) names only. The GEO engine adapters (gemini, perplexity, openai_geo,
+ * anthropic_geo) never pass through callDecisions: runGeoBatch reserves usd_micros/provider_calls and
+ * records their calls itself (geo/batch.ts), so they do not belong here.
  */
 export const SELF_ACCOUNTING_PROVIDERS = new Set(["typesafe", "anthropic", "openai_compatible"]);
 export function isSelfAccounting(p: { name: string; recordsCalls?: boolean }): boolean {

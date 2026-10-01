@@ -22,8 +22,8 @@ import { brandTokenSet, computeAnswerCoverage } from "../coverage/answer-coverag
 import { DEMO_LABEL, inChunks, loadGscPageData, pageKey } from "../coverage/common";
 import { isSelfHost } from "../coverage/geo-data";
 import { resolveCitationHost, selfDomains } from "./detect";
-import type { CompetitorExtraction } from "./competitor-pages";
-import { evaluateFactors, loadOurPageEvidence } from "./skip-factors";
+import { canonicalExternalUrl, citationUses, type CompetitorExtraction } from "./competitor-pages";
+import { evaluateFactors, inlinkCache, loadOurPagesEvidence } from "./skip-factors";
 import { BOARD_LANES } from "./board";
 
 export const REWRITE_PLAN_VERSION = "rewrite-plan-2026-09-30.1";
@@ -135,17 +135,15 @@ export async function buildRewritePlans(db: Db, project: ProjectRow, now: Date):
       for (const u of t.exampleUrls.slice(0, TEMPLATE_EXAMPLES)) if (typeof u === "string") add(u, r.id, r.priority, null);
     }
   }
-  for (const a of adapts) {
-    const x = parseJson<Partial<CompetitorExtraction>>(a.extraction_json, {});
-    if (!x.ourPage?.url) continue;
-    const provider = await db.first<{ provider: string }>(
-      `SELECT o.provider FROM geo_citations c JOIN geo_observations o ON o.id = c.observation_id AND o.workspace_id = c.workspace_id
-        WHERE c.workspace_id = ? AND c.project_id = ? AND c.url = ? AND o.measurement_type = 'api' ORDER BY o.created_at DESC LIMIT 1`,
-      ws,
-      pid,
-      a.url,
-    );
-    add(x.ourPage.url, null, 0, { id: a.id, url: a.url, question: x.question ?? null, provider: provider?.provider ?? null });
+  // Engine of the newest API-sampled answer citing each adapt page: one chunked lookup for all of them
+  // (citationUses: joins on workspace_id + project_id, compares canonical URLs in code).
+  const adaptX = adapts.map((a) => ({ a, x: parseJson<Partial<CompetitorExtraction>>(a.extraction_json, {}) })).filter((r) => !!r.x.ourPage?.url);
+  const adaptUrls = [...new Set(adaptX.map((r) => canonicalExternalUrl(r.a.url)).filter((u): u is string => !!u))];
+  const uses = adaptUrls.length > 0 ? await citationUses(db, ws, pid, adaptUrls) : new Map<string, Array<{ provider: string }>>();
+  for (const { a, x } of adaptX) {
+    const k = canonicalExternalUrl(a.url);
+    const provider = k ? (uses.get(k)?.[0]?.provider ?? null) : null;
+    add(x.ourPage!.url!, null, 0, { id: a.id, url: a.url, question: x.question ?? null, provider });
   }
 
   if (candidates.size === 0) {
@@ -208,11 +206,13 @@ export async function buildRewritePlans(db: Db, project: ProjectRow, now: Date):
 
   const brand = brandTokenSet(project);
   const ordered = [...candidates.values()].sort((a, b) => b.priority - a.priority || a.url.localeCompare(b.url)).slice(0, MAX_PLANS);
+  // Evidence for every plan page in batched queries; inlinks computed once per crawl run.
+  const evidence = await loadOurPagesEvidence(db, project, ordered.map((c) => c.pageId), inlinkCache(db, project));
   const plans: RewritePlan[] = [];
   for (const c of ordered) {
     const matched = promptByPage.get(c.pageId) ?? null;
     const question = matched?.text ?? c.assessment?.question ?? "";
-    const ev = await loadOurPageEvidence(db, project, c.pageId);
+    const ev = evidence.get(c.pageId) ?? null;
     const crawlDay = ev?.snapshotAt ? ev.snapshotAt.slice(0, 10) : null;
     const factors = ev?.evidence ? evaluateFactors(ev.evidence, question || null, brand, now, ev.snapshotAt) : [];
     const fx = new Map(factors.map((f) => [f.key, f]));

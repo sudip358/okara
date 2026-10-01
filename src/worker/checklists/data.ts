@@ -9,6 +9,7 @@ import type { Db } from "../lib/db";
 import { parseJson } from "../lib/db";
 import type { ProjectRow } from "../platform/access";
 import { listProviderStatuses } from "../routes/credentials";
+import { isGeoEngineId } from "../geo/engines";
 
 /** Upper bounds on rows read per request (checklists summarize; they never page through history). */
 export const LOAD_LIMITS = { gscRows: 20_000, observations: 2_000, citations: 10_000, displacements: 5_000, searchQueries: 5_000, decisions: 1_000 } as const;
@@ -418,7 +419,7 @@ export async function loadGeo(env: Env, db: Db, ws: string, pid: string): Promis
     pid,
   );
   const providers = (await listProviderStatuses(env, db, ws))
-    .filter((p) => p.provider === "gemini" || p.provider === "perplexity")
+    .filter((p) => isGeoEngineId(p.provider))
     .map((p) => ({ provider: p.provider, label: p.label, state: p.state }));
   return {
     promptSet,

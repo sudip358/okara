@@ -452,6 +452,11 @@ export function assertApprovedExternalUrl(input: string | URL, approvedHost: str
 export interface ApprovedFetchOptions extends Omit<GuardedFetchOptions, "verifiedHost"> {
   /** The single approved host (the cited URL's host). Redirects may only stay on it or its www. twin. */
   approvedHost: string;
+  /**
+   * Called with each validated redirect target before it is requested (e.g. to check that host's
+   * robots.txt). Throwing aborts the fetch and the error propagates unchanged to the caller.
+   */
+  beforeRedirect?: (next: URL) => Promise<void>;
 }
 
 /**
@@ -459,7 +464,7 @@ export interface ApprovedFetchOptions extends Omit<GuardedFetchOptions, "verifie
  * as the crawler: manual redirects re-validated per hop against the approved host (assertApprovedExternalUrl),
  * hop cap, one timeout over connect + headers + body, streamed byte cap, content-type allowlist. Used only
  * for the competitor-page approval flow (docs/api.md "POST /projects/:pid/geo/competitor-pages");
- * robots.txt is checked by the caller before the page fetch.
+ * robots.txt is checked by the caller before the page fetch, and per redirect hop through beforeRedirect.
  */
 export async function approvedExternalFetch(fetchImpl: typeof fetch, url: string, opts: ApprovedFetchOptions): Promise<GuardedResponse> {
   const maxRedirects = opts.maxRedirects ?? 5;
@@ -511,6 +516,7 @@ export async function approvedExternalFetch(fetchImpl: typeof fetch, url: string
         } catch (e) {
           throw new CrawlFetchError("redirect_offsite", `Redirect hop ${hop + 1} refused: ${(e as Error).message}`);
         }
+        if (opts.beforeRedirect) await opts.beforeRedirect(next);
         redirects.push({ status: res.status, to: next.toString() });
         current = next;
         continue;

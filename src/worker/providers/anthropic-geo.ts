@@ -97,6 +97,21 @@ export interface ParsedAnthropicGeo {
 }
 
 /** Parse one or more Messages responses of the same turn (the second is a pause_turn continuation). */
+/**
+ * The answer is the text after the last web_search_tool_result: text Claude writes before searching
+ * ("I'll search for ...") is narration, not the answer. Consecutive text blocks are one passage split at
+ * citation boundaries, so they join with "". Without any search result, all text is the answer. When no
+ * text follows the last result, every passage is kept, separated by a blank line so passages never glue.
+ */
+function answerText(texts: Array<{ text: string; afterResults: number }>, resultCount: number): string {
+  if (resultCount === 0) return texts.map((t) => t.text).join("");
+  const after = texts.filter((t) => t.afterResults === resultCount).map((t) => t.text).join("");
+  if (after.trim()) return after;
+  const groups = new Map<number, string>();
+  for (const t of texts) groups.set(t.afterResults, (groups.get(t.afterResults) ?? "") + t.text);
+  return [...groups.values()].map((g) => g.trim()).filter(Boolean).join("\n\n");
+}
+
 export function parseAnthropicGeoMessages(messages: AntMessage[]): ParsedAnthropicGeo {
   const blocks = messages.flatMap((m) => (Array.isArray(m?.content) ? m.content : []));
   const last = messages[messages.length - 1] ?? {};
@@ -105,7 +120,9 @@ export function parseAnthropicGeoMessages(messages: AntMessage[]): ParsedAnthrop
   const queries: string[] = [];
   const searchErrors: string[] = [];
   let resultListFollowsSearch = false;
-  const texts: string[] = [];
+  // Each text block with the number of web_search_tool_result blocks seen before it.
+  const texts: Array<{ text: string; afterResults: number }> = [];
+  let resultCount = 0;
   const citations: GeoCitation[] = [];
   const seen = new Set<string>();
 
@@ -116,6 +133,7 @@ export function parseAnthropicGeoMessages(messages: AntMessage[]): ParsedAnthrop
       const q = typeof b.input?.query === "string" ? b.input.query.trim() : "";
       if (q) queries.push(q);
     } else if (b?.type === "web_search_tool_result") {
+      resultCount += 1;
       const toolUseId = str(b.tool_use_id);
       const follows = toolUseId !== null && searchUseIds.has(toolUseId);
       if (Array.isArray(b.content)) {
@@ -125,7 +143,7 @@ export function parseAnthropicGeoMessages(messages: AntMessage[]): ParsedAnthrop
         searchErrors.push(code ?? "unknown_error");
       }
     } else if (b?.type === "text" && typeof b.text === "string") {
-      texts.push(b.text);
+      texts.push({ text: b.text, afterResults: resultCount });
       for (const c of Array.isArray(b.citations) ? b.citations : []) {
         if (c?.type !== "web_search_result_location") continue;
         const url = str(c.url);
@@ -135,7 +153,7 @@ export function parseAnthropicGeoMessages(messages: AntMessage[]): ParsedAnthrop
       }
     }
   }
-  const joined = texts.join("");
+  const joined = answerText(texts, resultCount);
   const text = joined.trim() ? joined : null;
 
   // Usage summed over the turn's responses; unknown if any response lacks a token count.

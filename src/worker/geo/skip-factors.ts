@@ -30,7 +30,7 @@ import { parseJson } from "../lib/db";
 import { badRequest, notFound } from "../lib/errors";
 import type { ProjectRow } from "../platform/access";
 import { brandTokenSet, contentTokens } from "../coverage/answer-coverage";
-import { DEMO_LABEL, pageKey } from "../coverage/common";
+import { DEMO_LABEL, inChunks, pageKey } from "../coverage/common";
 import { parseVisibleDate } from "../coverage/content-evidence";
 import { loadGeoSample, observationsForPrompt } from "../coverage/geo-data";
 import { countWords, splitSentences } from "../seo/crawl/extract";
@@ -249,6 +249,7 @@ export function evaluateFactors(e: PageEvidence, question: string | null, brand:
 // ------------------------------------------------------------------ loaders
 interface SnapshotRow {
   id: string;
+  page_id: string;
   crawl_run_id: string;
   status_code: number | null;
   skipped_reason: string | null;
@@ -273,37 +274,64 @@ export interface OurPageEvidence {
   basis: string | null;
 }
 
-/** Latest snapshot of one page (+ internal links in from the same crawl). The page must belong to the project. */
-export async function loadOurPageEvidence(db: Db, project: Pick<ProjectRow, "id" | "workspace_id">, pageId: string): Promise<OurPageEvidence | null> {
-  const ws = project.workspace_id;
-  const pid = project.id;
-  const page = await db.first<{ id: string; url: string }>("SELECT id, url FROM pages WHERE workspace_id = ? AND project_id = ? AND id = ?", ws, pid, pageId);
-  if (!page) return null;
-  const snap = await db.first<SnapshotRow>(
-    `SELECT id, crawl_run_id, status_code, skipped_reason, headings_json, jsonld_types_json, word_count, main_text_excerpt, first_paragraph,
-            author, last_updated, outbound_citations, table_count, fetched_at
-       FROM page_snapshots WHERE workspace_id = ? AND project_id = ? AND page_id = ? ORDER BY fetched_at DESC, rowid DESC LIMIT 1`,
-    ws,
-    pid,
-    pageId,
+const SNAPSHOT_COLUMNS = `id, page_id, crawl_run_id, status_code, skipped_reason, headings_json, jsonld_types_json, word_count, main_text_excerpt, first_paragraph,
+            author, last_updated, outbound_citations, table_count, fetched_at`;
+
+/**
+ * Internal links IN per target page for ONE crawl run, computed once: pageKey(target) -> ids of the
+ * pages of that run whose stored internal links point at it. One query, one JSON parse per snapshot.
+ * A page linking to itself is excluded at lookup time (inlinkCount).
+ */
+export type InlinkMap = Map<string, Set<string>>;
+
+export async function computeInlinkMap(db: Db, project: Pick<ProjectRow, "id" | "workspace_id">, crawlRunId: string): Promise<InlinkMap> {
+  const rows = await db.all<{ page_id: string; internal_links_json: string }>(
+    "SELECT page_id, internal_links_json FROM page_snapshots WHERE workspace_id = ? AND project_id = ? AND crawl_run_id = ?",
+    project.workspace_id,
+    project.id,
+    crawlRunId,
   );
+  const map: InlinkMap = new Map();
+  for (const r of rows) {
+    const seen = new Set<string>();
+    for (const l of parseJson<unknown[]>(r.internal_links_json, [])) {
+      if (typeof l !== "string") continue;
+      const k = pageKey(l);
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      if (!map.has(k)) map.set(k, new Set());
+      map.get(k)!.add(r.page_id);
+    }
+  }
+  return map;
+}
+
+/** Number of OTHER pages of the crawl run linking to `url` (page `pageId`). */
+export function inlinkCount(map: InlinkMap, pageId: string, url: string): number {
+  const k = pageKey(url);
+  const src = k ? map.get(k) : undefined;
+  if (!src) return 0;
+  return src.size - (src.has(pageId) ? 1 : 0);
+}
+
+/** Memoized per crawl run (one computeInlinkMap per run id for the lifetime of the cache). */
+export function inlinkCache(db: Db, project: Pick<ProjectRow, "id" | "workspace_id">): (crawlRunId: string) => Promise<InlinkMap> {
+  const cache = new Map<string, Promise<InlinkMap>>();
+  return (crawlRunId) => {
+    let p = cache.get(crawlRunId);
+    if (!p) {
+      p = computeInlinkMap(db, project, crawlRunId);
+      cache.set(crawlRunId, p);
+    }
+    return p;
+  };
+}
+
+function toEvidence(page: { id: string; url: string }, snap: SnapshotRow | undefined, inlinks: InlinkMap | null): OurPageEvidence {
   if (!snap) return { pageId: page.id, url: page.url, snapshotAt: null, evidence: null, basis: "No crawl yet" };
   if (snap.skipped_reason) return { pageId: page.id, url: page.url, snapshotAt: snap.fetched_at, evidence: null, basis: `Skipped by the crawler: ${snap.skipped_reason}` };
   if (snap.status_code === null || snap.status_code < 200 || snap.status_code >= 300) {
     return { pageId: page.id, url: page.url, snapshotAt: snap.fetched_at, evidence: null, basis: `Not analysed: HTTP ${snap.status_code ?? "no response"}` };
-  }
-  const target = pageKey(page.url);
-  const others = await db.all<{ page_id: string; internal_links_json: string }>(
-    "SELECT page_id, internal_links_json FROM page_snapshots WHERE workspace_id = ? AND project_id = ? AND crawl_run_id = ? AND page_id <> ?",
-    ws,
-    pid,
-    snap.crawl_run_id,
-    pageId,
-  );
-  const sources = new Set<string>();
-  for (const o of others) {
-    const links = parseJson<unknown[]>(o.internal_links_json, []);
-    if (links.some((l) => typeof l === "string" && target !== null && pageKey(l) === target)) sources.add(o.page_id);
   }
   return {
     pageId: page.id,
@@ -321,10 +349,64 @@ export async function loadOurPageEvidence(db: Db, project: Pick<ProjectRow, "id"
       lastUpdated: snap.last_updated,
       outboundCitations: snap.outbound_citations,
       tableCount: snap.table_count,
-      inlinks: sources.size,
+      inlinks: inlinks ? inlinkCount(inlinks, page.id, page.url) : 0,
     },
     basis: null,
   };
+}
+
+/**
+ * Latest snapshot of several pages (+ internal links in from the same crawl), batched: pages and latest
+ * snapshots in chunked queries (<= 90 ids each), then one inlink map per distinct crawl run (memoized
+ * through `inlinks` when the caller passes a shared inlinkCache). Pages not in the project are absent.
+ */
+export async function loadOurPagesEvidence(
+  db: Db,
+  project: Pick<ProjectRow, "id" | "workspace_id">,
+  pageIds: string[],
+  inlinks: (crawlRunId: string) => Promise<InlinkMap> = inlinkCache(db, project),
+): Promise<Map<string, OurPageEvidence>> {
+  const ws = project.workspace_id;
+  const pid = project.id;
+  const ids = [...new Set(pageIds)];
+  const out = new Map<string, OurPageEvidence>();
+  if (ids.length === 0) return out;
+  const pages = await inChunks(ids, (chunk, ph) =>
+    db.all<{ id: string; url: string }>(`SELECT id, url FROM pages WHERE workspace_id = ? AND project_id = ? AND id IN (${ph})`, ws, pid, ...chunk),
+  );
+  if (pages.length === 0) return out;
+  const snaps = await inChunks(pages.map((p) => p.id), (chunk, ph) =>
+    db.all<SnapshotRow>(
+      `SELECT ${SNAPSHOT_COLUMNS} FROM (
+         SELECT ${SNAPSHOT_COLUMNS}, ROW_NUMBER() OVER (PARTITION BY page_id ORDER BY fetched_at DESC, rowid DESC) AS rn
+           FROM page_snapshots WHERE workspace_id = ? AND project_id = ? AND page_id IN (${ph})
+       ) WHERE rn = 1`,
+      ws,
+      pid,
+      ...chunk,
+    ),
+  );
+  const snapByPage = new Map(snaps.map((s) => [s.page_id, s]));
+  const runs = new Map<string, InlinkMap>();
+  for (const s of snaps) {
+    if (s.skipped_reason || s.status_code === null || s.status_code < 200 || s.status_code >= 300 || runs.has(s.crawl_run_id)) continue;
+    runs.set(s.crawl_run_id, await inlinks(s.crawl_run_id));
+  }
+  for (const p of pages) {
+    const snap = snapByPage.get(p.id);
+    out.set(p.id, toEvidence(p, snap, snap ? (runs.get(snap.crawl_run_id) ?? null) : null));
+  }
+  return out;
+}
+
+/** Latest snapshot of one page (+ internal links in from the same crawl). The page must belong to the project. */
+export async function loadOurPageEvidence(
+  db: Db,
+  project: Pick<ProjectRow, "id" | "workspace_id">,
+  pageId: string,
+  inlinks?: (crawlRunId: string) => Promise<InlinkMap>,
+): Promise<OurPageEvidence | null> {
+  return (await loadOurPagesEvidence(db, project, [pageId], inlinks)).get(pageId) ?? null;
 }
 
 /**

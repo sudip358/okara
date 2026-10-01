@@ -14,7 +14,7 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | GET | /me | platform-auth | `Me` |
 | POST | /auth/dev-login | platform-auth | local-only demo bypass (DEV_AUTH_BYPASS=true AND ENVIRONMENT=development AND localhost) |
 | GET | /workspaces/:wid/credentials | platform-auth | `IntegrationsStatus["providers"]` (no keys) |
-| PUT | /workspaces/:wid/credentials/:provider | platform-auth | body `{apiKey}`; stores encrypted; returns provider status |
+| PUT | /workspaces/:wid/credentials/:provider | platform-auth | body `{apiKey}`; `:provider` is `typesafe`, `gemini`, `perplexity`, `openai_geo`, `anthropic_geo` or `writer` (migration 0008 widens the CHECK); stores encrypted; returns provider status |
 | POST | /workspaces/:wid/credentials/:provider/test | platform-auth | body `{apiKey?}` (tests the typed key if given, else saved); `{ok, detail}` |
 | DELETE | /workspaces/:wid/credentials/:provider | platform-auth | `{ok:true}` |
 | GET | /workspaces/:wid/projects | platform-projects | `Project[]` |
@@ -114,8 +114,9 @@ probability [A11]; there is no aggregate "citability" score.
 - One `EngineLaneSummary` per engine, fixed order `openai_geo`, `anthropic_geo`, `gemini`, `perplexity`.
   A lane is always present: `setup_required` (no key or no model env: `OPENAI_GEO_MODEL`,
   `ANTHROPIC_GEO_MODEL`, `GEMINI_MODEL`, `PERPLEXITY_MODEL`), `disabled`, `error` (e.g. Anthropic org
-  setting "web search is not enabled"), `ready`, or `demo`. Until the openai/anthropic adapters ship, their
-  lanes return `setup_required` with `stateDetail` "Not implemented yet" and zero counts, never sample data.
+  setting "web search is not enabled"), `ready`, or `demo`. All four lanes are implemented
+  (`src/worker/providers/openai-geo.ts`, `anthropic-geo.ts`, `gemini.ts`, `perplexity.ts`); an unconfigured
+  lane's `stateDetail` names the missing key or model env, with zero counts, never sample data.
 - Computed from the latest cohort per engine (`geo_observations` with `measurement_type = 'api'`, same
   `cohort_key`), exactly like `GeoResults.lanes`: `citationRate` = valid answers with an own-site
   citation / valid answers; `mentionRate` likewise; `answersCitingUs` = `citationRate.numerator`;
@@ -182,23 +183,11 @@ Newest first, at most 100.
   stored answers citing the page in the same window. No projected values. `publishing` is always `"manual"`.
 - Read-only; no Jev, no budget.
 
-### ProviderId switch sites (for the builder adding `openai_geo` / `anthropic_geo`)
-`ProviderId` stays `"typesafe" | "gemini" | "perplexity" | "writer"` until these change together
-(`ProviderIdWithGeoEngines` is the target union):
-- `migrations/0001_init.sql:124` `provider_credentials.provider` CHECK constraint (needs a new migration that
-  rebuilds the table; D1/SQLite cannot alter a CHECK).
-- `src/worker/platform/credentials.ts:16` `OPERATOR_ENV: Record<ProviderId, keyof Env>` (+ `credentialSources`, line 46).
-- `src/worker/routes/credentials.ts:26` `PROVIDERS`, `:28` `OPERATOR_KEY_ENV`, `:35` `MODEL_ENV`, `:43`
-  `DATA_SENT`, `:64` `providerLabel` switch, `:138` `testProviderKey` switch, `:218` `providerParam`.
-- `src/worker/runs/runtime.ts:17` `API_HOST_ALLOWLIST` (add `api.openai.com`), `:158` key resolution,
-  `:170` and `:231` budget `sources` object literals, `:176` `geoProviders` construction, `:237`
-  `capabilityPresence`.
-- `src/worker/runs/budget.ts:48` `MAX_GEO_PROVIDERS = 2` (→ 4), `:97` `RESOURCE_PROVIDERS`, `:104` `PROVIDER_IDS`.
-- `src/worker/env.ts` (new `OPENAI_GEO_API_KEY`, `OPENAI_GEO_MODEL`, `ANTHROPIC_GEO_API_KEY`,
-  `ANTHROPIC_GEO_MODEL`), `wrangler.jsonc` vars, `.dev.vars.example`.
-- `src/worker/providers/rates.ts:39` `RateEntry.provider` union and rate table; `src/worker/providers/types.ts:93` comment.
-- `src/worker/geo/results.ts:45` `API_PROVIDERS`, `:46` `PROVIDER_LABELS`.
-- `src/worker/checklists/data.ts:421` providers-enabled filter (`gemini || perplexity`).
-- `src/worker/seo/recommend/decide.ts:224` `SELF_ACCOUNTING_PROVIDERS` (adapter names; only if the new adapters record their own calls).
-- `src/worker/demo/seed.ts:41` `GROUNDING`, `:220` cohort keys; `src/worker/demo/fixtures.ts:204` provider union.
-- Web: no `ProviderId` switch; `src/web/pages/Integrations.tsx` renders the provider list from the API.
+### GEO engine provider ids (`openai_geo`, `anthropic_geo`): wired
+Both lanes are wired end to end. `migrations/0008_provider_credentials_geo_engines.sql` rebuilds
+`provider_credentials` with the CHECK widened to the six credential providers, so workspace keys for both
+lanes can be saved through `PUT /workspaces/:wid/credentials/:provider`. The shared engine list is
+`src/worker/geo/engines.ts` `GEO_ENGINE_IDS`; the GEO agent is `ready` when any engine there is configured
+(`routes/recommendations.ts`), and `GeoResults` lanes and the checklist provider list use the same list.
+`decide.ts` `SELF_ACCOUNTING_PROVIDERS` lists Jev decision providers only; GEO engines are accounted by
+`geo/batch.ts`. Demo seed data has no rows for the new lanes.

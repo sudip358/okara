@@ -7,7 +7,7 @@
  *   - Pricing https://developers.openai.com/api/docs/pricing#built-in-tools
  *   POST https://api.openai.com/v1/responses, `Authorization: Bearer <key>`
  *   body { model, input, instructions?, tools: [{ type: "web_search" }], tool_choice: "auto",
- *          include: ["web_search_call.action.sources"], max_output_tokens }
+ *          include: ["web_search_call.action.sources"], max_output_tokens, max_tool_calls }
  *   output[]: `web_search_call` { id, status, action: { type: "search", queries?, query?, sources? } |
  *             { type: "open_page", url } | { type: "find_in_page", pattern, url } }
  *             `message` { content: [{ type: "output_text", text, annotations: [{ type: "url_citation", url, title, start_index, end_index }] }] }
@@ -24,12 +24,20 @@
  */
 import type { Env } from "../env";
 import type { GeoCitation } from "./types";
-import { estimateCost, neutralInstruction, sendJson, type GeoAnswerWithOutcome, type GeoProviderAdapter } from "./rates";
+import { RESERVATION_ENVELOPE, estimateCost, neutralInstruction, sendJson, type GeoAnswerWithOutcome, type GeoProviderAdapter } from "./rates";
 
 export const OPENAI_API_BASE = "https://api.openai.com";
 export const OPENAI_GEO_GROUNDING_MODE = "openai_web_search";
 export const OPENAI_GEO_TOOL_TYPE = "web_search";
 export const OPENAI_GEO_TOOL_CHOICE = "auto";
+/**
+ * Responses create `max_tool_calls` ("The maximum number of total calls to built-in tools that can be
+ * processed in a response ... Any further attempts to call a tool by the model will be ignored.";
+ * https://developers.openai.com/api/reference/resources/responses/methods/create, read 2026-10-01).
+ * Equal to the web_search calls the usd_micros reservation assumes, so tool_choice "auto" cannot search
+ * past the reserved envelope. Part of samplingOptions (cohort key).
+ */
+export const OPENAI_GEO_MAX_TOOL_CALLS: number = RESERVATION_ENVELOPE.openaiSearchCalls;
 export const OPENAI_GEO_DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 
 export interface OpenAiGeoProviderConfig {
@@ -163,7 +171,7 @@ export function parseOpenAiGeoResponse(body: unknown): ParsedOpenAiGeo {
 export function createOpenAiGeoProvider(config: OpenAiGeoProviderConfig): GeoProviderAdapter {
   const model = config.model.trim();
   const maxOutputTokens = config.maxOutputTokens ?? OPENAI_GEO_DEFAULT_MAX_OUTPUT_TOKENS;
-  const samplingOptions = { maxOutputTokens, tools: [OPENAI_GEO_TOOL_TYPE], toolChoice: OPENAI_GEO_TOOL_CHOICE };
+  const samplingOptions = { maxOutputTokens, tools: [OPENAI_GEO_TOOL_TYPE], toolChoice: OPENAI_GEO_TOOL_CHOICE, maxToolCalls: OPENAI_GEO_MAX_TOOL_CALLS };
   const headers = { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" };
 
   const base = (): Omit<GeoAnswerWithOutcome, "status" | "outcome" | "latencyMs"> => ({
@@ -202,6 +210,7 @@ export function createOpenAiGeoProvider(config: OpenAiGeoProviderConfig): GeoPro
         tool_choice: OPENAI_GEO_TOOL_CHOICE,
         include: ["web_search_call.action.sources"],
         max_output_tokens: maxOutputTokens,
+        max_tool_calls: OPENAI_GEO_MAX_TOOL_CALLS,
       };
       const instruction = neutralInstruction(opts.locale, opts.language);
       if (instruction) body.instructions = instruction;

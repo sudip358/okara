@@ -235,7 +235,8 @@ describe("POST /projects/:pid/geo/competitor-pages", () => {
     const r = await s.call("POST", `/projects/${s.projectId}/geo/competitor-pages`, { url: CITED });
     expect(r.status).toBe(202);
     const a = r.json.data as CompetitorPageAssessment;
-    expect(a).toMatchObject({ url: CITED, host: "bestreviews.example", approvedBy: s.u.userId, state: "assessed", verdict: "adapt" });
+    // No page of ours matches this prompt in this setup: nothing to compare, so never 'adapt' (see geo-fix-analysis tests).
+    expect(a).toMatchObject({ url: CITED, host: "bestreviews.example", approvedBy: s.u.userId, state: "assessed", verdict: "skip" });
     expect(a.citedIn).toEqual([{ promptId: s.promptId, promptText: PROMPT, provider: "gemini", observationId: s.obsId }]);
     expect(web.calls.map((c) => c.url)).toEqual(["https://bestreviews.example/robots.txt", CITED]);
     expect(String((web.calls[1]!.init?.headers as Record<string, string>)["User-Agent"])).toContain("OkaraBot");

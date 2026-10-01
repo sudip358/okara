@@ -119,7 +119,10 @@ Implemented in `src/worker/platform/gsc-client.ts` and `gsc-oauth.ts` (platform-
 Pagination does not guarantee complete query data; property totals come from a separate aggregate
 request and are never computed by summing slices.
 
-## OpenAI Responses API web search — GEO (`openai_geo`, contract only, not implemented)
+## OpenAI Responses API web search — GEO (`openai_geo`, implemented)
+
+Implemented in `src/worker/providers/openai-geo.ts` (grounding mode `openai_web_search`; cohort
+`samplingOptions` `{ maxOutputTokens, tools: ["web_search"], toolChoice: "auto", maxToolCalls: 5 }`).
 
 Read 2026-09-30 from the official docs (the old `platform.openai.com/docs/...` URLs now 301 to
 `developers.openai.com/api/docs/...`; the `.md` suffix returns the same page as Markdown):
@@ -130,7 +133,8 @@ https://developers.openai.com/api/docs/pricing#built-in-tools.
 | Item | Contract |
 |---|---|
 | HTTP | `POST https://api.openai.com/v1/responses`, `Authorization: Bearer <key>`, `Content-Type: application/json` |
-| Body | `{ model: env.OPENAI_GEO_MODEL, input: <prompt text>, instructions?, tools: [{ type: "web_search" }], tool_choice: "auto", include: ["web_search_call.action.sources"], max_output_tokens }` |
+| Body | `{ model: env.OPENAI_GEO_MODEL, input: <prompt text>, instructions?, tools: [{ type: "web_search" }], tool_choice: "auto", include: ["web_search_call.action.sources"], max_output_tokens, max_tool_calls: 5 }` |
+| `max_tool_calls` | Reference (read 2026-10-01): "The maximum number of total calls to built-in tools that can be processed in a response. This maximum number applies across all built-in tool calls, not per individual tool. Any further attempts to call a tool by the model will be ignored." Set to the 5 search calls the `usd_micros` reservation assumes (`RESERVATION_ENVELOPE.openaiSearchCalls`), so `tool_choice: "auto"` cannot search past the reserved envelope |
 | Tool type | `"web_search"` (recommended for new integrations). Reference enum: `"web_search" \| "web_search_2025_08_26"`. `"web_search_preview"` is legacy only (no `filters`, `return_token_budget`; ignores `external_web_access`) and must not be used |
 | Tool options | `search_context_size: "low" \| "medium" \| "high"`; `filters: { allowed_domains?, blocked_domains? }` (up to 100, bare domains); `user_location: { type: "approximate", country (ISO alpha-2), city, region, timezone }` (not for deep research); `external_web_access` (default `true`); `return_token_budget: "default" \| "unlimited"` (GPT-5+ reasoning only) |
 | Output: search happened | `output[]` item `{ type: "web_search_call", id: "ws_...", status: "in_progress" \| "searching" \| "completed" \| "failed" \| "incomplete", action }`; `action` is `{ type: "search", queries?, query?, sources?: [{ type: "url", url }] }`, `{ type: "open_page", url }` or `{ type: "find_in_page", pattern, url }` (the last two on reasoning models) |
@@ -163,12 +167,16 @@ Rules for the adapter:
   is deprecated (shutdown 2026-10-23). Search context is capped at 128k regardless of model window.
   `gpt-5-search-api` is Chat Completions only and is not used. The model id is never hardcoded:
   `OPENAI_GEO_MODEL` must be set or the lane is `setup_required`.
-- Hosts: `api.openai.com` (must be added to `API_HOST_ALLOWLIST` in `src/worker/runs/runtime.ts`; today
-  it is reachable only when `WRITER_BASE_URL` points at it).
-- Keys: operator key `OPENAI_GEO_API_KEY` (proposed env name) or a workspace key under provider id
-  `openai_geo`, separate from the writer key.
+- Hosts: `api.openai.com` (in `API_HOST_ALLOWLIST`, `src/worker/runs/runtime.ts`).
+- Keys: operator key `OPENAI_GEO_API_KEY` or a workspace key under provider id `openai_geo` (storable since
+  migration 0008), separate from the writer key.
+- Rates (`src/worker/providers/rates.ts`): Standard tier text-token prices from the pricing page, read
+  2026-09-30 and re-verified 2026-10-01; web_search support per the guide varies by model.
 
-## Anthropic Messages web search — GEO (`anthropic_geo`, contract only, not implemented)
+## Anthropic Messages web search — GEO (`anthropic_geo`, implemented)
+
+Implemented in `src/worker/providers/anthropic-geo.ts` (grounding mode `anthropic_web_search`; cohort
+`samplingOptions` `{ maxTokens, tools: ["web_search_20250305"], maxUses: 3 }`).
 
 Read 2026-09-30: https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool (the
 docs.claude.com URL 302s here), tool versions https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-reference,
@@ -194,6 +202,10 @@ Rules for the adapter:
   `web_search_tool_result` whose `content` is a (possibly empty) result list, and
   `usage.server_tool_use.web_search_requests >= 1`.
 - Engine search queries [A6]: `server_tool_use.input.query` (exposed on every search).
+- Answer text: the `text` blocks after the last `web_search_tool_result` (consecutive blocks joined with no
+  separator: they are one passage split at citation boundaries). Text written before searching ("I'll search
+  for ...") is narration, not the answer. With no search result, all text is the answer; if no text follows
+  the last result, every passage is kept, separated by a blank line.
 - Citations: `web_search_result_location` citations on `text` blocks (URL, title, `cited_text`). Search
   results that were not cited are consulted sources, not citations. `encrypted_content`/`encrypted_index`
   are not stored (only needed for multi-turn, which the lane never does).
@@ -203,12 +215,15 @@ Rules for the adapter:
   not be billed." Search results count as input tokens. Cost = `web_search_requests × $0.01` + tokens × the
   configured model's rates, labelled estimate; NULL when the model has no rate entry.
 - Hosts: `api.anthropic.com` (already in `API_HOST_ALLOWLIST`).
-- Keys: operator key `ANTHROPIC_GEO_API_KEY` (proposed env name) or a workspace key under `anthropic_geo`,
-  separate from `WRITER_API_KEY`. Model only from `ANTHROPIC_GEO_MODEL`.
+- Keys: operator key `ANTHROPIC_GEO_API_KEY` or a workspace key under `anthropic_geo` (storable since
+  migration 0008), separate from `WRITER_API_KEY`. Model only from `ANTHROPIC_GEO_MODEL`.
+- Rates (`src/worker/providers/rates.ts`): base input/output prices verified live on
+  https://platform.claude.com/docs/en/about-claude/pricing on 2026-10-01 (they first came from a cached
+  table dated 2026-09-25; the live page matched).
 - Not available on Amazon Bedrock; on Google Cloud only the basic tool. This app calls the Claude API directly.
 
 ## Disabled / not implemented
 
-The OpenAI and Anthropic web search GEO lanes above are specified but not implemented; until they are they
-show `setup_required`, never simulated. SERP data sources, analytics, and publishing connectors are not
+All four GEO answer-engine lanes (OpenAI, Anthropic, Gemini, Perplexity) are implemented; an unconfigured
+lane shows `setup_required`, never simulated. SERP data sources, analytics, and publishing connectors are not
 implemented and are shown as unavailable.

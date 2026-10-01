@@ -40,10 +40,16 @@ import {
 import { getActivePromptSet } from "./prompts";
 import { normalizeQuery } from "./analyze";
 import { isSourceType } from "./source-type";
+import { GEO_ENGINE_IDS, isGeoEngineId } from "./engines";
 
 export const OBSERVATION_LOAD_LIMIT = 2000;
-export const API_PROVIDERS = ["gemini", "perplexity"] as const;
-const PROVIDER_LABELS: Record<string, string> = { gemini: "Gemini API (API-sampled)", perplexity: "Perplexity API (API-sampled)" };
+export const API_PROVIDERS = GEO_ENGINE_IDS;
+const PROVIDER_LABELS: Record<(typeof API_PROVIDERS)[number], string> = {
+  gemini: "Gemini API (API-sampled)",
+  perplexity: "Perplexity API (API-sampled)",
+  openai_geo: "OpenAI API with web search (API-sampled)",
+  anthropic_geo: "Anthropic API with web search (API-sampled)",
+};
 
 export const GEO_LABELS = {
   apiSampled:
@@ -255,10 +261,10 @@ export async function buildGeoResults(env: Env, db: Db, project: ProjectRow): Pr
     const latest = rows[0];
     lanes.push({
       provider,
-      label: PROVIDER_LABELS[provider] ?? `${provider} API (API-sampled)`,
+      label: isGeoEngineId(provider) ? PROVIDER_LABELS[provider] : `${provider} API (API-sampled)`,
       model: latest?.model ?? null,
       groundingMode: latest?.grounding_mode ?? null,
-      state: isDemo ? "demo" : configured.has(provider as (typeof API_PROVIDERS)[number]) ? "ready" : "setup_required",
+      state: isDemo ? "demo" : isGeoEngineId(provider) && configured.has(provider) ? "ready" : "setup_required",
       cohortKey: latest?.cohort_key ?? null,
       promptsRun: new Set(disc.map((o) => o.promptId ?? o.id)).size,
       counts: laneCounts(disc),
@@ -343,7 +349,7 @@ export async function buildGeoResults(env: Env, db: Db, project: ProjectRow): Pr
   if (isDemo) state = "demo";
   else if (approved.length === 0 || configured.size === 0) state = "setup_required";
   if (!isDemo && approved.length === 0) labels.push("Setup required: approve at least one prompt.");
-  if (!isDemo && configured.size === 0) labels.push("Setup required: configure a GEO provider key and model (Gemini or Perplexity).");
+  if (!isDemo && configured.size === 0) labels.push("Setup required: configure a GEO provider key and model (OpenAI, Anthropic, Gemini or Perplexity).");
 
   return { state, promptSetVersion: promptSet?.version ?? null, lanes, shareOfVoice: sov, trend, prompts, labels };
 }

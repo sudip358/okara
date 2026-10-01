@@ -32,6 +32,7 @@ import { writerConfigStatus } from "../providers/writer";
 import { capabilityPresence, type RunRow } from "../runs/runtime";
 import { toRunSummary } from "../runs/runs-service";
 import { mapDecision, mapEvent } from "./runs";
+import { anyGeoEngineConfigured } from "../geo/engines";
 
 export const ZERO_STATE_MESSAGE = "No new verified opportunities today.";
 export const IMPLEMENTED_NOTE = "Marked implemented by a reviewer. The site change is not verified by this app.";
@@ -246,7 +247,7 @@ async function agentState(c: { env: AppEnv["Bindings"] }, db: Db, project: Proje
     const hasData = Boolean(project.verified_host) || (gsc?.status === "connected" && Boolean(project.gsc_property));
     return hasData ? "ready" : "setup_required";
   }
-  return caps.gemini || caps.perplexity ? "ready" : "setup_required";
+  return anyGeoEngineConfigured(caps) ? "ready" : "setup_required";
 }
 
 export const recommendationRoutes = new Hono<AppEnv>();

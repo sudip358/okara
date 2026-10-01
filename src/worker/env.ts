@@ -54,6 +54,12 @@ export interface Env {
   GLOBAL_WRITER_TOKENS_PER_DAY?: string;
 
   /**
+   * Optional cap on the non-brand GSC queries in scope of the buyer-queries view
+   * (seo/recommend/buyer-queries.ts buyerQueryCap): default 5000, ceiling 20000; empty, invalid or < 1 = default.
+   */
+  BUYER_QUERIES_MAX?: string;
+
+  /**
    * Sign-in allowlist (comma-separated, case-insensitive; verified Google emails only). In production
    * sign-in is refused (authError=signup_closed) unless at least one of these is set.
    */

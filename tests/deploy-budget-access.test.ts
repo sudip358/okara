@@ -171,7 +171,7 @@ describe("global caps for operator-key spend", () => {
     const env = createTestEnv({ TYPESAFE_API_KEY: "op", WRITER_API_KEY: "op", GEMINI_API_KEY: " " });
     const { db, workspaceId } = await setupBudget(env);
     await saveKey(db, workspaceId, "writer");
-    expect(await credentialSources(env, db, workspaceId)).toEqual({ typesafe: "operator_key", writer: "workspace_key", gemini: null, perplexity: null });
+    expect(await credentialSources(env, db, workspaceId)).toEqual({ typesafe: "operator_key", writer: "workspace_key", gemini: null, perplexity: null, openai_geo: null, anthropic_geo: null });
   });
 
   it("jev_calls / provider_calls on the operator key hit the global cap, roll back the project, and settle/release the global row", async () => {

@@ -2,7 +2,8 @@
  * Versioned cost-estimate rates for GEO answer engines, plus the budget-accounting helpers the GEO
  * batch uses around each provider call.
  *
- * Every number here was read from the provider's official pricing page on 2026-09-30:
+ * Every number here was read from the provider's official pricing page (Gemini and Perplexity on
+ * 2026-09-30; OpenAI and Claude re-verified live on 2026-10-01, values unchanged):
  *   - Gemini API pricing (Standard, paid tier): https://ai.google.dev/gemini-api/docs/pricing
  *     Grounding billing semantics: https://ai.google.dev/gemini-api/docs/google-search#pricing
  *   - Perplexity Agent API pricing: https://docs.perplexity.ai/docs/getting-started/pricing
@@ -117,14 +118,16 @@ export const RATES: readonly RateEntry[] = [
   gemini25("gemini-2.5-flash-lite", 0.1, 0.4),
   // Perplexity Agent API model "perplexity/sonar": $0.25 input / $2.50 output per 1M tokens.
   { provider: "perplexity", model: "perplexity/sonar", inputPerMTok: 0.25, outputPerMTok: 2.5, searchBilling: "per_invocation", searchUsd: PPLX_WEB_SEARCH_USD, source: PPLX_PRICING },
-  // OpenAI Standard tier, models the web_search guide lists as supported (read 2026-09-30).
+  // OpenAI Standard tier text-token rates (pricing page, read 2026-09-30, re-verified 2026-10-01);
+  // web_search support per the web_search guide varies by model and is not implied by this table.
   // gpt-5.5: the listed price is for prompts < 272K tokens; the long-context price was not verified -> unknown above it.
   openai("gpt-5.5", 5.0, 30.0, { maxPricedInputTokens: 272_000 }),
   openai("gpt-5", 1.25, 10.0),
   openai("gpt-5-mini", 0.25, 2.0),
   openai("gpt-4.1", 2.0, 8.0),
   openai("gpt-4.1-mini", 0.4, 1.6, { fixedSearchInputTokens: OPENAI_MINI_FIXED_SEARCH_TOKENS }),
-  // Claude API first-party rates (read 2026-09-30).
+  // Claude API first-party base input/output rates (verified live on
+  // platform.claude.com/docs/en/about-claude/pricing 2026-10-01; web search $10 per 1,000 searches).
   anthropic("claude-opus-5-5", 4.0, 20.0),
   anthropic("claude-opus-5", 5.0, 25.0),
   anthropic("claude-opus-4-8", 5.0, 25.0),

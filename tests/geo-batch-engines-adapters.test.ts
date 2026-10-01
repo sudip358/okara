@@ -83,7 +83,7 @@ describe("OpenAI GEO adapter", () => {
       max_output_tokens: 8192,
     });
     expect(body.instructions).toContain("en-US");
-    expect(p.samplingOptions).toEqual({ maxOutputTokens: 8192, tools: ["web_search"], toolChoice: "auto" });
+    expect(p.samplingOptions).toEqual({ maxOutputTokens: 8192, tools: ["web_search"], toolChoice: "auto", maxToolCalls: 5 });
     expect(p.id).toBe("openai_geo");
   });
 

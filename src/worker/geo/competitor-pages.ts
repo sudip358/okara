@@ -5,7 +5,8 @@
  * fetched once:
  *   - the canonical URL must equal a geo_citations.url of the project (workspace_id + project_id);
  *     approval is per URL, never per domain; our own hosts and provider redirect wrappers are refused;
- *   - robots.txt of the host is fetched first and respected for our crawler token (OkaraBot);
+ *   - robots.txt of the host is fetched first and respected for our crawler token (OkaraBot); when a redirect
+ *     moves to the www. twin, that host's robots.txt (RFC 9309: per host) is checked before the hop is requested;
  *   - the page is fetched through seo/ssrf.ts approvedExternalFetch (public hostname, no IP literals,
  *     manual redirects re-checked per hop and limited to the host or its www. twin, crawler size/time caps);
  *   - only compact evidence is stored (counts, types, dates, a 400-character opening); never the full text.
@@ -13,10 +14,13 @@
  * `state` for two Noul questions (answer_first, entity); everything else is measured in code.
  *
  * Verdict (VERDICT_VERSION, computed in code, never by a model):
- *   review  any Jev check is tier 'flag', the injection screen did not come back clean, or the fetch was partial;
+ *   review  the injection screen flagged the page or was unavailable (fails closed: a screen error or budget
+ *           stop treats the evidence as untrusted), any Jev check is tier 'flag', or the fetch was partial;
  *   adapt   2+ checks are present on their page and missing on our matched page (adapt the structure; never
- *           copy their text);
+ *           copy their text). With no matched page of ours every check of ours is 'unknown', so there are
+ *           no gaps and the verdict is never 'adapt';
  *   skip    otherwise.
+ * Only API-sampled answers authorise a fetch: manual imports (pasted text) never make a URL approvable.
  * Budget: 1 crawl_pages unit reserved before any fetch (released when the page itself is not requested);
  * Jev calls reserve provider_calls + jev_calls per call inside the DecisionProvider (at most 2 calls:
  * injection screen, then answer_first + entity together).
@@ -104,7 +108,8 @@ export interface CompetitorExtraction {
   ourPage: { pageId: string; url: string } | null;
   /** Checks present on their page and missing on ours (the adapt rule). */
   gaps: CompetitorCheckKey[];
-  injectionScreen: "clean" | "flagged" | "not_run";
+  /** not_run: Jev not configured or no question; unavailable: the screen call failed (treated like flagged). */
+  injectionScreen: "clean" | "flagged" | "unavailable" | "not_run";
 }
 
 // ------------------------------------------------------------------ URL helpers
@@ -156,17 +161,33 @@ export interface CitationUse {
   host: string;
 }
 
-/** Stored citations (API + manual) of this project whose canonical URL equals one of `urls`, newest first. */
-async function citationUses(db: Db, ws: string, pid: string, urls: string[]): Promise<Map<string, CitationUse[]>> {
+/**
+ * Stored citations of API-sampled answers (measurement_type 'api'; manual imports never qualify) of this
+ * project whose canonical URL equals one of `urls`, newest first. Hosts are queried in chunks of 90
+ * (+2 tenancy params, under the D1 100-parameter limit).
+ */
+export async function citationUses(db: Db, ws: string, pid: string, urls: string[]): Promise<Map<string, CitationUse[]>> {
   const byUrl = new Map<string, CitationUse[]>();
-  const hosts = [...new Set(urls.map((u) => normalizeDomain(new URL(u).hostname)).filter((h): h is string => !!h))];
+  const hosts = [
+    ...new Set(
+      urls
+        .map((u) => {
+          try {
+            return normalizeDomain(new URL(u).hostname);
+          } catch {
+            return null;
+          }
+        })
+        .filter((h): h is string => !!h),
+    ),
+  ];
   const wanted = new Set(urls);
   for (let i = 0; i < hosts.length; i += 90) {
     const chunk = hosts.slice(i, i + 90);
     const rows = await db.all<CitationUse>(
       `SELECT c.url, c.source_type, c.observation_id, c.host, o.prompt_id, o.prompt_text, o.provider
          FROM geo_citations c JOIN geo_observations o ON o.id = c.observation_id AND o.workspace_id = c.workspace_id AND o.project_id = c.project_id
-        WHERE c.workspace_id = ? AND c.project_id = ? AND c.host IN (${chunk.map(() => "?").join(",")})
+        WHERE c.workspace_id = ? AND c.project_id = ? AND o.measurement_type = 'api' AND c.host IN (${chunk.map(() => "?").join(",")})
         ORDER BY o.created_at DESC, c.rowid DESC LIMIT 2000`,
       ws,
       pid,
@@ -332,6 +353,16 @@ async function fetchRobotsFor(fetchImpl: typeof fetch, origin: URL, userAgent: s
   }
 }
 
+class RobotsBlockedError extends Error {
+  constructor(
+    public readonly host: string,
+    public readonly unreachable: boolean,
+  ) {
+    super(`robots.txt of ${host} disallows`);
+    this.name = "RobotsBlockedError";
+  }
+}
+
 const LOGIN_PATH = /\/(login|log-in|signin|sign-in|sign_in|auth|account\/login|users\/sign_in)(\/|$|\?)/i;
 
 function fmt(n: number): string {
@@ -387,7 +418,9 @@ async function askJev(deps: CompetitorDeps, assessmentId: string, state: { quest
   try {
     screen = await decisions.decide({ purpose: COMPETITOR_PURPOSE, state: screenState, questions: { injection_risk: geoQuestion(GEO_QUESTION_IDS.injectionRisk, "text") } });
   } catch (e) {
+    // Fail closed [A14]: an unreachable screen means the text was never cleared.
     out.status = failStatus(e);
+    out.screen = "unavailable";
     await record(GEO_QUESTION_IDS.injectionRisk, screenVersion, "injection_risk", screenHash, null, undefined, null, "rejected", out.status === "budget" ? "budget" : "decision_unavailable");
     await flushRecords();
     return out;
@@ -443,9 +476,14 @@ function jevPresence(a: { noul: number | null; tier: CheckTier | null } | undefi
   return a.noul >= 0.5 ? "present" : "missing";
 }
 
-/** Our matched page's status per check (from our skip factors), "missing" everywhere when no page matched. */
+const ALL_UNKNOWN: Record<CompetitorCheckKey, FactorStatus> = { answer_first: "unknown", depth: "unknown", proof: "unknown", schema: "unknown", freshness: "unknown", author: "unknown", entity: "unknown", faq: "unknown" };
+
+/**
+ * Our matched page's status per check (from our skip factors). "unknown" everywhere when no page matched
+ * or it has no usable crawl: nothing is compared, so there are no gaps and the verdict cannot be 'adapt'.
+ */
 function ourPresence(ourFactors: Map<SkipFactorKey, FactorStatus> | null, ourWordCount: number | null, ourJsonld: string[] | null): Record<CompetitorCheckKey, FactorStatus> {
-  if (!ourFactors) return { answer_first: "missing", depth: "missing", proof: "missing", schema: "missing", freshness: "missing", author: "missing", entity: "missing", faq: "missing" };
+  if (!ourFactors) return { ...ALL_UNKNOWN };
   return {
     answer_first: ourFactors.get("answer_first") ?? "unknown",
     depth: ourWordCount === null ? "unknown" : ourWordCount >= DEPTH_WORDS ? "present" : "missing",
@@ -561,6 +599,18 @@ async function fetchAndAssess(deps: CompetitorDeps, id: string, url: string, use
     return { status: "blocked", status_detail: robots.status === "unreachable" ? `robots.txt unreachable; treated as disallow-all` : "robots.txt disallows", fetched_at: fetchedAt };
   }
 
+  // RFC 9309: robots.txt is per host. Each redirect hop (same host or its www. twin) is checked against the
+  // robots.txt of the hop's host before it is requested; the twin's file is fetched once.
+  const robotsByHost = new Map<string, RobotsState>([[target.hostname, robots]]);
+  const beforeRedirect = async (next: URL) => {
+    let r = robotsByHost.get(next.hostname);
+    if (!r) {
+      r = await fetchRobotsFor(deps.fetchImpl, next, ua);
+      robotsByHost.set(next.hostname, r);
+    }
+    if (!robotsAllows(r, CRAWLER_UA_TOKEN, next)) throw new RobotsBlockedError(next.hostname, r.status === "unreachable");
+  };
+
   onRequest();
   let res;
   try {
@@ -571,8 +621,13 @@ async function fetchAndAssess(deps: CompetitorDeps, id: string, url: string, use
       maxRedirects: COMPETITOR_FETCH.maxRedirects,
       kind: "html",
       userAgent: ua,
+      beforeRedirect,
     });
   } catch (e) {
+    if (e instanceof RobotsBlockedError) {
+      const where = e.host === target.hostname ? "robots.txt" : `robots.txt of ${e.host}`;
+      return { status: "blocked", status_detail: e.unreachable ? `${where} unreachable; treated as disallow-all` : `${where} disallows the redirect target`, fetched_at: fetchedAt };
+    }
     const code = e instanceof CrawlFetchError ? e.code : "error";
     const blocked: Record<string, string> = { non_html: "Not an HTML page", redirect_offsite: "Redirects to another host", blocked_url: "URL refused by the fetch guard" };
     const failed: Record<string, string> = { timeout: "Timed out", too_large: "Page larger than the 2 MB cap", too_many_redirects: "Too many redirects", error: "Network error" };
@@ -646,9 +701,9 @@ async function fetchAndAssess(deps: CompetitorDeps, id: string, url: string, use
   const checks: CompetitorCheck[] = CHECK_ORDER.map((key) => {
     if (JEV_CHECKS.has(key)) {
       const a = jevRan ? jev.answers[key as "answer_first" | "entity"] : undefined;
-      return { key, label: CHECK_LABELS[key], noul: a?.noul ?? null, tier: a?.tier ?? null, method: "jev", detail: detail[key] };
+      return { key, label: CHECK_LABELS[key], noul: a?.noul ?? null, tier: a?.tier ?? null, method: "jev", detail: detail[key], status: theirs[key] ?? "unknown" };
     }
-    return { key, label: CHECK_LABELS[key], noul: null, tier: null, method: "measured", detail: detail[key] };
+    return { key, label: CHECK_LABELS[key], noul: null, tier: null, method: "measured", detail: detail[key], status: theirs[key] ?? "unknown" };
   });
 
   // Our matched page (answer coverage match for the prompt that cited this URL).
@@ -665,12 +720,12 @@ async function fetchAndAssess(deps: CompetitorDeps, id: string, url: string, use
           const of = evaluateFactors(ev.evidence, question, brand, now, ev.snapshotAt);
           ours = ourPresence(new Map(of.map((f) => [f.key, f.status])), ev.evidence.wordCount, ev.evidence.jsonldTypes);
         } else {
-          ours = { answer_first: "unknown", depth: "unknown", proof: "unknown", schema: "unknown", freshness: "unknown", author: "unknown", entity: "unknown", faq: "unknown" };
+          ours = { ...ALL_UNKNOWN };
         }
       }
     }
   }
-  const { verdict, gaps } = computeVerdict({ checks, partial, screenFlagged: jev.screen === "flagged", theirs, ours });
+  const { verdict, gaps } = computeVerdict({ checks, partial, screenFlagged: jev.screen === "flagged" || jev.screen === "unavailable", theirs, ours });
 
   // Reasons: short observable facts about their page (plain text).
   const reasons: string[] = [];
@@ -689,10 +744,13 @@ async function fetchAndAssess(deps: CompetitorDeps, id: string, url: string, use
 
   const notes: string[] = [];
   if (!question) notes.push("No prompt text linked to this citation: Jev checks not run");
+  else if (jev.screen === "unavailable") notes.push("Injection screen unavailable; evidence treated as untrusted: 2 checks not run");
   else if (jev.status === "not_configured") notes.push("Jev not configured: 2 checks not run");
   else if (jev.status === "budget") notes.push("Daily Jev budget reached: 2 checks not run");
   else if (jev.status === "error") notes.push("Jev unavailable: 2 checks not run");
   else if (jev.status === "flagged") notes.push("Page text appears to address AI systems; Jev checks not run");
+  if (!ourPage) notes.push("No page on your site matches this question; compared against no page");
+  else if (CHECK_ORDER.every((k) => ours[k] === "unknown")) notes.push("Your matched page has no usable crawl yet; nothing was compared");
   if (partial) notes.push(res.truncated ? "Page truncated at the size cap; partial evidence" : "Page too complex to parse fully; partial evidence");
 
   const extraction: CompetitorExtraction = {

@@ -46,3 +46,5 @@ GLOBAL_USD_MICROS_PER_DAY=
 GLOBAL_JEV_CALLS_PER_DAY=
 GLOBAL_PROVIDER_CALLS_PER_DAY=
 GLOBAL_WRITER_TOKENS_PER_DAY=
+# Non-brand GSC queries in scope of the buyer-queries view. Empty = 5000 (code default); clamped to 20000.
+BUYER_QUERIES_MAX=

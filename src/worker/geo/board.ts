@@ -16,8 +16,7 @@
  *     while the lane has never run). position = the stored
  *     list_rank of a real ordered list; sentiment only when the brand was mentioned and a sentiment was
  *     measured; latencyMs from provider_calls joined on request_id (null when not linked).
- * Lane state: demo (demo project) > setup_required (engine not configured; "Not implemented yet" for an
- * engine without an adapter) > error (every answer of the engine's latest run failed; stateDetail = the
+ * Lane state: demo (demo project) > setup_required (engine not configured: key or model missing) > error (every answer of the engine's latest run failed; stateDetail = the
  * stored error) > ready. A configured engine that never ran is 'ready' with an empty feed and zero counts.
  */
 import type {
@@ -98,14 +97,13 @@ interface SelfRow {
   method: string;
 }
 
-/** Which engines are configured (presence only, no decryption). undefined = no adapter in this build. */
-async function enginePresence(env: Env, db: Db, ws: string): Promise<Record<GeoEngineProviderId, boolean | undefined>> {
-  const p = (await capabilityPresence(env, db, ws)) as unknown as Record<string, boolean | undefined>;
+/** Which engines are configured (presence only, no decryption). Every board lane has an adapter. */
+async function enginePresence(env: Env, db: Db, ws: string): Promise<Record<GeoEngineProviderId, boolean>> {
+  const p = await capabilityPresence(env, db, ws);
   return { openai_geo: p.openai_geo, anthropic_geo: p.anthropic_geo, gemini: p.gemini, perplexity: p.perplexity };
 }
 
-function setupDetail(env: Env, provider: GeoEngineProviderId, configured: boolean | undefined): string {
-  if (configured === undefined) return "Not implemented yet";
+function setupDetail(env: Env, provider: GeoEngineProviderId): string {
   const modelVar = MODEL_ENV[provider];
   const key = `${VENDOR[provider] === "OpenAI" || VENDOR[provider] === "Anthropic" ? "an" : "a"} ${VENDOR[provider]} API key`;
   if (!(env[modelVar] ?? "").trim()) return `Set ${modelVar} and ${key}`;
@@ -313,7 +311,7 @@ export async function buildEngineBoard(env: Env, db: Db, project: ProjectRow, no
     if (isDemo) state = "demo";
     else if (!configured) {
       state = "setup_required";
-      stateDetail = setupDetail(env, provider, configured);
+      stateDetail = setupDetail(env, provider);
     } else if (latest) {
       const lastRun = lrows.filter((r) => (latest.run_id ? r.run_id === latest.run_id : r.created_at.slice(0, 10) === latest.created_at.slice(0, 10)));
       if (lastRun.length > 0 && lastRun.every((r) => r.status === "failed")) {
