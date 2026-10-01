@@ -144,7 +144,7 @@ describe("runDraftCheck with the new items", () => {
     const { db, project } = await setup();
     const r = await runDraftCheck({ targetQuery: "brass cabinet pull", draftText: DRAFT }, { db, project, decisions: null, now: FIXED_NOW });
     expect(r.checklist.items).toHaveLength(25);
-    expect(item(r, "page.while_write.answer_first_40_words")).toMatchObject({ status: "met", method: "measured" });
+    expect(item(r, "page.while_write.answer_first_40_words")).toMatchObject({ status: "met", method: "heuristic" });
     expect(item(r, "page.while_write.answer_first_40_words").evidence[0]!.detail).toMatch(/^Our solid brass cabinet pull/);
     expect(item(r, "page.while_write.faq_when_useful")).toMatchObject({ status: "manual", method: "manual", manual: null });
     expect(item(r, "page.while_write.faq_when_useful").summary).toMatch(/no FAQ heading and 2 question-style headings/);

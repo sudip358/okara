@@ -6,16 +6,19 @@
  * - Rate limit: DRAFT_CHECK_RATE_LIMIT per user + project (checked before the body is read).
  * - Body: at most MAX_DRAFT_BODY_BYTES; zod-validated: targetQuery 1..200 characters, exactly one of
  *   pageId | draftText (draftText at most 60,000 characters), optional title (<= 300) and
- *   metaDescription (<= 1,000; the same limits as the web form).
+ *   metaDescription (<= 1,000; the same limits as the web form). Drafts only: optional pageType (one of
+ *   PageType) and productFacts (at most 20 fields; key 1..60, value 1..300 characters after trimming).
  * - Jev: used when TypeSafe is configured for the workspace (never for demo projects); calls are recorded
  *   in provider_calls and reserved against the project's daily provider_calls / jev_calls budget.
  * - Nothing is fetched from the site and the draft is not stored (only Jev decision_records are).
  */
 import { Hono } from "hono";
 import { z } from "zod";
-import type { DraftCheckResult } from "@shared/types";
+import type { DraftCheckResult, PageType } from "@shared/types";
 import type { AppEnv } from "../app";
 import { runDraftCheck } from "../draftcheck/service";
+import { MAX_PRODUCT_FACTS } from "../draftcheck/items";
+import { STATE_CAPS } from "../draftcheck/jev";
 import { MAX_DRAFT_CHARS } from "../draftcheck/parse";
 import type { Env } from "../env";
 import type { Db } from "../lib/db";
@@ -32,6 +35,8 @@ export const DRAFT_CHECK_RATE_LIMIT = { limit: 10, windowSeconds: 60 } as const;
 /** 60,000 characters of text, JSON-escaped (worst case ~6 bytes per character), plus the other fields. */
 export const MAX_DRAFT_BODY_BYTES = 512 * 1024;
 
+const PAGE_TYPES = ["home", "collection", "product", "article", "landing", "other"] as const satisfies readonly PageType[];
+
 export const draftCheckSchema = z
   .object({
     targetQuery: z.string().trim().min(1).max(200),
@@ -39,10 +44,17 @@ export const draftCheckSchema = z
     draftText: z.string().max(MAX_DRAFT_CHARS).optional(),
     title: z.string().max(300).optional(),
     metaDescription: z.string().max(1000).optional(),
+    pageType: z.enum(PAGE_TYPES).optional(),
+    productFacts: z
+      .record(z.string().trim().min(1).max(STATE_CAPS.factKey), z.string().trim().min(1).max(STATE_CAPS.factValue))
+      .refine((o) => Object.keys(o).length <= MAX_PRODUCT_FACTS, { message: `At most ${MAX_PRODUCT_FACTS} product fields.` })
+      .optional(),
   })
   .strict()
   .refine((b) => (b.pageId !== undefined) !== (b.draftText !== undefined), { message: "Send exactly one of pageId or draftText.", path: ["draftText"] })
-  .refine((b) => b.draftText === undefined || b.draftText.trim().length > 0, { message: "draftText is empty.", path: ["draftText"] });
+  .refine((b) => b.draftText === undefined || b.draftText.trim().length > 0, { message: "draftText is empty.", path: ["draftText"] })
+  .refine((b) => b.pageType === undefined || b.draftText !== undefined, { message: "pageType applies to pasted drafts only.", path: ["pageType"] })
+  .refine((b) => b.productFacts === undefined || b.draftText !== undefined, { message: "productFacts applies to pasted drafts only.", path: ["productFacts"] });
 
 type DecisionsFactory = (env: Env, db: Db, workspaceId: string, projectId: string) => Promise<DecisionProvider | null>;
 const defaultFactory: DecisionsFactory = (env, db, workspaceId, projectId) => buildDecisionsForWorkspace(env, db, workspaceId, projectId);
@@ -93,7 +105,15 @@ draftCheckRoutes.post("/projects/:pid/seo/draft-check", async (c) => {
   const body = await readBody(c);
   const decisions = project.is_demo === 1 ? null : await decisionsFactory(c.env, db, project.workspace_id, project.id);
   const data: DraftCheckResult = await runDraftCheck(
-    { targetQuery: body.targetQuery, pageId: body.pageId, draftText: body.draftText, title: body.title, metaDescription: body.metaDescription },
+    {
+      targetQuery: body.targetQuery,
+      pageId: body.pageId,
+      draftText: body.draftText,
+      title: body.title,
+      metaDescription: body.metaDescription,
+      pageType: body.pageType,
+      productFacts: body.productFacts,
+    },
     { db, project, decisions, now },
   );
   return c.json({ data });

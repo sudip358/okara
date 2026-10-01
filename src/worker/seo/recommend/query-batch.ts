@@ -20,7 +20,7 @@
  */
 import type { Tier } from "@shared/types";
 import { BudgetExceededError } from "../../lib/errors";
-import type { Db } from "../../lib/db";
+import { insertStatement, type Db } from "../../lib/db";
 import { hashJson } from "../../lib/hash";
 import { newId } from "../../lib/ids";
 import { iso } from "../../lib/time";
@@ -201,6 +201,8 @@ export async function judgeQueries(
     }
     const stateHash = await hashJson(state);
     const now = iso(deps.now);
+    // One D1 batch (a transaction) per call: single-row INSERTs, each well under 100 bound parameters.
+    const statements: Array<[string, ...unknown[]]> = [];
     for (let j = 0; j < batch.length; j++) {
       const [k, q] = batch[j]!;
       const ref = `q${j + 1}`;
@@ -216,7 +218,7 @@ export async function judgeQueries(
       const out = opts.outcome(judgment);
       for (const s of opts.specs) {
         const a = answers[s.id]!;
-        await deps.db.insert("decision_records", {
+        statements.push(insertStatement("decision_records", {
           id: newId("dec"),
           workspace_id: deps.workspaceId,
           project_id: deps.projectId,
@@ -234,9 +236,10 @@ export async function judgeQueries(
           outcome: out.outcome,
           reason_code: out.reasonCode,
           created_at: now,
-        });
+        }));
       }
     }
+    await deps.db.batch(statements);
   }
   return { results, asked, cached, calls, stoppedBy, hitMaxCalls, error };
 }

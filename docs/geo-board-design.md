@@ -37,7 +37,7 @@ every simulated or projected element with stored data or an honest empty state.
 | "Answers citing us" | `answersCitingUs` | Plus `mentionRate` as a secondary line "Named in 412 of 1,386" |
 | "Answers skipping us" | `answersSkippingUs` | Tooltip: "Valid answers that neither name nor cite you" |
 | "Cited instead · 21% Peptide Sciences" | `citedInstead.host` + `citedInstead.share` (as n of m) | Host, not a guessed brand name. Null → "No other source dominates" |
-| "Cost so far $0.110" | `costUsd` | Reuse `EngineLane` `costLabel`: "Actual" / "Estimate (versioned rates)" / "Unknown" — never $0 for unknown |
+| "Cost (latest cohort)" | `costUsd` (sum over the latest cohort only) | Reuse `EngineLane` `costLabel`: "Actual" / "Estimate (versioned rates)" / "Unknown" — never $0 for unknown |
 | — (added) | `counts`, `searchQueries`, `smallSampleWarning` | "1,386 valid · 1,301 grounded · 4 failed"; "38 engine searches captured" or "Search queries not exposed"; small-sample warning badge |
 
 ### Lane empty / setup states
@@ -83,7 +83,7 @@ Footer caveat: "These are observable differences, not causes. Engines do not pub
 
 ## 5. C · Competitor pages: why {engine} cites them (mockup brand/type/reasons/radar "7.4/10")
 
-Label "Jev judgment" on Jev checks, "Measured" on measured ones; section note "Read only for URLs you
+Label "Jev judgment" on Jev checks, "Measured" on measured competitor checks (skip-factor rows in section B use "Measured from crawl"); section note "Read only for URLs you
 approved". Data: `GET …/geo/competitor-pages` filtered by `citedIn[].provider`.
 
 - Candidate list: cited URLs from `citedInstead` / citation evidence, each with an **"Approve reading this
@@ -98,8 +98,7 @@ approved". Data: `GET …/geo/competitor-pages` filtered by `citedIn[].provider`
   always accompanied by a visible `Table` fallback (`checks[]`: check, method, result/`detail`, Noul as
   "yes-probability 0.82" for Jev rows, tier badge). On mobile only the table renders. No "7.4/10".
 - States: `queued`/`fetching` spinner rows; `blocked` shows `stateDetail` ("robots.txt disallows"); `failed`
-  with retry allowed after the rate-limit window; Jev not configured → Jev rows show "Not run (Jev not
-  configured)".
+  with retry allowed after the rate-limit window; Jev checks not answered → rows show "Not run" (or "Not run · <detail>"); the reason comes from `assessment.stateDetail`.
 
 ## 6. D · Pages to rewrite (mockup checklist + Traffic/Conv/AI citations/Revenue arrows)
 

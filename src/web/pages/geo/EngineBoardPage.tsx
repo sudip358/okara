@@ -3,20 +3,22 @@
  * Layout follows the reference "Jev for SEO/GEO" board (engine columns; prompt feed; why we are skipped;
  * why they are cited; rewrite checklist), but every number is stored data: no simulated run, no projected
  * traffic/revenue, no citability score. Reads GET /geo/board, /geo/competitor-pages, /geo/rewrite-plans;
- * the only write is the confirmed single-page approval.
+ * the only write is the confirmed single-page approval. No total "$ spent" ticker: cost lives in each lane
+ * header (latest cohort). Polls every 8 s while the latest GEO run is pending/running.
  */
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 import type { CompetitorPageAssessment } from "@shared/types";
 import { formatDateTime, formatRelative } from "@web/lib/format";
 import { projectPath } from "@web/lib/project-context";
 import { ErrorState, LoadingState, PageHeader, StateBadge, StateBanner, buttonClass } from "@web/components/ui";
 import { RunNowButton } from "@web/components/RunNowButton";
+import { usePolling } from "@web/lib/hooks";
 import { ObservationDrawer } from "./components/ObservationDrawer";
 import { useCompetitorPages, useEngineBoard, useGeoRuns, useMinWidth, useRewritePlans, useSkipInputs } from "./board/data";
 import { EngineColumn } from "./board/EngineColumn";
 import { RewritePlanCard } from "./board/RewritePlansPanel";
-import { DEFAULT_DISCLOSURES, LABELS, costDisplay, firstOpenLane, formatDuration, laneGridClass, latestGeoRun, plansWithoutEngine, runDurationMs, sumLaneCost } from "./board/lib";
+import { DEFAULT_DISCLOSURES, LABELS, firstOpenLane, formatDuration, laneGridClass, latestGeoRun, plansWithoutEngine, runDurationMs, runIsActive, runJustFinished } from "./board/lib";
 
 export function EngineBoardPage() {
   const { projectId = "" } = useParams();
@@ -40,7 +42,28 @@ export function EngineBoardPage() {
   );
 
   const run = latestGeoRun(runs.data);
-  const totalCost = data ? costDisplay(sumLaneCost(data.lanes)) : null;
+  // While the latest GEO run is pending/running, poll runs + board + plans (same cadence as Overview),
+  // then reload board and plans once when it finishes so the lanes show the new cohort.
+  const active = runIsActive(run);
+  usePolling(
+    () => {
+      runs.reload();
+      board.reload();
+      plans.reload();
+    },
+    active,
+    8000,
+  );
+  const wasActive = useRef(false);
+  const runStatus = run?.status;
+  useEffect(() => {
+    if (runJustFinished(wasActive.current, run)) {
+      board.reload();
+      plans.reload();
+    }
+    wasActive.current = active;
+    // Fires on run status transitions only (reload functions are not stable deps).
+  }, [run?.id, runStatus, active]);
   const openLane = data ? firstOpenLane(data.lanes) : null;
   const unassignedPlans = plans.data ? plansWithoutEngine(plans.data.plans) : [];
 
@@ -68,7 +91,7 @@ export function EngineBoardPage() {
 
       {board.loading && !data ? (
         <LoadingState label="Loading AI engines…" />
-      ) : board.error ? (
+      ) : board.error && !data ? (
         <ErrorState error={board.error} onRetry={board.reload} />
       ) : data ? (
         <>
@@ -99,14 +122,6 @@ export function EngineBoardPage() {
               <dt className="text-zinc-600 dark:text-zinc-400">Duration</dt>
               <dd className="tabular-nums text-zinc-900 dark:text-zinc-100">{formatDuration(runDurationMs(run))}</dd>
             </div>
-            {totalCost && (
-              <div className="flex gap-1">
-                <dt className="text-zinc-600 dark:text-zinc-400">Cost of latest cohorts</dt>
-                <dd className="tabular-nums text-zinc-900 dark:text-zinc-100">
-                  {totalCost.value} <span className="text-zinc-600 dark:text-zinc-400">({totalCost.basis})</span>
-                </dd>
-              </div>
-            )}
           </dl>
 
           {data.state === "setup_required" && (

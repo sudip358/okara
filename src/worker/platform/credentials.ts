@@ -10,8 +10,7 @@ import type { ProviderIdWithGeoEngines } from "@shared/types";
 
 /**
  * Every provider with a credential. Includes the two API GEO engine lanes (openai_geo, anthropic_geo);
- * their workspace keys can be stored only once the provider_credentials CHECK constraint allows them
- * (until then resolution falls back to the operator key).
+ * migration 0008 widens the provider_credentials CHECK so their workspace keys can be stored.
  */
 export type CredentialProviderId = ProviderIdWithGeoEngines;
 

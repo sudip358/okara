@@ -11,7 +11,7 @@ import { projectPath } from "@web/lib/project-context";
 import { Badge, ErrorState, LoadingState, cx, inputClass } from "@web/components/ui";
 import { ExternalUrl } from "@web/components/ExternalUrl";
 import { useSkipFactors } from "./data";
-import { FACTOR_STATUS, LABELS, engineName, methodLabel, skipCandidates, type SkipCandidate } from "./lib";
+import { FACTOR_STATUS, LABELS, engineName, skipCandidates, type SkipCandidate } from "./lib";
 
 export interface SkipInputs {
   coverage: AnswerCoverageRow[] | null;
@@ -28,7 +28,7 @@ export function FactorRow({ f }: { f: SkipFactor }) {
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="text-xs font-medium text-zinc-900 dark:text-zinc-100">{f.label}</span>
         <Badge tone={st.tone}>{st.label}</Badge>
-        <span className="text-[11px] text-zinc-600 dark:text-zinc-400">{f.method === "heuristic" ? LABELS.heuristic : methodLabel("measured")}</span>
+        <span className="text-[11px] text-zinc-600 dark:text-zinc-400">{f.method === "heuristic" ? LABELS.heuristic : LABELS.measured}</span>
       </div>
       <p className="break-words text-xs text-zinc-700 dark:text-zinc-300">{f.measured}</p>
       {f.citedPage && (

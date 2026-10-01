@@ -47,6 +47,11 @@ export function countBySeverity(findings: AuditFinding[]): Record<Severity, numb
 }
 
 // ------------------------------------------------------------------ buyer queries
+/** Mirrors the server: one POST classifies at most 200 queries (8 Jev calls), 3 POSTs per project per day. */
+export const BUYER_QUERIES_PER_CLICK = 200;
+export const BUYER_CLASSIFY_PER_DAY = 3;
+export const BUYER_CLASSIFY_HINT = `Asks Jev about up to ${BUYER_QUERIES_PER_CLICK} queries without a cached answer per click, at most ${BUYER_CLASSIFY_PER_DAY} times per project per day; uses your daily Jev budget.`;
+
 /** "Classified N of M" from completeness; null when the counts are unknown. Pure. */
 export function buyerProgress(d: Pick<CoverageResponse<BuyerQueryRow>, "completeness"> | null | undefined): { covered: number; total: number; done: boolean; label: string } | null {
   const c = d?.completeness;

@@ -2,8 +2,8 @@
  * Draft-check-only checklist items (2026-10-01, "7 workflows" reference): nine items on top of the 16
  * per-page on-page items, so a draft check runs 25 checks.
  *
- *   page.while_write.answer_first_40_words     measured: the first 40 words of the opening share the target
- *                                               query's words (deterministic; never asked of Jev)
+ *   page.while_write.answer_first_40_words     heuristic: the first 40 words of the opening share the target
+ *                                               query's words (word overlap; deterministic; never asked of Jev)
  *   page.while_write.faq_when_useful            Jev Noul (seo.draft.faq_when_useful)
  *   page.while_write.compare_table              Jev Noul (seo.draft.compare_table)
  *   page.while_write.headings_match_questions   Jev Noul (seo.draft.headings_match_questions)
@@ -62,7 +62,7 @@ export function firstWords(text: string | null | undefined, n = FIRST_WORDS): st
 }
 
 /**
- * Measured: share of the target query's content words found in the first 40 words of the opening.
+ * Word heuristic: share of the target query's content words found in the first 40 words of the opening.
  * met >= THRESHOLDS.answerCoverage (60%), partial > 0, not_met 0 or no opening; unknown when the query
  * has no content words. Pure.
  */
@@ -93,7 +93,7 @@ export const DRAFT_EXTRA_ITEMS: ItemDef<DraftItemContext>[] = [
   {
     id: "page.while_write.answer_first_40_words",
     section: "while_write",
-    label: "Answer in the first 40 words",
+    label: "Target query words in the first 40 words",
     tier: null,
     evaluate(ctx) {
       const guidance = "Put the direct answer to the target query in the first 40 words of the opening paragraph, then add detail.";
@@ -101,7 +101,7 @@ export const DRAFT_EXTRA_ITEMS: ItemDef<DraftItemContext>[] = [
       const r = answerInFirstWords(ctx.opening, ctx.targetQuery);
       return {
         status: r.status,
-        method: "measured",
+        method: "heuristic",
         summary: !r.words
           ? `${subject(ctx)} has no opening paragraph.`
           : r.coverage === null
@@ -109,7 +109,7 @@ export const DRAFT_EXTRA_ITEMS: ItemDef<DraftItemContext>[] = [
             : `The first ${Math.min(FIRST_WORDS, countWords(r.words))} words of the opening contain ${pct(r.coverage)} of the words in the target query "${ctx.targetQuery}".`,
         evidence: r.words ? [{ label: `First ${FIRST_WORDS} words`, url: null, detail: r.words }] : [],
         guidance,
-        caveat: "Measured word overlap in the first 40 words (60% or more counts as met), not a judgment of answer quality. Never stuff the query into the opening.",
+        caveat: "Word overlap with the target query in the first 40 words (60% or more counts as met), not a check that an answer is present; the answer itself is judged by \"Answer the main question early\". Never stuff the query into the opening.",
       };
     },
   },

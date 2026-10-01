@@ -180,7 +180,8 @@ describe("competitor panel", () => {
     expect(text(render(h(AssessmentCard, { a: assessment({ state: "blocked", stateDetail: "robots.txt disallows", verdict: null, checks: [] }), showRadar: true })))).toContain("robots.txt disallows");
     expect(text(render(h(AssessmentCard, { a: assessment({ state: "fetching", verdict: null, checks: [] }), showRadar: true })))).toContain("Reading page");
     const t = text(render(h(AssessmentCard, { a: assessment({ checks: [{ key: "entity", label: "Entity facts", noul: null, tier: null, method: "jev", detail: null }] }), showRadar: false })));
-    expect(t).toContain("Not run (Jev not configured)");
+    expect(t).toContain("Not run");
+    expect(t).not.toContain("Jev not configured");
   });
 });
 

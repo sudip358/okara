@@ -47,6 +47,7 @@ import { newId } from "../lib/ids";
 import { iso, type Clock } from "../lib/time";
 import type { DecisionAnswer, DecisionProvider, DecisionQuestion, DecisionResult } from "../providers/types";
 import { POLICY_VERSION, questionVersion, tierFor } from "../runs/policy";
+import { DRAFT_EXTRA_ITEM_IDS } from "./items";
 
 export const DRAFTCHECK_QUESTIONS_REVISION = "draftcheck-questions-2026-10-01.1";
 /** Upper bound on questions in the single draft-check call (13 items + 8 excerpts = 21). */
@@ -299,6 +300,12 @@ export interface DraftJevInput {
   text: string;
   wordCount: number;
   claims: string[];
+  /**
+   * Draft-check items (items.ts) whose evaluated status is `manual`. When set, a question for a
+   * draft-check item outside this set is not asked, so Jev never overwrites an item code measured as
+   * not_applicable / unknown. Questions for the per-page items are unaffected. Omitted = no filter.
+   */
+  askableItemIds?: ReadonlySet<string> | null;
 }
 
 export interface JevItemAnswer {
@@ -391,6 +398,8 @@ export function hasInputs(key: ItemQuestionKey, state: ReturnType<typeof buildJe
   }
 }
 
+const EXTRA_IDS: ReadonlySet<string> = new Set(DRAFT_EXTRA_ITEM_IDS);
+
 /** Ask all item + claim questions in one call and record every question in decision_records. */
 export async function askDraftJev(input: DraftJevInput, deps: DraftJevDeps): Promise<DraftJevRun> {
   const state = buildJevState(input);
@@ -398,6 +407,8 @@ export async function askDraftJev(input: DraftJevInput, deps: DraftJevDeps): Pro
   const itemKeys: ItemQuestionKey[] = [];
   for (const key of Object.keys(ITEM_QUESTIONS) as ItemQuestionKey[]) {
     if (!state.draft.text || !hasInputs(key, state)) continue; // absent input: do not ask
+    const itemId = ITEM_QUESTIONS[key].itemId;
+    if (input.askableItemIds && EXTRA_IDS.has(itemId) && !input.askableItemIds.has(itemId)) continue; // code already decided
     questions[`item_${key}`] = ITEM_QUESTIONS[key].question;
     itemKeys.push(key);
   }

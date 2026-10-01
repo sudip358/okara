@@ -83,7 +83,7 @@ export function LaneHeader({ lane, showMetrics }: { lane: EngineLaneSummary; sho
             />
             <Stat label="Answers skipping us" value={formatNumber(lane.answersSkippingUs)} title="Valid answers that neither name nor cite you" />
             <Stat label="Cited instead" value={lane.citedInstead ? lane.citedInstead.host : "—"} sub={lane.citedInstead ? citedInsteadShare(lane.citedInstead) : "No other source dominates"} />
-            <Stat label="Cost so far" value={cost.value} sub={cost.basis} />
+            <Stat label="Cost (latest cohort)" value={cost.value} sub={cost.basis} />
           </dl>
           <p className="text-[11px] text-zinc-600 dark:text-zinc-400">
             {countsLine(lane.counts)} · {searchQueriesLine(lane.searchQueries)}

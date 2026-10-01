@@ -147,6 +147,16 @@ export function latestGeoRun(runs: RunSummary[] | null | undefined): RunSummary 
   return best;
 }
 
+/** True while the run is pending or running (the board polls then). */
+export function runIsActive(run: Pick<RunSummary, "status"> | null | undefined): boolean {
+  return run?.status === "pending" || run?.status === "running";
+}
+
+/** True exactly when a run that was active is now finished: the board reloads once at that moment. */
+export function runJustFinished(wasActive: boolean, run: Pick<RunSummary, "status"> | null | undefined): boolean {
+  return wasActive && run != null && !runIsActive(run);
+}
+
 /** Wall-clock duration of a finished run in ms; null when it has not started or finished. */
 export function runDurationMs(run: Pick<RunSummary, "startedAt" | "finishedAt"> | null): number | null {
   if (!run?.startedAt || !run.finishedAt) return null;
@@ -272,7 +282,9 @@ export function checkStatus(c: CompetitorCheck): FactorStatus {
 }
 
 export function checkResultText(c: CompetitorCheck): string {
-  if (c.method === "jev" && c.noul === null) return c.detail ? `Not run (Jev not configured) · ${c.detail}` : "Not run (Jev not configured)";
+  // Neutral: Jev checks stay null for several reasons (not configured, budget, error, screened text, no
+  // linked prompt). The real reason is in the assessment's stateDetail, which AssessmentCard shows.
+  if (c.method === "jev" && c.noul === null) return c.detail ? `Not run · ${c.detail}` : "Not run";
   return c.detail ?? factorStatusLabel(checkStatus(c));
 }
 
@@ -379,12 +391,16 @@ export interface ApprovalCandidate {
  * URLs this engine cited instead of us that the user may approve for reading: unique feed `citedInstead.url`
  * values (https only, as the API requires) not already assessed. Newest feed first; max `limit`.
  */
+const APPROVAL_DONE_STATES: ReadonlySet<CompetitorPageAssessment["state"]> = new Set(["assessed", "queued", "fetching", "blocked"]);
+
 export function approvalCandidates(
   feed: EngineFeedItem[],
   assessed: CompetitorPageAssessment[],
   limit = 5,
 ): ApprovalCandidate[] {
-  const done = new Set(assessed.map((a) => urlKey(a.url)));
+  // Failed reads may be retried (the server's reuse query only matches assessed/queued/fetching rows);
+  // robots.txt blocks are not retried, so blocked stays excluded.
+  const done = new Set(assessed.filter((a) => APPROVAL_DONE_STATES.has(a.state)).map((a) => urlKey(a.url)));
   const seen = new Set<string>();
   const out: ApprovalCandidate[] = [];
   if (limit <= 0) return out;

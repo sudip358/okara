@@ -181,7 +181,7 @@ describe("checks and radar", () => {
   it("Noul is shown as a yes-probability (no confidence)", () => {
     expect(noulLabel(0.823)).toBe("yes-probability 0.82");
     expect(noulLabel(null)).toBeNull();
-    expect(checkResultText(c({ method: "jev", noul: null }))).toBe("Not run (Jev not configured)");
+    expect(checkResultText(c({ method: "jev", noul: null }))).toBe("Not run");
     expect(checkResultText(c({ detail: "1,709 words" }))).toBe("1,709 words");
   });
   it("plots present at the outer ring, partial mid, missing centre, unknown no point", () => {

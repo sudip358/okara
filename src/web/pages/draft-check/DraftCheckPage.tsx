@@ -13,11 +13,16 @@ import { ApiError, api, errorMessage, isRateLimited, isSetupRequired } from "@we
 import { useApi } from "@web/lib/hooks";
 import { formatDateTime, formatNumber } from "@web/lib/format";
 import { projectPath, useProject } from "@web/lib/project-context";
-import { Badge, Button, Card, ErrorState, LoadingState, PageHeader, SelectField, StateBadge, StateBanner, TextArea, TextField, buttonClass, cx } from "@web/components/ui";
+import { Badge, Button, Card, ErrorState, LoadingState, PageHeader, SelectField, StateBadge, StateBanner, TextArea, TextField, buttonClass, cx, inputClass } from "@web/components/ui";
 import { ChecklistView, Disclaimer } from "@web/pages/checklists/components/ChecklistView";
 import {
   DRAFT_CHECKS,
   DRAFT_CHECKS_SUMMARY,
+  DRAFT_PAGE_TYPES,
+  MAX_FACT_KEY_CHARS,
+  MAX_FACT_VALUE_CHARS,
+  MAX_PRODUCT_FACTS,
+  pageTypeLabel,
   EMPTY_FORM,
   FLAG_METHOD_HINT,
   FLAG_METHOD_LABEL,
@@ -40,6 +45,7 @@ import {
   type DraftField,
   type DraftForm,
   type DraftMode,
+  type FactRow,
   type FormErrors,
 } from "./lib";
 
@@ -62,6 +68,8 @@ export function DraftCheckPage() {
     pageId: `${base}-page`,
     title: `${base}-title`,
     metaDescription: `${base}-meta`,
+    pageType: `${base}-page-type`,
+    productFacts: `${base}-facts`,
     mode: `${base}-mode`,
   };
 
@@ -219,6 +227,24 @@ export function DraftCheckPage() {
                   className="min-h-10"
                 />
               </div>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <SelectField
+                  id={ids.pageType}
+                  label="Page type (optional)"
+                  value={form.pageType ?? ""}
+                  onChange={(e) => set("pageType", e.target.value as DraftForm["pageType"])}
+                  hint="What the draft will be published as. Without a choice it is checked as an article."
+                  error={errors.pageType}
+                >
+                  <option value="">Article (default)</option>
+                  {DRAFT_PAGE_TYPES.filter((t) => t !== "article").map((t) => (
+                    <option key={t} value={t}>
+                      {pageTypeLabel(t)}
+                    </option>
+                  ))}
+                </SelectField>
+              </div>
+              <ProductFactsEditor id={ids.productFacts} rows={form.productFacts ?? []} onChange={(rows) => set("productFacts", rows)} error={errors.productFacts} />
             </div>
           ) : (
             <PagePicker
@@ -258,6 +284,59 @@ export function DraftCheckPage() {
 }
 
 // ------------------------------------------------------------------ form parts
+function ProductFactsEditor({ id, rows, onChange, error }: { id: string; rows: FactRow[]; onChange: (rows: FactRow[]) => void; error?: string }) {
+  const update = (i: number, patch: Partial<FactRow>) => onChange(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const hintId = `${id}-hint`;
+  const errorId = `${id}-error`;
+  const describedBy = error ? `${errorId} ${hintId}` : hintId;
+  return (
+    <fieldset className="min-w-0 space-y-2" aria-describedby={describedBy}>
+      <legend className="text-sm font-medium text-zinc-800 dark:text-zinc-200">Product facts (optional)</legend>
+      <p id={hintId} className="text-xs text-zinc-600 dark:text-zinc-400">
+        Fields the text must agree with, such as Material: Solid brass. Up to {MAX_PRODUCT_FACTS} fields; names up to {MAX_FACT_KEY_CHARS} characters, values up to {MAX_FACT_VALUE_CHARS}. Jev
+        compares the text against them when TypeSafe is configured.
+      </p>
+      {rows.map((r, i) => (
+        <div key={i} className="flex min-w-0 flex-wrap items-center gap-2">
+          <input
+            id={i === 0 ? id : undefined}
+            aria-label={`Product field ${i + 1} name`}
+            className={cx(inputClass, "min-w-0 flex-1 basis-32")}
+            value={r.key}
+            maxLength={MAX_FACT_KEY_CHARS + 20}
+            onChange={(e) => update(i, { key: e.target.value })}
+            placeholder="Field name"
+            autoComplete="off"
+            aria-invalid={error ? true : undefined}
+          />
+          <input
+            aria-label={`Product field ${i + 1} value`}
+            className={cx(inputClass, "min-w-0 flex-[2] basis-48")}
+            value={r.value}
+            maxLength={MAX_FACT_VALUE_CHARS + 20}
+            onChange={(e) => update(i, { value: e.target.value })}
+            placeholder="Value"
+            autoComplete="off"
+            aria-invalid={error ? true : undefined}
+          />
+          <Button size="sm" variant="ghost" onClick={() => onChange(rows.filter((_, j) => j !== i))} aria-label={`Remove product field ${i + 1}`}>
+            Remove
+          </Button>
+        </div>
+      ))}
+      {error && (
+        <p id={errorId} role="alert" className="text-xs font-medium text-red-700 dark:text-red-400">
+          {error}
+        </p>
+      )}
+      <Button id={rows.length === 0 ? id : undefined} size="sm" disabled={rows.length >= MAX_PRODUCT_FACTS} onClick={() => onChange([...rows, { key: "", value: "" }])}>
+        Add product field
+      </Button>
+      {rows.length >= MAX_PRODUCT_FACTS && <p className="text-xs text-zinc-600 dark:text-zinc-400">The limit is {MAX_PRODUCT_FACTS} product fields.</p>}
+    </fieldset>
+  );
+}
+
 function ModeOption({
   name,
   value,

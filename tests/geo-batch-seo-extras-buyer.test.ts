@@ -78,7 +78,7 @@ describe("buyerQueryCap", () => {
 
 describe("POST /seo/buyer-queries pages through the full export", () => {
   it("classifies beyond the old top-300 in per-request batches, reuses the cache, and reports N of M", async () => {
-    const s = await scenario({ crawl: false, gsc: dataWith(1100) });
+    const s = await scenario({ crawl: false, gsc: dataWith(450) });
     const fake = jev();
     setSeoJevDecisionsFactory(async () => fake);
     const call = makeApp(s.env, s.userId);
@@ -87,21 +87,25 @@ describe("POST /seo/buyer-queries pages through the full export", () => {
     // GET never calls Jev.
     const before = (await call(path)).json.data;
     expect(fake.requests).toHaveLength(0);
-    expect(before.completeness).toMatchObject({ covered: 0, total: 1100 });
-    expect(before.completeness!.note).toMatch(/^0 of 1,100 non-brand queries classified \(all 1,100 with impressions; .*1,100 not classified yet/);
+    expect(before.completeness).toMatchObject({ covered: 0, total: 450 });
+    expect(before.completeness!.note).toMatch(/^0 of 450 non-brand queries classified \(all 450 with impressions; .*450 not classified yet/);
 
-    // First POST: at most BUYER_CALLS_PER_REQUEST calls of <= 50 questions (25 queries x 2).
+    // First POST: at most BUYER_CALLS_PER_REQUEST (8) calls of <= 50 questions (25 queries x 2) = 200 queries.
+    expect(BUYER_CALLS_PER_REQUEST).toBe(8);
     const first = (await call(path, "POST")).json.data;
     expect(fake.requests).toHaveLength(BUYER_CALLS_PER_REQUEST);
     for (const r of fake.requests) expect(Object.keys(r.questions).length).toBeLessThanOrEqual(QUERY_BATCH_QUESTIONS);
     const perRequest = BUYER_CALLS_PER_REQUEST * (QUERY_BATCH_QUESTIONS / 2);
-    expect(first.completeness).toMatchObject({ covered: perRequest, total: 1100 });
-    expect(first.completeness!.note).toMatch(new RegExp(`^${perRequest} of 1,100 non-brand queries classified .*600 not classified yet: one request asks Jev at most ${BUYER_CALLS_PER_REQUEST} times, so Classify with Jev again to continue`));
-    // Highest-impression queries go first, and the old 300 cap is gone.
+    expect(perRequest).toBe(200);
+    expect(first.completeness).toMatchObject({ covered: perRequest, total: 450 });
+    expect(first.completeness!.note).toMatch(
+      new RegExp(`^${perRequest} of 450 non-brand queries classified .*250 not classified yet: one request asks Jev at most ${BUYER_CALLS_PER_REQUEST} times, so Classify with Jev again to continue \\(up to 3 requests per project per day\\)`),
+    );
+    // Highest-impression queries go first.
     const firstAsked = new Set(fake.requests.flatMap((r) => Object.values((r.state as { queries: Record<string, string> }).queries)));
     expect(firstAsked.has("walnut drawer pull style 0")).toBe(true);
-    expect(firstAsked.has("walnut drawer pull style 499")).toBe(true);
-    expect(firstAsked.has("walnut drawer pull style 500")).toBe(false);
+    expect(firstAsked.has("walnut drawer pull style 199")).toBe(true);
+    expect(firstAsked.has("walnut drawer pull style 200")).toBe(false);
     expect(first.rows).toHaveLength(perRequest / 2);
 
     // Second POST continues from the cache: no query is asked twice.
@@ -109,21 +113,21 @@ describe("POST /seo/buyer-queries pages through the full export", () => {
     expect(fake.requests).toHaveLength(2 * BUYER_CALLS_PER_REQUEST);
     const secondAsked = fake.requests.slice(BUYER_CALLS_PER_REQUEST).flatMap((r) => Object.values((r.state as { queries: Record<string, string> }).queries));
     expect(secondAsked.filter((q) => firstAsked.has(q))).toEqual([]);
-    expect(second.completeness).toMatchObject({ covered: 1000, total: 1100 });
-    expect(second.completeness!.note).toMatch(/500 from the 7-day cache, 20 Jev calls/);
+    expect(second.completeness).toMatchObject({ covered: 400, total: 450 });
+    expect(second.completeness!.note).toMatch(/200 from the 7-day cache, 8 Jev calls/);
 
-    // Third POST finishes the remaining 100 queries in 4 calls.
+    // Third POST finishes the remaining 50 queries in 2 calls.
     const third = (await call(path, "POST")).json.data;
-    expect(fake.requests).toHaveLength(2 * BUYER_CALLS_PER_REQUEST + 4);
-    expect(third.completeness).toMatchObject({ covered: 1100, total: 1100 });
+    expect(fake.requests).toHaveLength(2 * BUYER_CALLS_PER_REQUEST + 2);
+    expect(third.completeness).toMatchObject({ covered: 450, total: 450 });
     expect(third.completeness!.note).not.toMatch(/not classified yet|budget/);
-    expect(third.rows).toHaveLength(550);
+    expect(third.rows).toHaveLength(225);
     expect(third.rows.every((r) => r.intent === "transactional" && r.intentTier === "act")).toBe(true);
 
     // GET now reads everything from the cache.
     const cached = (await call(path)).json.data;
-    expect(fake.requests).toHaveLength(2 * BUYER_CALLS_PER_REQUEST + 4);
-    expect(cached.completeness).toMatchObject({ covered: 1100, total: 1100 });
+    expect(fake.requests).toHaveLength(2 * BUYER_CALLS_PER_REQUEST + 2);
+    expect(cached.completeness).toMatchObject({ covered: 450, total: 450 });
     expect(cached.rows).toEqual(third.rows);
   });
 

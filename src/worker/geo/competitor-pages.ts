@@ -185,10 +185,14 @@ export async function citationUses(db: Db, ws: string, pid: string, urls: string
   for (let i = 0; i < hosts.length; i += 90) {
     const chunk = hosts.slice(i, i + 90);
     const rows = await db.all<CitationUse>(
-      `SELECT c.url, c.source_type, c.observation_id, c.host, o.prompt_id, o.prompt_text, o.provider
-         FROM geo_citations c JOIN geo_observations o ON o.id = c.observation_id AND o.workspace_id = c.workspace_id AND o.project_id = c.project_id
-        WHERE c.workspace_id = ? AND c.project_id = ? AND o.measurement_type = 'api' AND c.host IN (${chunk.map(() => "?").join(",")})
-        ORDER BY o.created_at DESC, c.rowid DESC LIMIT 2000`,
+      // Newest uses per stored URL (not per chunk), so a busy host such as reddit.com cannot crowd the
+      // requested URLs out of a fixed-size result.
+      `SELECT url, source_type, observation_id, host, prompt_id, prompt_text, provider FROM (
+         SELECT c.url, c.source_type, c.observation_id, c.host, o.prompt_id, o.prompt_text, o.provider,
+                ROW_NUMBER() OVER (PARTITION BY c.url ORDER BY o.created_at DESC, c.rowid DESC) AS rn
+           FROM geo_citations c JOIN geo_observations o ON o.id = c.observation_id AND o.workspace_id = c.workspace_id AND o.project_id = c.project_id
+          WHERE c.workspace_id = ? AND c.project_id = ? AND o.measurement_type = 'api' AND c.host IN (${chunk.map(() => "?").join(",")})
+       ) WHERE rn <= 20`,
       ws,
       pid,
       ...chunk,

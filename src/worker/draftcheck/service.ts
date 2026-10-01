@@ -40,7 +40,7 @@ import type { DecisionProvider } from "../providers/types";
 import { POLICY_VERSION } from "../runs/policy";
 import { scanFlags, FLAG_RULES_VERSION, type FlagScan } from "./flags";
 import { askDraftJev, DRAFTCHECK_QUESTIONS_REVISION, ITEM_QUESTIONS, type DraftJevRun, type ItemQuestionKey } from "./jev";
-import { DRAFT_EXTRA_ITEMS, MAX_PRODUCT_FACTS, type DraftItemContext } from "./items";
+import { DRAFT_EXTRA_ITEM_IDS, DRAFT_EXTRA_ITEMS, MAX_PRODUCT_FACTS, type DraftItemContext } from "./items";
 import { parseDraft, type DraftBlock, type DraftDoc } from "./parse";
 
 export const VERDICT_RULES_VERSION = "draftcheck-verdict-2026-10-01.1";
@@ -494,6 +494,7 @@ export async function runDraftCheck(input: DraftCheckInput, deps: DraftCheckDeps
         tableCount: extra.tableCount,
         sourceCount: extra.sourceCount,
         productFacts,
+        askableItemIds: new Set(items.filter((i) => DRAFT_EXTRA_ITEM_IDS.includes(i.id) && i.method === "manual").map((i) => i.id)),
       },
       { decisions, db, workspaceId: project.workspace_id, projectId: project.id, candidateKey: `draftcheck:${hash}`, clock },
     );

@@ -12,7 +12,7 @@
  *     impressions, are classified with two Noul questions per query (<= QUERY_BATCH_QUESTIONS = 50
  *     questions, i.e. 25 queries, per systemOne call; query-batch.ts, cached 7 days per query and
  *     question version). Stored rows are read in pages of GSC_PAGE_ROWS (keyset on id). One POST asks
- *     at most BUYER_CALLS_PER_REQUEST calls (500 queries); the next POST reuses the cache and continues,
+ *     at most BUYER_CALLS_PER_REQUEST calls (200 queries); the next POST reuses the cache and continues,
  *     so the full export is worked through across requests (and days) within the daily jev_calls budget.
  *     The response says "classified N of M" honestly and what stopped it (request limit, budget, error).
  *       seo.buyer_query  yes band (Act) -> listed; middle band -> listed as Flag ("Check this yourself");
@@ -48,7 +48,9 @@ export const BUYER_MAX_QUERIES = 5000;
 /** Hard ceiling for a configured cap. */
 export const BUYER_MAX_QUERIES_LIMIT = 20000;
 /** Jev calls one POST may make (25 queries per call); further queries wait for the next POST. */
-export const BUYER_CALLS_PER_REQUEST = 20;
+export const BUYER_CALLS_PER_REQUEST = 8;
+/** Classify POSTs per project per day (routes/seo-overview.ts), separate from the shared Jev budget. */
+export const BUYER_CLASSIFY_DAILY_LIMIT = 3;
 /** Stored Search Console rows read per page. */
 export const GSC_PAGE_ROWS = 2000;
 
@@ -247,7 +249,7 @@ export async function buildBuyerQueries(deps: BuyerQueriesDeps): Promise<Coverag
       : !deps.classify
         ? `; ${formatInt(remaining)} not classified yet (Classify with Jev asks for them)`
         : res.hitMaxCalls
-          ? `; ${formatInt(remaining)} not classified yet: one request asks Jev at most ${deps.maxCallsPerRequest ?? BUYER_CALLS_PER_REQUEST} times, so Classify with Jev again to continue`
+          ? `; ${formatInt(remaining)} not classified yet: one request asks Jev at most ${deps.maxCallsPerRequest ?? BUYER_CALLS_PER_REQUEST} times, so Classify with Jev again to continue (up to ${BUYER_CLASSIFY_DAILY_LIMIT} requests per project per day)`
           : res.stoppedBy === "budget"
             ? `; the daily Jev budget was reached, so ${formatInt(remaining)} are unclassified (cached answers are kept; continue tomorrow)`
             : res.stoppedBy === "error"

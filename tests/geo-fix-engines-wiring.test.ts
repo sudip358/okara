@@ -48,8 +48,7 @@ describe("migration 0008: provider_credentials accepts the GEO engine lanes", ()
     db.exec("PRAGMA foreign_keys = ON;");
     for (const f of files.slice(0, i8)) db.exec(readFileSync(f, "utf8"));
     const now = FIXED_NOW.toISOString();
-    db.prepare("INSERT INTO users (id, email, created_at) VALUES ('u1', 'a@example.com', ?)").run(now);
-    db.prepare("INSERT INTO workspaces (id, name, owner_user_id, created_at) VALUES ('w1', 'W', 'u1', ?)").run(now);
+    db.prepare("INSERT INTO workspaces (id, name, created_at) VALUES ('w1', 'W', ?)").run(now);
     db.prepare(
       "INSERT INTO provider_credentials (id, workspace_id, provider, key_enc, key_hint, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at) VALUES ('c1', 'w1', 'gemini', 'enc', 'abcd', ?, 1, 'ok', ?, ?)",
     ).run(now, now, now);
@@ -105,16 +104,31 @@ describe("migration 0008: provider_credentials accepts the GEO engine lanes", ()
 // ------------------------------------------------------------------ migration 0009
 
 describe("migration 0009: decision cache index", () => {
-  it("creates idx_decisions_cache on (project_id, question_id, candidate_key, created_at) and the cache lookup uses it", () => {
+  it("creates idx_decisions_cache on (project_id, question_id, candidate_key, created_at); with statistics the cache lookup uses it", () => {
     const db = new DatabaseSync(":memory:");
     for (const f of migrationFiles()) db.exec(readFileSync(f, "utf8"));
     const cols = db.prepare("PRAGMA index_info('idx_decisions_cache')").all().map((r) => (r as { name: string }).name);
     expect(cols).toEqual(["project_id", "question_id", "candidate_key", "created_at"]);
+    expect(readFileSync(join(process.cwd(), "migrations", "0009_decisions_cache_index.sql"), "utf8")).toMatch(/^PRAGMA optimize;/m);
+
+    // A populated project (as after a full buyer classification), then the statistics PRAGMA optimize gathers.
+    db.exec("PRAGMA foreign_keys = OFF");
+    const ins = db.prepare(
+      "INSERT INTO decision_records (id, workspace_id, project_id, agent, candidate_key, question_id, question_version, provider, outcome, created_at) VALUES (?, 'w', 'p', 'seo', ?, ?, 'v1', 'typesafe', 'selected', ?)",
+    );
+    db.exec("BEGIN");
+    for (let i = 0; i < 4000; i++) ins.run(`d${i}`, `buyer:q${i >> 1}`, i % 2 ? "seo.buyer_a" : "seo.buyer_b", `2026-09-${String(10 + (i % 20)).padStart(2, "0")}T00:00:00.000Z`);
+    db.exec("COMMIT");
+    db.exec("ANALYZE");
+    // Same shape as the query-batch.ts cache lookup.
     const plan = db
       .prepare(
-        "EXPLAIN QUERY PLAN SELECT candidate_key FROM decision_records WHERE workspace_id = ? AND project_id = ? AND created_at >= ? AND question_id IN (?, ?) AND candidate_key IN (?, ?)",
+        `EXPLAIN QUERY PLAN SELECT candidate_key, question_id, question_version, answer_json, provider, model FROM decision_records
+          WHERE workspace_id = ? AND project_id = ? AND created_at >= ? AND provider IS NOT NULL
+            AND question_id IN (?, ?) AND question_version IN (?) AND candidate_key IN (?, ?, ?)
+          ORDER BY created_at DESC`,
       )
-      .all("w", "p", "2026-01-01", "q1", "q2", "k1", "k2")
+      .all("w", "p", "2026-09-20T00:00:00.000Z", "seo.buyer_a", "seo.buyer_b", "v1", "buyer:q1", "buyer:q2", "buyer:q3")
       .map((r) => String((r as { detail: string }).detail))
       .join("\n");
     expect(plan).toContain("idx_decisions_cache");
@@ -227,6 +241,8 @@ describe("OpenAI GEO adapter bounds built-in tool calls", () => {
 
 // ------------------------------------------------------------------ Anthropic answer text
 
+/** Constructed fixtures carry extra documented fields (encrypted_index, cited_text) the parser type omits. */
+const parse = (m: unknown[]) => parseAnthropicGeoMessages(m as Parameters<typeof parseAnthropicGeoMessages>[0]);
 const usage = { input_tokens: 10, output_tokens: 10, server_tool_use: { web_search_requests: 1 } };
 const search = (id: string) => [
   { type: "server_tool_use", id, name: "web_search", input: { query: "brass pulls" } },
@@ -235,7 +251,7 @@ const search = (id: string) => [
 
 describe("Anthropic GEO answer text", () => {
   it("keeps only the text after the last web_search_tool_result (doc example shape: narration, search, cited answer)", () => {
-    const parsed = parseAnthropicGeoMessages([
+    const parsed = parse([
       {
         model: "claude-sonnet-5-5",
         stop_reason: "end_turn",
@@ -254,7 +270,7 @@ describe("Anthropic GEO answer text", () => {
   });
 
   it("uses the text after the second search when Claude searches twice", () => {
-    const parsed = parseAnthropicGeoMessages([
+    const parsed = parse([
       {
         stop_reason: "end_turn",
         content: [{ type: "text", text: "Searching." }, ...search("s1"), { type: "text", text: "Let me refine." }, ...search("s2"), { type: "text", text: "Final answer." }],
@@ -265,13 +281,13 @@ describe("Anthropic GEO answer text", () => {
   });
 
   it("without any search, all text is the answer; with no text after the last result, passages join with a blank line", () => {
-    const plain = parseAnthropicGeoMessages([{ stop_reason: "end_turn", content: [{ type: "text", text: "Part one, " }, { type: "text", text: "part two." }], usage: { input_tokens: 1, output_tokens: 1 } }]);
+    const plain = parse([{ stop_reason: "end_turn", content: [{ type: "text", text: "Part one, " }, { type: "text", text: "part two." }], usage: { input_tokens: 1, output_tokens: 1 } }]);
     expect(plain.text).toBe("Part one, part two.");
-    const noTail = parseAnthropicGeoMessages([
+    const noTail = parse([
       { stop_reason: "end_turn", content: [{ type: "text", text: "I'll search for it." }, ...search("s1")], usage },
     ]);
     expect(noTail.text).toBe("I'll search for it.");
-    const twoPassages = parseAnthropicGeoMessages([
+    const twoPassages = parse([
       { stop_reason: "end_turn", content: [{ type: "text", text: "Before." }, ...search("s1"), { type: "text", text: "Middle." }, ...search("s2")], usage },
     ]);
     expect(twoPassages.text).toBe("Before.\n\nMiddle.");

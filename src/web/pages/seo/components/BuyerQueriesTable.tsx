@@ -4,7 +4,7 @@
  * shown with "Check this yourself". Without a TypeSafe key the view is "Setup required" and nothing is
  * guessed. Query text and URLs are untrusted and render as plain text.
  * The GET shows cached judgments only; "Classify with Jev" (POST, spends budget) asks for the next batch
- * (up to 500 queries per request). Progress is shown as "classified N of M" from completeness; the
+ * (up to 200 queries per request, 3 requests per project per day). Progress is shown as "classified N of M" from completeness; the
  * full Search Console export is worked through across requests within the daily Jev budget.
  */
 import { Link } from "react-router";
@@ -15,7 +15,7 @@ import { useApi, useMutation } from "@web/lib/hooks";
 import { projectPath } from "@web/lib/project-context";
 import { Badge, TBody, TD, TH, THead, TR, Table, TierBadge, buttonClass } from "@web/components/ui";
 import { CoverageCard, Detail, UrlText, useOwnHosts } from "./PageAuditTable";
-import { buyerProgress } from "../lib";
+import { BUYER_CLASSIFY_HINT, buyerProgress } from "../lib";
 
 const INTENT_LABEL: Record<BuyerQueryRow["intent"], string> = {
   transactional: "Ready to buy (transactional)",
@@ -51,7 +51,7 @@ export function BuyerQueriesTable({ projectId }: { projectId: string }) {
               <button type="button" className={buttonClass("secondary", "sm")} onClick={onClassify} disabled={classify.loading || progress?.done === true}>
                 {classify.loading ? "Classifying…" : progress?.done ? "All classified" : progress && progress.covered > 0 ? "Classify next batch" : "Classify with Jev"}
               </button>
-              <span>Asks Jev about up to 500 queries without a cached answer per click; uses your daily Jev budget.</span>
+              <span>{BUYER_CLASSIFY_HINT}</span>
               {classify.error ? <span role="alert" className="text-red-700 dark:text-red-400">{errorMessage(classify.error)}</span> : null}
             </span>
           ) : null}

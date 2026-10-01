@@ -736,6 +736,10 @@ export interface DraftCheckRequest {
   draftText?: string; // max 60,000 chars
   title?: string;
   metaDescription?: string;
+  /** Drafts only: the page type to evaluate the draft as (default article). */
+  pageType?: PageType;
+  /** Drafts only: product fields (name -> value) the text must agree with; at most 20, key <= 60, value <= 300 characters. */
+  productFacts?: Record<string, string>;
 }
 
 export interface DraftCheckFlag {

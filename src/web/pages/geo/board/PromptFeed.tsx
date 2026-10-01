@@ -49,8 +49,9 @@ export function FeedCard({ item, onOpen }: { item: EngineFeedItem; onOpen?: (obs
     canOpen && "hover:border-zinc-400 focus-visible:outline-2 focus-visible:outline-sky-600 dark:hover:border-zinc-600",
   );
   return canOpen ? (
-    <button type="button" className={cls} onClick={() => onOpen!(item.observationId!, item.promptText)} aria-label={`${st.label}: ${item.promptText}. Open the raw answer`}>
+    <button type="button" className={cls} onClick={() => onOpen!(item.observationId!, item.promptText)}>
       {body}
+      <span className="sr-only">Open the raw answer</span>
     </button>
   ) : (
     <div className={cls}>{body}</div>

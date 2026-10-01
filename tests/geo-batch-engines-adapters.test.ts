@@ -250,7 +250,7 @@ describe("Anthropic GEO adapter", () => {
     const p = createAnthropicGeoProvider({ apiKey: ANT_KEY, model: "claude-sonnet-5-5", fetchImpl: seqFetch([{ body: antGrounded }]), now: NOW });
     const a = await p.ask("q", opts);
     expect(a).toMatchObject({ status: "ok", outcome: "ok", grounded: true, provider: "anthropic_geo", groundingMode: "anthropic_web_search", costIsEstimate: true, rateVersion: RATE_VERSION, error: null });
-    expect(a.text).toBe("Let me search.Brass Co is a popular choice.");
+    expect(a.text).toBe("Brass Co is a popular choice."); // pre-search narration is not part of the answer
     expect(a.citations).toEqual([{ url: "https://designroundup.example/best", title: "Best pulls", position: 1 }]);
     expect(a.searchQueries).toEqual(["best solid brass cabinet pulls"]);
     expect(a.usage).toEqual({ inputTokens: 3000, outputTokens: 400, searchRequests: 1 });

@@ -49,9 +49,9 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | PATCH | /projects/:pid/seo/internal-links/:id | links | body `{userStatus}` → `LinkSuggestion` |
 | GET | /projects/:pid/seo/internal-links/export?format=csv\|json | links | download of current suggestions |
 | GET | /projects/:pid/seo/buyer-queries | seo-jev | `CoverageResponse<BuyerQueryRow>` (non-brand, transactional/commercial intent) from the 7-day decision cache only; never calls Jev |
-| POST | /projects/:pid/seo/buyer-queries | seo-jev | same response; asks Jev for queries without a cached answer (user-triggered; budgeted; rate-limited) |
+| POST | /projects/:pid/seo/buyer-queries | seo-jev | same response; asks Jev for queries without a cached answer (user-triggered; budgeted; rate-limited). Scope: all non-brand queries with impressions, by impressions, up to the `BUYER_QUERIES_MAX` cap (default 5,000); `completeness.total` is the in-scope count and `completeness.covered` the classified count. One POST classifies at most 200 queries (8 Jev calls); POST again to continue from the 7-day cache. At most 3 classify POSTs per project per day (only counted when Jev is configured), then `429 rate_limited` with `Retry-After` |
 | GET | /projects/:pid/seo/translation-opportunities | seo-jev | `CoverageResponse<TranslationOpportunityRow>` |
-| POST | /projects/:pid/seo/draft-check | draft-check | body `DraftCheckRequest` → `DraftCheckResult` (rate-limited, budgeted) |
+| POST | /projects/:pid/seo/draft-check | draft-check | body `DraftCheckRequest` → `DraftCheckResult` (rate-limited, budgeted). Pasted drafts only: optional `pageType` (`PageType`; default article) and `productFacts` (at most 20 fields; key 1–60, value 1–300 characters after trimming); sending either with `pageId` is a 400 |
 | GET | /projects/:pid/pages | seo-crawl | `PageRow[]` |
 | PATCH | /projects/:pid/pages/:pageId | seo-crawl | body `{pageType}` (user correction) |
 | GET | /projects/:pid/recommendations?agent=&status= | runtime | `Recommendation[]` |
@@ -146,7 +146,8 @@ probability [A11]; there is no aggregate "citability" score.
 ### POST /projects/:pid/geo/competitor-pages → 202 `CompetitorPageAssessment`
 - Requires session, same-origin `Origin`, `X-CSRF-Token`. Body `{url}` (max 2,048 chars, http or https, no credentials, default port; IP-literal and local hosts refused).
 - 400 `bad_request` (details `{reason: "url_not_cited"}`) unless the canonicalized URL equals a `geo_citations.url` stored for this project
-  (`workspace_id` + `project_id`); approval is per URL, never per domain [A7]. The host must not be the
+  (`workspace_id` + `project_id`) on an API-sampled answer (`measurement_type = 'api'`); a URL cited only in a
+  manual import (pasted text) is never approvable, and `citedIn` lists API answers only. Approval is per URL, never per domain [A7]. The host must not be the
   project's verified host (use the crawl for own pages).
 - Rate limit: `COMPETITOR_PAGE_RATE_LIMIT` 10 approvals per project per hour (`hitRateLimit` key
   `competitor_page:<projectId>`), 429 with `Retry-After` when exceeded. Re-approving a URL assessed in the
@@ -160,15 +161,25 @@ probability [A11]; there is no aggregate "citability" score.
 - Demo projects: 400 `bad_request` (details `{reason: "demo_project"}`); they never fetch or call Jev. Body over
   8 KiB: 413 `payload_too_large`. Other 400 reasons: `invalid_url`, `blocked_url`, `own_site`, `redirect_wrapper`.
 - Fetch: one GET through the SSRF guard with the allowlist set to that single host, robots.txt respected,
-  same-origin redirects only, the crawler's size/time caps; only compact evidence is stored (no full text).
+  redirects only to the same host or its `www.` twin, the crawler's size/time caps. robots.txt is per host
+  (RFC 9309): every redirect hop is checked against its host's robots.txt before it is requested (the twin's
+  file is fetched once); a disallowed hop gives `blocked` with stateDetail "robots.txt of <host> disallows the
+  redirect target" and the target is never requested; only compact evidence is stored (no full text).
   Page text is untrusted evidence: it goes to Jev as `state`, never as instructions, and is screened with
   `evidence.injection_risk`.
 - States: `queued` → `fetching` → `assessed` | `blocked` (robots, 401/403, login redirect, non-HTML) |
-  `failed`. Without TypeSafe the measured checks still run, the Jev checks return `noul: null, tier: null`,
+  `failed`. Each check carries `status` (`present` | `partial` | `missing` | `unknown`): the presence on their
+  page used by the verdict (Jev checks are `unknown` when Jev did not answer). Without TypeSafe the measured checks still run, the Jev checks return `noul: null, tier: null`,
   the state is `assessed`, and `stateDetail` says "Jev not configured: 2 checks not run"; the injection screen is skipped and the reasons list uses measured facts only.
-- `verdict` is computed by code (versioned rule `competitor-verdict.v1`): `review` if any Jev check is tier
-  `flag` or the fetch was partial; `adapt` if 2+ checks are present on their page and missing on our
-  matched page; else `skip`. "Adapt" means adapting structure; the UI never offers to copy their text.
+- `verdict` is computed by code (versioned rule `competitor-verdict.v1`): `review` if the injection screen
+  flagged the page or was unavailable (a screen error or budget stop fails closed: the evidence is treated
+  as untrusted, the Noul checks are not asked, and stateDetail says "Injection screen unavailable; evidence
+  treated as untrusted"), any Jev check is tier `flag`, or the fetch was partial; `adapt` if 2+ checks are
+  present on their page and missing on our matched page; else `skip`. Our matched page is the answer-coverage
+  match for the prompt that cited the URL; when no page of ours matches (or it has no usable crawl) every
+  check of ours is `unknown`, so there are no gaps and the verdict is never `adapt` (stateDetail: "No page on
+  your site matches this question; compared against no page"). "Adapt" means adapting structure; the UI
+  never offers to copy their text.
 
 ### GET /projects/:pid/geo/competitor-pages → `CompetitorPageAssessment[]`
 Newest first, at most 100.
@@ -181,7 +192,10 @@ Newest first, at most 100.
   labelled "Bing and participating engines, not Google".
 - `gsc` is the measured last finalized 28-day window for that page (null without GSC); `aiCitations` counts
   stored answers citing the page in the same window. No projected values. `publishing` is always `"manual"`.
-- Read-only; no Jev, no budget.
+- `engine` is the provider of the newest API-sampled answer of this project citing the `adapt` page
+  (canonical URL match; manual imports excluded), null when none.
+- Read-only; no Jev, no budget. Page evidence is loaded in batched queries and internal links in are
+  computed once per crawl run, so the query count does not grow with the number of plans (at most 50).
 
 ### GEO engine provider ids (`openai_geo`, `anthropic_geo`): wired
 Both lanes are wired end to end. `migrations/0008_provider_credentials_geo_engines.sql` rebuilds

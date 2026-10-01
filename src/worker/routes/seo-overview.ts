@@ -7,7 +7,8 @@
  *                                                        cache only (never calls Jev; setup_required without Jev)
  *   POST /projects/:pid/seo/buyer-queries             -> same shape; asks Jev for uncached queries (rate-limited,
  *                                                        budgeted, at most BUYER_CALLS_PER_REQUEST calls per POST;
- *                                                        POST again to continue). Spending is POST-only so a
+ *                                                        POST again to continue, at most
+ *                                                        BUYER_CLASSIFY_DAILY_LIMIT POSTs per project per day). Spending is POST-only so a
  *                                                        cross-site GET cannot. Scope: all non-brand queries up to
  *                                                        the BUYER_QUERIES_MAX env cap (default 5,000).
  *   GET  /projects/:pid/seo/translation-opportunities -> CoverageResponse<TranslationOpportunityRow> (no Jev)
@@ -22,7 +23,7 @@ import { requireProject } from "../platform/access";
 import { CSV_MAX_BYTES, EXPECTED_CSV_HEADERS, importGscCsv } from "../seo/gsc/csv";
 import { buildSeoOverview } from "../seo/gsc/overview";
 import { buildTranslationOpportunities } from "../seo/gsc/translation";
-import { buildBuyerQueries, buyerQueryCap } from "../seo/recommend/buyer-queries";
+import { BUYER_CLASSIFY_DAILY_LIMIT, buildBuyerQueries, buyerQueryCap } from "../seo/recommend/buyer-queries";
 import type { Env } from "../env";
 import type { Db } from "../lib/db";
 import { hitRateLimit } from "../platform/rate-limit";
@@ -57,10 +58,26 @@ async function buyerQueries(c: Context<AppEnv, "/projects/:pid/seo/buyer-queries
     }
   }
   const decisions = project.is_demo === 1 ? null : await decisionsFactory(c.env, db, project.workspace_id, project.id);
+  if (classify && decisions) {
+    // Separate daily cap so buyer-query spending cannot drain the project's shared Jev/provider allowance.
+    const day = await hitRateLimit(db, `buyer_queries_day:${project.id}`, BUYER_CLASSIFY_DAILY_LIMIT, 86_400, now);
+    if (!day.allowed) {
+      return c.json(
+        {
+          error: {
+            code: "rate_limited",
+            message: `Buyer-query classification is limited to ${BUYER_CLASSIFY_DAILY_LIMIT} requests per project per day. Cached answers are kept; continue tomorrow.`,
+          },
+        },
+        429,
+        { "Retry-After": String(day.retryAfterSeconds) },
+      );
+    }
+  }
   const scope = { workspaceId: project.workspace_id, projectId: project.id, runId: null };
   const clock = () => now;
-  // Optional operator setting (not in the typed Env yet): BUYER_QUERIES_MAX caps the queries in scope.
-  const maxQueries = buyerQueryCap((c.env as unknown as Record<string, unknown>).BUYER_QUERIES_MAX);
+  // Optional operator setting: BUYER_QUERIES_MAX caps the queries in scope.
+  const maxQueries = buyerQueryCap(c.env.BUYER_QUERIES_MAX);
   const data = await buildBuyerQueries({ db, project, now, decisions, budget: budgetFor(createBudget(db, c.env, scope, clock), "typesafe"), calls: createCallRecorder(db, scope, clock), classify, maxQueries });
   return c.json({ data });
 }

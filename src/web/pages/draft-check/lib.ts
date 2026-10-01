@@ -10,6 +10,12 @@ export const MAX_DRAFT_CHARS = 60_000;
 /** Client-side guards only; the contract does not state limits for these two fields. */
 export const MAX_TITLE_CHARS = 300;
 export const MAX_META_CHARS = 1_000;
+/** Product fields (drafts only); the same limits as the API schema. */
+export const MAX_PRODUCT_FACTS = 20;
+export const MAX_FACT_KEY_CHARS = 60;
+export const MAX_FACT_VALUE_CHARS = 300;
+/** Page types a pasted draft can be evaluated as (the server default is article). */
+export const DRAFT_PAGE_TYPES: PageType[] = ["article", "product", "collection", "landing", "home", "other"];
 
 /** Always shown on the page, whatever the server returns. */
 export const GATE_LABEL = "A quality gate before human review — not an AI detector and not a ranking prediction.";
@@ -23,15 +29,44 @@ export interface DraftForm {
   pageId: string;
   title: string;
   metaDescription: string;
+  /** Drafts only; "" = server default (article). */
+  pageType?: PageType | "";
+  /** Drafts only; rows with both cells empty are ignored. */
+  productFacts?: FactRow[];
 }
 
-export type DraftField = "targetQuery" | "draftText" | "pageId" | "title" | "metaDescription";
+export interface FactRow {
+  key: string;
+  value: string;
+}
+
+export type DraftField = "targetQuery" | "draftText" | "pageId" | "title" | "metaDescription" | "pageType" | "productFacts";
 export type FormErrors = Partial<Record<DraftField, string>>;
 
 /** Order used to move focus to the first invalid field. */
-export const FIELD_ORDER: DraftField[] = ["targetQuery", "draftText", "pageId", "title", "metaDescription"];
+export const FIELD_ORDER: DraftField[] = ["targetQuery", "draftText", "pageId", "title", "metaDescription", "pageType", "productFacts"];
 
-export const EMPTY_FORM: DraftForm = { mode: "paste", targetQuery: "", draftText: "", pageId: "", title: "", metaDescription: "" };
+export const EMPTY_FORM: DraftForm = { mode: "paste", targetQuery: "", draftText: "", pageId: "", title: "", metaDescription: "", pageType: "", productFacts: [] };
+
+/** Validates product-field rows: returns the cleaned record (null when none) or the first error message. Pure. */
+export function validateFactRows(rows: readonly FactRow[] | undefined): { facts: Record<string, string> | null; error: string | null } {
+  const facts: Record<string, string> = {};
+  let n = 0;
+  for (const [i, r] of (rows ?? []).entries()) {
+    const key = r.key.trim();
+    const value = r.value.trim();
+    if (!key && !value) continue;
+    const row = `Product field ${i + 1}`;
+    if (!key) return { facts: null, error: `${row}: enter a field name.` };
+    if (!value) return { facts: null, error: `${row}: enter a value for "${key.slice(0, 60)}".` };
+    if (key.length > MAX_FACT_KEY_CHARS) return { facts: null, error: `${row}: the name can be at most ${MAX_FACT_KEY_CHARS} characters.` };
+    if (value.length > MAX_FACT_VALUE_CHARS) return { facts: null, error: `${row}: the value can be at most ${MAX_FACT_VALUE_CHARS} characters.` };
+    if (Object.prototype.hasOwnProperty.call(facts, key)) return { facts: null, error: `${row}: "${key}" is already listed.` };
+    if (++n > MAX_PRODUCT_FACTS) return { facts: null, error: `At most ${MAX_PRODUCT_FACTS} product fields.` };
+    facts[key] = value;
+  }
+  return { facts: n ? facts : null, error: null };
+}
 
 const fmt = (n: number) => n.toLocaleString("en-US");
 
@@ -47,6 +82,9 @@ export function validateDraftForm(f: DraftForm): FormErrors {
       errors.draftText = `The draft is ${fmt(f.draftText.length)} characters; the limit is ${fmt(MAX_DRAFT_CHARS)}. Check it in parts.`;
     if (f.title.trim().length > MAX_TITLE_CHARS) errors.title = `The title can be at most ${MAX_TITLE_CHARS} characters.`;
     if (f.metaDescription.trim().length > MAX_META_CHARS) errors.metaDescription = `The meta description can be at most ${fmt(MAX_META_CHARS)} characters.`;
+    if (f.pageType && !DRAFT_PAGE_TYPES.includes(f.pageType)) errors.pageType = "Choose a page type from the list.";
+    const facts = validateFactRows(f.productFacts);
+    if (facts.error) errors.productFacts = facts.error;
   } else if (!f.pageId) {
     errors.pageId = "Choose a crawled page.";
   }
@@ -71,6 +109,9 @@ export function buildDraftCheckRequest(f: DraftForm): { ok: true; body: DraftChe
   const meta = f.metaDescription.trim();
   if (title) body.title = title;
   if (meta) body.metaDescription = meta;
+  if (f.pageType) body.pageType = f.pageType;
+  const facts = validateFactRows(f.productFacts).facts;
+  if (facts) body.productFacts = facts;
   return { ok: true, body };
 }
 
@@ -89,7 +130,7 @@ export const DRAFT_CHECKS: ReadonlyArray<{ id: string; label: string; method: Ch
   { id: "page.before_write.first_hand", label: "First-hand experience or evidence", method: "Jev judgment" },
   { id: "page.before_write.author_credentials", label: "Author named with relevant credentials", method: "Jev judgment" },
   { id: "page.while_write.answer_early", label: "Answer the main question early", method: "Heuristic + Jev" },
-  { id: "page.while_write.answer_first_40_words", label: "Answer in the first 40 words", method: "Measured", note: "Word overlap with the target query, not answer quality." },
+  { id: "page.while_write.answer_first_40_words", label: "Target query words in the first 40 words", method: "Heuristic", note: 'Word overlap with the target query; the answer itself is judged by "Answer the main question early".' },
   { id: "page.while_write.headings", label: "Clear main heading + descriptive subheadings", method: "Measured" },
   { id: "page.while_write.headings_match_questions", label: "Subheadings match the reader's questions", method: "Jev judgment", note: "Needs at least two subheadings." },
   { id: "page.while_write.terms_entities", label: "Relevant terms and entities naturally", method: "Heuristic + Jev" },
@@ -253,7 +294,9 @@ export function parseValidationDetails(details: unknown): { fields: FormErrors; 
   const known = new Set<string>(FIELD_ORDER);
   const add = (field: unknown, message: unknown) => {
     if (typeof message !== "string" || !message.trim()) return;
-    const f = Array.isArray(field) ? field[0] : field;
+    const raw = Array.isArray(field) ? field[0] : field;
+    // Nested paths such as "productFacts.Color" belong to their top-level field.
+    const f = typeof raw === "string" ? raw.split(".")[0] : raw;
     if (typeof f === "string" && known.has(f) && !fields[f as DraftField]) fields[f as DraftField] = message;
     else general.push(message);
   };
