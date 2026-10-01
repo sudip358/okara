@@ -966,3 +966,85 @@ export interface RewritePlansResponse {
   plans: RewritePlan[];
   labels: string[];
 }
+
+// ---------------------------------------------------------------------------
+// Run activity window (live feed built only from stored rows of a run).
+// ---------------------------------------------------------------------------
+
+export type ActivityItemKind = "step" | "page_read" | "engine_answer" | "jev_decision" | "provider_call";
+
+export interface ActivityItem {
+  /** Stable, unique across kinds: "obs:<id>", "snap:<id>", "dec:<id>", "call:<id>", "evt:<id>". */
+  id: string;
+  /** ISO timestamp of the stored row. */
+  at: string;
+  kind: ActivityItemKind;
+  agent: "seo" | "geo" | null;
+  /** Short plain text; untrusted text clipped to 160 chars; never HTML. */
+  title: string;
+  detail: string | null;
+  status: "ok" | "warn" | "error" | "info";
+  /** gemini|perplexity|openai_geo|anthropic_geo|typesafe|writer|crawler|null */
+  provider: string | null;
+  latencyMs: number | null;
+  /** null = unknown, never 0 for unknown. */
+  costUsd: number | null;
+  costIsEstimate: boolean;
+  /** Page URL for page_read, else null. */
+  url: string | null;
+  outcome: "cited" | "named" | "missing" | "failed" | "act" | "flag" | "drop" | null;
+}
+
+export interface ActivityLane {
+  provider: string;
+  label: string;
+  state: "queued" | "asking" | "done" | "idle";
+  done: number;
+  planned: number | null;
+  lastLatencyMs: number | null;
+}
+
+export interface ActivityQueuedItem {
+  provider: string;
+  label: string;
+  promptText: string;
+}
+
+export interface RunActivity {
+  run: {
+    id: string;
+    agent: "seo" | "geo";
+    status: string;
+    trigger: string;
+    createdAt: string;
+    startedAt: string | null;
+    finishedAt: string | null;
+    elapsedMs: number | null;
+  };
+  /** status pending|running */
+  active: boolean;
+  totals: {
+    /** Sum of provider_calls.cost_usd for the run; unknownCalls = rows with null cost. */
+    spend: { usd: number | null; isEstimate: boolean; unknownCalls: number };
+    providerCalls: number;
+    pagesRead: number;
+    /** crawl_runs.pages_limit when known. */
+    pagesPlanned: number | null;
+    answers: { cited: number; named: number; missing: number; failed: number };
+    decisions: { act: number; flag: number; drop: number };
+  };
+  /** GEO runs only: one per configured engine. */
+  lanes: ActivityLane[];
+  /** GEO runs only, while active: up to 12 not-yet-observed (prompt, provider) pairs. */
+  queued: ActivityQueuedItem[];
+  /** Latest page_read while the crawl step is active. */
+  nowReading: { url: string; at: string } | null;
+  /** Ascending by (at, id); at most `limit` (default 80, max 200). */
+  items: ActivityItem[];
+  /** Opaque; pass as ?after= to get only newer items. */
+  cursor: string | null;
+}
+
+export interface CurrentActivityResponse {
+  runs: Array<{ id: string; agent: "seo" | "geo"; status: string }>;
+}
