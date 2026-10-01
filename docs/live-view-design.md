@@ -269,7 +269,7 @@ your latest GEO data (29 Sep), not part of this run".
   | Element | `element` |
   | Now → proposed | `now` (muted). When `proposed` is set: `now` struck through, "→", then `proposed` in medium weight. Without `proposed`, only `now`, with no arrow. Both plain text, 1-line clamp |
   | Avg pos. | `gsc.position`, one decimal, prefixed "≈" for `page_rows`; "—" when null |
-  | Clicks | `gsc.clicks` (measured; no "+"). The header shows "Clicks (GSC, 1–28 Sep)" from the first row's window |
+  | Clicks | `gsc.clicks` (measured; no "+"; "≥" for `query_page_rows` sums, a lower bound). The window is a panel caption ("Search Console 1–28 Sep · ≈ = page aggregate") from the first row's window; the header title carries the full wording |
   | Jev | "Jev act · 0.92", "Jev flag · 0.55", or "Rule · fact" for rule rows. Tooltip: `verdictBasis`, provider and model |
   | Verdict | Square chip plus word: Keep (emerald), Change (rose), Review (amber) |
 
@@ -277,7 +277,10 @@ your latest GEO data (29 Sep), not part of this run".
 - **Action rows:** a row with `role: "action"` shows only when no element row with the same
   `candidateKey` is present. Otherwise its chosen action shows as a small "Next: Title + meta" note under
   the element row.
-- **Order:** newest first. In replay, the next pending rows appear under the resolved ones (section 9).
+- **Order:** time order, as stored: resolved rows with the newest at the bottom, then (replay) the next
+  pending rows under them (section 9), resolving in place. The panel body follows the first pending row
+  (else the newest row) about 55% down, unless the viewer scrolled that panel in the last 10 s. Rows
+  revealed on the same tick enter staggered (70 ms apart, presentation only).
 - **Live pending:** only while the `seo.recommend` step has started and has not ended. At most 3 skeleton
   rows at the bottom, with no page or element text, labelled "Waiting for the next stored judgment"
   (shimmer).
@@ -609,7 +612,7 @@ Legend:
 | 13 | Keep / Change / "Reading…" chips | D: `verdict` (code). "Reading…" only for replay rows not yet reached, or up to 3 live skeletons while `seo.recommend` runs |
 | 14 | Red left border on Change rows | D: same, from `verdict === "change"` |
 | 15 | Blue-tinted resolved block, blurred pending rows | R: arrival highlight fade; blur only on replay-pending rows |
-| 16 | List scrolling up continuously | R: newest first; rows enter at the top on arrival; no auto-scroll on a timer |
+| 16 | List scrolling up continuously | R: time order, newest at the bottom with pending rows under it; the panel follows the newest row only when a stored row arrives or is revealed (never on a timer), paused for 10 s after the viewer scrolls |
 
 ### Rankie 02: Pages and SEO techniques to steal from competitors
 

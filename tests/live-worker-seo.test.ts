@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { LiveSeoBoardResponse, LiveSeoElementRow } from "@shared/types";
 import { HttpError } from "@worker/lib/errors";
-import { buildLiveSeo, encodeLiveSeoCursor } from "@worker/live/seo-board";
+import { buildLiveSeo, decidedActionElement, decodeLiveSeoCursor, encodeLiveSeoCursor } from "@worker/live/seo-board";
 import { encodeCursor } from "@worker/runs/activity";
 import { QUESTION } from "@worker/seo/questions";
 import { FIXED_NOW, seedProject, seedUser } from "./helpers/fixtures";
@@ -146,16 +146,16 @@ describe("verdicts: stored tier + raw answer + per-question polarity (code, neve
 
     // Totals are grouped SQL, never a row scan; they must agree with the rows one by one.
     const count = (v: string) => r.elements.filter((e) => e.verdict === v).length;
-    expect(r.totals.elements).toMatchObject({ judged: CASES.length, keep: count("keep"), change: count("change"), review: count("review") });
+    expect(r.totals!.elements).toMatchObject({ judged: CASES.length, keep: count("keep"), change: count("change"), review: count("review") });
     for (const el of new Set(r.elements.map((e) => e.element))) {
       const of = r.elements.filter((e) => e.element === el);
-      expect(r.totals.elements.byElement[el], el).toEqual({
+      expect(r.totals!.elements.byElement[el], el).toEqual({
         keep: of.filter((e) => e.verdict === "keep").length,
         change: of.filter((e) => e.verdict === "change").length,
         review: of.filter((e) => e.verdict === "review").length,
       });
     }
-    expect(r.totals.truncated).toBe(false);
+    expect(r.totals!.truncated).toBe(false);
   });
 
   it("reads bare demo-format answers the same way as wrapped ones", async () => {
@@ -170,7 +170,7 @@ describe("verdicts: stored tier + raw answer + per-question polarity (code, neve
     expect(byId(r).get(`dec:${bare}`)).toMatchObject({ element: "Schema", verdict: "change", targetLabel: "Candidate template:product:offer" });
     // A malformed stored answer is unusable: review, and the grouped totals do not fail on it.
     expect(byId(r).get(`dec:${malformed}`)).toMatchObject({ element: "Title", verdict: "review" });
-    expect(r.totals.elements).toMatchObject({ judged: 2, change: 1, review: 1 });
+    expect(r.totals!.elements).toMatchObject({ judged: 2, change: 1, review: 1 });
   });
 
   it("counts an action row in the totals only when its candidate has no element row", async () => {
@@ -184,8 +184,8 @@ describe("verdicts: stored tier + raw answer + per-question polarity (code, neve
     await seedDecision(ctx.db, ctx.ws, ctx.pid, other, { candidateKey: "B", questionId: QUESTION.titleMatchesQuery, answer: noul(0.9) });
     const r = await build(ctx, run);
     expect(r.elements.map((e) => e.role).sort()).toEqual(["action", "action", "element"]);
-    expect(r.totals.elements).toMatchObject({ judged: 2, change: 2, keep: 0 });
-    expect(r.totals.elements.byElement).toEqual({ Title: { keep: 0, change: 1, review: 0 }, Section: { keep: 0, change: 1, review: 0 } });
+    expect(r.totals!.elements).toMatchObject({ judged: 2, change: 2, keep: 0 });
+    expect(r.totals!.elements.byElement).toEqual({ Title: { keep: 0, change: 1, review: 0 }, Section: { keep: 0, change: 1, review: 0 } });
   });
 
   it("turns reused link suggestions and rule findings into rows, and skips unmapped rules", async () => {
@@ -231,7 +231,7 @@ describe("verdicts: stored tier + raw answer + per-question polarity (code, neve
       rule: { ruleId: "SEO-META-DESC-MISSING", severity: "minor", class: "fact" }, verdictBasis: "Rule (fact)", pagePath: "/guide",
     });
     expect(rows.get(`find:${heur}`)).toMatchObject({ element: "H1", verdict: "review", targetLabel: "Template: product template", url: null, pagePath: null });
-    expect(r.totals.elements).toMatchObject({ judged: 4, change: 2, review: 2 });
+    expect(r.totals!.elements).toMatchObject({ judged: 4, change: 2, review: 2 });
   });
 });
 
@@ -363,13 +363,13 @@ describe("row values come from stored rows only", () => {
     expect(q.get(`dec:${mid}`)).toMatchObject({ band: "middle", gsc: { clicks: 2, basis: "query_page_rows" } });
     expect(q.get(`dec:${intentWithText}`)).toMatchObject({ band: null, queryKey: "oak table", jev: { choice: "transactional", confidence: 0.88 } });
     expect(r.queries.find((x) => x.query === "dropped one")).toMatchObject({ band: null });
-    expect(r.totals.queries).toMatchObject({
+    expect(r.totals!.queries).toMatchObject({
       relevance: { yes: 1, no: 1, middle: 1, unanswered: 1 },
       buyer: { yes: 0, no: 0, middle: 0, unanswered: 0 },
       intent: { transactional: 2, informational: 1 },
     });
     // Distinct queries with stored text: oak table, free wallpaper, brass, dropped one.
-    expect(r.totals.queries.distinct).toBe(4);
+    expect(r.totals!.queries.distinct).toBe(4);
   });
 
   it("counts the pipeline from the run's decisions and recommendations, excluding query-batch keys", async () => {
@@ -386,7 +386,7 @@ describe("row values come from stored rows only", () => {
     await seedRec(ctx.db, ctx.ws, ctx.pid, run, { dedupKey: "Z", target: { kind: "site" }, status: "implemented", stage: "marked_implemented" });
     await seedRec(ctx.db, ctx.ws, ctx.pid, null, { dedupKey: "Y", target: { kind: "site" } }); // not this run
     const r = await build(ctx, run);
-    expect(r.totals.pipeline).toEqual({
+    expect(r.totals!.pipeline).toEqual({
       candidates: 4,
       judged: 2,
       rejectedByReason: { low_fit: 1, budget: 1, unspecified: 1 },
@@ -407,7 +407,78 @@ describe("row values come from stored rows only", () => {
     const row = r.elements[0] as LiveSeoElementRow;
     expect(row.now!.startsWith("<script>alert(1)</script>")).toBe(true); // plain text; the UI renders it as text
     expect(row.now!.length).toBeLessThanOrEqual(160);
-    expect(r.labels).toContain("No Jev answers were stored in this run: element rows come from rule findings only.");
+    expect(r.labels).toContain("No Jev answers were stored in this run: rule findings only.");
     expect(r.labels.some((l) => l.startsWith("Demo data"))).toBe(false);
+  });
+});
+
+describe("drafted snippet placement follows the DECIDED action (seo/recommend/decide.ts)", () => {
+  const row = (question_id: string, answer: unknown, tier: string) => ({ candidate_key: "k", question_id, tier, answer_json: JSON.stringify({ answer, candidate: "weak_ctr:x", questionTier: tier }) });
+  it("decidedActionElement: drop / n/a action choices are not answers; act misaligned title/meta -> Title + meta; act merge -> Duplicate; unknown -> null", () => {
+    expect(decidedActionElement([row(QUESTION.actionChoice, choice("add_section", 0.9), "act")])).toBe("Section");
+    expect(decidedActionElement([row(QUESTION.actionChoice, choice("add_section", 0.6), "flag")])).toBe("Section");
+    expect(decidedActionElement([row(QUESTION.actionChoice, choice("improve_intro_answer", 0.3), "drop")])).toBeNull();
+    expect(decidedActionElement([row(QUESTION.actionChoice, choice("improve_intro_answer", 0.3), "n/a")])).toBeNull();
+    // weak_ctr override: a confident "no" on the title or meta match makes it rewrite_title_meta.
+    expect(decidedActionElement([row(QUESTION.actionChoice, choice("improve_intro_answer", 0.6), "flag"), row(QUESTION.titleMatchesQuery, noul(0.1), "act")])).toBe("Title + meta");
+    expect(decidedActionElement([row(QUESTION.actionChoice, choice("improve_intro_answer", 0.6), "flag"), row(QUESTION.metaMatchesQuery, noul(0.4), "flag")])).toBe("Intro");
+    expect(decidedActionElement([row(QUESTION.actionChoice, choice("no_action", 0.9), "act"), row(QUESTION.titleMatchesQuery, noul(0.05), "act")])).toBe("Title + meta");
+    // page_action merge (act) -> consolidate_duplicate, whatever the action choice said.
+    expect(decidedActionElement([row(QUESTION.actionChoice, choice("add_section", 0.9), "act"), row(QUESTION.pageAction, choice("merge", 0.9), "act")])).toBe("Duplicate");
+    // No usable action and no override: a candidate default action cannot be told from the rows.
+    expect(decidedActionElement([row(QUESTION.pageAction, choice("update", 0.9), "act")])).toBeNull();
+    expect(decidedActionElement([row(QUESTION.actionChoice, choice("no_action", 0.9), "act")])).toBeNull();
+  });
+
+  it("a title draft is never shown as a new intro: drop-tier action row and misaligned (act) title row", async () => {
+    const ctx = await setup();
+    const run = await seedRun(ctx.db, ctx.ws, ctx.pid, "seo", "completed");
+    const crawl = await seedCrawl(ctx.db, ctx.ws, ctx.pid, run, t(1));
+    const url = `${ORIGIN}/products/oak`;
+    await seedPage(ctx.db, ctx.ws, ctx.pid, crawl, url, { title: "Oak table | Shop", first_paragraph: "Solid oak." });
+    const key = "seo:weak_ctr:drop";
+    await seedRec(ctx.db, ctx.ws, ctx.pid, run, { dedupKey: key, target: { kind: "url", url }, snippet: "NEW TITLE | Shop" });
+    const readable = `weak_ctr:${url}`;
+    const title = await seedDecision(ctx.db, ctx.ws, ctx.pid, run, { candidateKey: key, readable, questionId: QUESTION.titleMatchesQuery, answer: noul(0.1) });
+    const action = await seedDecision(ctx.db, ctx.ws, ctx.pid, run, { candidateKey: key, readable, questionId: QUESTION.actionChoice, answer: choice("improve_intro_answer", 0.3), tier: "drop" });
+    const intro = await seedDecision(ctx.db, ctx.ws, ctx.pid, run, { candidateKey: key, readable, questionId: QUESTION.answerIsDirect, answer: noul(0.1) });
+    const rows = byId(await build(ctx, run));
+    expect(rows.get(`dec:${title}`)).toMatchObject({ element: "Title", verdict: "change", proposed: "NEW TITLE | Shop" });
+    expect(rows.get(`dec:${action}`)).toMatchObject({ role: "action", element: "Intro", proposed: null });
+    expect(rows.get(`dec:${intro}`)).toMatchObject({ element: "Intro", verdict: "change", proposed: null });
+  });
+
+  it("no snippet anywhere when the decided action is unknown; a merge shows it on Duplicate rows only", async () => {
+    const ctx = await setup();
+    const run = await seedRun(ctx.db, ctx.ws, ctx.pid, "seo", "completed");
+    const url = `${ORIGIN}/blog/a`;
+    const k1 = "seo:declining:a";
+    await seedRec(ctx.db, ctx.ws, ctx.pid, run, { dedupKey: k1, target: { kind: "url", url }, snippet: "Draft intro" });
+    const pa = await seedDecision(ctx.db, ctx.ws, ctx.pid, run, { candidateKey: k1, readable: `declining:${url}`, questionId: QUESTION.pageAction, answer: choice("update", 0.9) });
+    const k2 = "seo:declining:b";
+    await seedRec(ctx.db, ctx.ws, ctx.pid, run, { dedupKey: k2, target: { kind: "url", url: `${ORIGIN}/blog/b` }, snippet: "Merge note" });
+    const merge = await seedDecision(ctx.db, ctx.ws, ctx.pid, run, { candidateKey: k2, readable: `declining:${ORIGIN}/blog/b`, questionId: QUESTION.pageAction, answer: choice("merge", 0.9) });
+    const overlap = await seedDecision(ctx.db, ctx.ws, ctx.pid, run, { candidateKey: k2, readable: `declining:${ORIGIN}/blog/b`, questionId: `${QUESTION.pageOverlap}`, answer: noul(0.9), extra: { key: `${QUESTION.pageOverlap}#x` } });
+    const rows = byId(await build(ctx, run));
+    expect(rows.get(`dec:${pa}`)).toMatchObject({ element: "Page", verdict: "change", proposed: null });
+    expect(rows.get(`dec:${merge}`)).toMatchObject({ element: "Page", proposed: null });
+    expect(rows.get(`dec:${overlap}`)).toMatchObject({ element: "Duplicate", verdict: "change", proposed: "Merge note" });
+  });
+});
+
+describe("whole-run totals only on the last page of a read", () => {
+  it("a full page returns totals null (and no sync row); the short last page returns them", async () => {
+    const ctx = await setup();
+    const run = await seedRun(ctx.db, ctx.ws, ctx.pid, "seo", "completed");
+    await seedGsc(ctx.db, ctx.ws, ctx.pid, { runId: run, rows: [] });
+    for (let i = 0; i < 3; i++) await seedDecision(ctx.db, ctx.ws, ctx.pid, run, { candidateKey: `c${i}`, questionId: QUESTION.titleMatchesQuery, answer: noul(0.9), at: t(10 + i) });
+    const first = (await buildLiveSeo(ctx.db, ctx.p, run, { now: FIXED_NOW, limit: 2 }))!;
+    expect(first.elements).toHaveLength(2);
+    expect(first.totals).toBeNull();
+    expect(first.gscSync).toBeNull();
+    const last = (await buildLiveSeo(ctx.db, ctx.p, run, { now: FIXED_NOW, limit: 2, after: decodeLiveSeoCursor(first.cursor) }))!;
+    expect(last.elements).toHaveLength(1);
+    expect(last.totals!.elements.judged).toBe(3);
+    expect(last.gscSync).not.toBeNull();
   });
 });

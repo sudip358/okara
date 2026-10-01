@@ -19,6 +19,9 @@ export const LIVE_TEXT = {
   reconnecting: "Reconnecting… the panels show the last stored rows received.",
   projectLevel: "Current state, not replayed",
   waitingJudgment: "Waiting for the next stored judgment",
+  /** Same wording as the server label (src/worker/live/seo-board.ts). */
+  noJevAnswers: "No Jev answers were stored in this run: rule findings only.",
+  lowerBound: "≥ = lower bound (query+page rows; anonymized queries are omitted)",
   elementsSubtitle: "Jev answers one narrow question per element; code turns the stored answer into keep, change or review.",
   competitorsSubtitle: "Only pages you approved. Checks are measured or Jev Noul; we adapt structure, never copy text.",
   skipCaption: "Measured from the crawl · observable differences, not causes.",
@@ -104,6 +107,8 @@ export function replayLabel(startedAt: string | null, speed: Speed, gapsShortene
 
 export interface PillInput {
   mode: LiveMode;
+  /** Stored run status (agent_runs.status): a failed, partial or cancelled run never reads as complete. */
+  status: string;
   demo: boolean;
   elapsedMs: number | null;
   spend: RunActivity["totals"]["spend"];
@@ -113,25 +118,35 @@ export interface PillInput {
   gapsShortened: boolean;
 }
 
+const statusWord = (status: string) => status.replace(/_/g, " ");
+
 /** Header pill text. The leading glyph is decorative (rendered separately by the component). */
 export function pillText(p: PillInput): string {
   let s: string;
-  if (p.mode === "replay") return replayLabel(p.startedAt, p.speed, p.gapsShortened, p.demo);
+  if (p.mode === "replay") return `${replayLabel(p.startedAt, p.speed, p.gapsShortened, p.demo)}${p.status !== "completed" ? ` · run ${statusWord(p.status)}` : ""}`;
   if (p.mode === "pending") s = "Queued run · waiting to start";
-  else if (p.mode === "finished") s = `Run finished · ${clockText(p.elapsedMs)} · ${spendPhrase(p.spend, p.providerCalls)}`;
+  else if (p.mode === "finished") s = `Run ${p.status === "completed" ? "finished" : statusWord(p.status)} · ${clockText(p.elapsedMs)} · ${spendPhrase(p.spend, p.providerCalls)}`;
   else s = `Live run · ${clockText(p.elapsedMs)} elapsed · ${spendPhrase(p.spend, p.providerCalls)}`;
   return p.demo ? `${DEMO_LABEL} · ${s}` : s;
 }
 
-/** Dedupe label chips (server labels + ours), ignoring case and dash style. */
+/**
+ * Dedupe label chips (server labels + ours), ignoring case, dash style and trailing dots. A label is also
+ * dropped when an earlier one starts with the same first clause (the text before ';'), e.g. two wordings of
+ * "API-sampled answers; …".
+ */
 export function dedupeLabels(labels: ReadonlyArray<string | null | undefined>): string[] {
   const seen = new Set<string>();
+  const clauses = new Set<string>();
   const out: string[] = [];
   for (const l of labels) {
     if (!l) continue;
-    const k = l.toLowerCase().replace(/[‐-―-]/g, "-").replace(/\s+/g, " ").trim();
-    if (seen.has(k)) continue;
+    const k = l.toLowerCase().replace(/[‐-―-]/g, "-").replace(/\s+/g, " ").trim().replace(/\.+$/, "");
+    const i = k.indexOf(";");
+    const clause = i > 0 ? k.slice(0, i).trim() : null;
+    if (seen.has(k) || (clause !== null && clauses.has(clause))) continue;
     seen.add(k);
+    if (clause !== null) clauses.add(clause);
     out.push(l);
   }
   return out;
@@ -178,8 +193,13 @@ export function positionText(gsc: LiveGscMetrics | null | undefined): string {
   return gsc.basis === "query_rows" ? v : `≈ ${v}`;
 }
 
+/** "≥ " for Search Console sums over query+page rows: a lower bound (anonymized queries are omitted). */
+export function lowerBoundPrefix(gsc: Pick<LiveGscMetrics, "basis"> | null | undefined): string {
+  return gsc?.basis === "query_page_rows" ? "≥ " : "";
+}
+
 export function clicksText(gsc: LiveGscMetrics | null | undefined): string {
-  return gsc ? fmtInt(gsc.clicks) : "—";
+  return gsc ? `${lowerBoundPrefix(gsc)}${fmtInt(gsc.clicks)}` : "—";
 }
 
 export function bandLabel(band: "yes" | "no" | "middle" | null): { label: string; tone: "keep" | "change" | "review" | "none" } {

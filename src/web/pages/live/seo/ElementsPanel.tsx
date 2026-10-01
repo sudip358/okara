@@ -4,21 +4,31 @@
  * the stored tier and raw answer. "Now" is the page snapshot value, "proposed" the drafted snippet (arrow
  * only once drafted). Measured GSC clicks and approximate position, never projected. "Reading…" appears only
  * on replay rows whose stored time has not been reached, or as at most 3 unlabelled skeletons while the
- * recommend step is genuinely running.
+ * recommend step is genuinely running. Rows are in time order: resolved rows, newest at the bottom, then the
+ * pending ones under them; the panel follows the newest row unless the viewer scrolled it.
  */
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { Link } from "react-router";
 import type { LiveSeoElement, LiveSeoVerdict } from "@shared/types";
 import { projectPath } from "@web/lib/project-context";
 import { cx } from "@web/components/ui";
 import type { ElementDisplayRow } from "../engine";
-import { Shimmer } from "../motion";
-import { JevChip, LTD, LTH, Panel, PanelEmpty, VerdictChip } from "../parts";
+import { Shimmer, staggerStyle, useFollowRow, useSeenPending } from "../motion";
+import { ACCENT, JevChip, LTD, LTH, Panel, PanelEmpty, THEAD, VerdictChip } from "../parts";
 import { LIVE_TEXT, clicksText, clipText, fmtInt, jevChipText, jevTooltip, positionText, windowShort } from "../text";
 
 type Filter = "all" | LiveSeoVerdict;
 
-function NowProposed({ now, proposed }: { now: string | null; proposed: string | null }) {
+/** "Now → proposed" in one line; a row with a follow-up action shows "Next: …" after the value (single-line rows). */
+function NowProposed({ now, proposed, next = null }: { now: string | null; proposed: string | null; next?: string | null }) {
+  if (next && !proposed) {
+    return (
+      <span className="block truncate" title={`${now ?? "—"} · ${next}`}>
+        <span className="text-zinc-600 dark:text-zinc-400">{now ? clipText(now, 80) : "—"}</span>
+        <span className="pl-1.5 text-[11px] font-medium text-sky-800 dark:text-sky-300">{next}</span>
+      </span>
+    );
+  }
   if (proposed) {
     return (
       <span className="block truncate" title={`${now ?? "—"} → ${proposed}`}>
@@ -49,7 +59,10 @@ export function ElementsPanel({
   runId,
   notReplayed,
   jevMissing,
+  pendingLabel = "Reading…",
 }: {
+  /** Replay pending rows: "Reading…" (shimmer) while the step runs, else "Up next" (static). */
+  pendingLabel?: "Reading…" | "Up next";
   rows: ElementDisplayRow[];
   change: number;
   judged: number;
@@ -70,6 +83,12 @@ export function ElementsPanel({
   const elements = Array.from(new Set(rows.map((r) => r.row.element))).sort();
   const shown = rows.filter((r) => (r.pending || filter === "all" || r.row.verdict === filter) && (!element || r.row.element === element));
   const win = rows.find((r) => r.row.gsc && !r.pending)?.row.gsc?.window ?? null;
+  const lowerBound = rows.some((r) => !r.pending && r.row.gsc?.basis === "query_page_rows");
+  // Follow the first pending row (replay), else the newest row.
+  const followId = shown.find((r) => r.pending)?.row.id ?? shown[shown.length - 1]?.row.id ?? "";
+  const followRef = useRef<HTMLTableRowElement>(null);
+  useFollowRow(followRef, `${shown.length}|${followId}`);
+  const seenPending = useSeenPending(rows.filter((r) => r.pending).map((r) => r.row.id));
   return (
     <Panel
       num="04"
@@ -78,9 +97,10 @@ export function ElementsPanel({
       reduced={reduced}
       testId="elements"
       counter={{ value: change, suffix: "to change", sub: `of ${fmtInt(judged)} judged in this run${notReplayed > 0 ? ` (${fmtInt(notReplayed)} rows not replayed)` : ""}` }}
-      subtitle={jevMissing ? `${LIVE_TEXT.elementsSubtitle} Jev not configured: rule findings only.` : LIVE_TEXT.elementsSubtitle}
-    >
-      <div className="sticky top-0 z-10 -mx-4 mb-1 flex flex-wrap items-center gap-1.5 bg-white/95 px-4 py-1.5 dark:bg-zinc-900/95">
+      subtitle={jevMissing ? `${LIVE_TEXT.elementsSubtitle} ${LIVE_TEXT.noJevAnswers}` : LIVE_TEXT.elementsSubtitle}
+      captions={win ? [`Search Console ${windowShort(win)} · ≈ = page aggregate${lowerBound ? " · ≥ = lower bound" : ""}`] : undefined}
+      toolbar={
+        <>
         <div role="group" aria-label="Filter by verdict" className="flex gap-1">
           {(["all", "change", "keep", "review"] as const).map((f) => (
             <button
@@ -113,27 +133,31 @@ export function ElementsPanel({
             </option>
           ))}
         </select>
-      </div>
+        </>
+      }
+    >
       {rows.length === 0 && skeletons === 0 ? (
         <PanelEmpty>No element judged in this run yet.</PanelEmpty>
       ) : (
         <table className="w-full table-fixed border-collapse text-xs">
-          <caption className="sr-only">Stored element judgments, newest first</caption>
-          <thead className="border-b border-zinc-200 dark:border-zinc-800">
+          <caption className="sr-only">Stored element judgments in time order; the newest is at the bottom</caption>
+          <thead className={THEAD}>
             <tr>
-              <LTH className="w-[44%] sm:w-[26%] md:w-[22%]">Page</LTH>
-              <LTH className="w-[24%] sm:w-[12%] md:w-[11%]">Element</LTH>
-              <LTH className="hidden sm:table-cell sm:w-[32%] md:w-[24%]">Now → proposed</LTH>
-              <LTH className="hidden text-right md:table-cell md:w-[9%]" title="Average position from Search Console (≈ for page aggregates)">
+              <LTH className="w-[44%] @lg:w-[22%] @xl:w-[19%]">Page</LTH>
+              <LTH className="w-[24%] @lg:w-[11%] @xl:w-[10%]">Element</LTH>
+              <LTH className="hidden @lg:table-cell @lg:w-[31%] @xl:w-[23%]">Now → proposed</LTH>
+              <LTH tight className="hidden text-right @xl:table-cell @xl:w-[7%]" title="Average position from Search Console (≈ for page aggregates)">
                 Pos.
-                <span className="block text-[10px]">GSC ≈</span>
               </LTH>
-              <LTH className="hidden text-right md:table-cell md:w-[8%]" title={win ? `Clicks (GSC, ${windowShort(win)}); measured, not projected` : "Clicks (GSC); measured"}>
+              <LTH
+                tight
+                className="hidden text-right @xl:table-cell @xl:w-[8%]"
+                title={`${win ? `Clicks (GSC, ${windowShort(win)}); measured, not projected` : "Clicks (GSC); measured"} · ${LIVE_TEXT.lowerBound}`}
+              >
                 Clicks
-                <span className="block text-[10px]">{win ? `GSC ${windowShort(win)}` : "GSC"}</span>
               </LTH>
-              <LTH className="hidden sm:table-cell sm:w-[18%] md:w-[16%]">Jev</LTH>
-              <LTH className="w-[32%] sm:w-[12%] md:w-[10%]">Verdict</LTH>
+              <LTH className="hidden @lg:table-cell @lg:w-[19%] @xl:w-[19%]">Jev</LTH>
+              <LTH className="w-[32%] @lg:w-[17%] @xl:w-[14%]">Verdict</LTH>
             </tr>
           </thead>
           <tbody>
@@ -149,20 +173,26 @@ export function ElementsPanel({
               const jev = jevChipText(row.jev, row.rule);
               const tier = row.jev?.tier ?? null;
               const href = row.recommendationId ? projectPath(projectId, `recommendations/${encodeURIComponent(row.recommendationId)}`) : projectPath(projectId, `runs/${encodeURIComponent(runId)}`);
+              const isFresh = !pending && fresh.has(row.id);
               return (
                 <tr
                   key={row.id}
+                  ref={row.id === followId ? followRef : undefined}
                   data-pending={pending ? "true" : undefined}
                   className={cx(
                     "border-b border-zinc-100 dark:border-zinc-800",
-                    !pending && fresh.has(row.id) && "lv-row-in",
+                    !pending && ACCENT.sky.row,
+                    isFresh && (seenPending.has(row.id) ? "lv-resolve" : "lv-row-in"),
                     pending && "text-zinc-500 dark:text-zinc-400",
                   )}
+                  style={isFresh ? staggerStyle(fresh, row.id) : undefined}
                 >
                   <LTD
                     className={cx(
-                      "border-l-2 font-mono text-zinc-900 dark:text-zinc-100",
-                      !pending && row.verdict === "change" ? "border-l-rose-600 dark:border-l-rose-400" : "border-l-transparent",
+                      "font-mono text-zinc-900 dark:text-zinc-100",
+                      // The "change" bar is an inset shadow, not a border: collapsed borders are painted by the
+                      // table and would show before the row has faded in.
+                      !pending && row.verdict === "change" && "shadow-[inset_2px_0_0_var(--color-rose-600)] dark:shadow-[inset_2px_0_0_var(--color-rose-400)]",
                     )}
                     title={target}
                   >
@@ -174,27 +204,27 @@ export function ElementsPanel({
                       </Link>
                     )}
                     {!pending && (
-                      <span className="block truncate pl-1.5 font-sans text-[11px] text-zinc-600 sm:hidden dark:text-zinc-400">
+                      <span className="block truncate pl-1.5 font-sans text-[11px] text-zinc-600 @lg:hidden dark:text-zinc-400">
                         {row.proposed ? `→ ${clipText(row.proposed, 80)}` : clipText(row.now, 80) || jev}
                       </span>
                     )}
-                    {next && !pending && <span className="block truncate pl-1.5 font-sans text-[11px] text-sky-800 dark:text-sky-300">{next}</span>}
+                    {next && !pending && <span className="block truncate pl-1.5 font-sans text-[11px] text-sky-800 @lg:hidden dark:text-sky-300">{next}</span>}
                   </LTD>
-                  <LTD className="font-mono text-zinc-600 dark:text-zinc-400">{row.element}</LTD>
-                  <LTD className={cx("hidden sm:table-cell", pending && "lv-blur")}>
-                    <span aria-hidden={pending || undefined}>{pending ? clipText(row.now, 60) || "…" : <NowProposed now={row.now} proposed={row.proposed} />}</span>
+                  <LTD className="font-mono text-[11px] text-zinc-600 dark:text-zinc-400">{row.element}</LTD>
+                  <LTD className={cx("hidden @lg:table-cell", pending && "lv-blur")}>
+                    <span aria-hidden={pending || undefined}>{pending ? clipText(row.now, 60) || "…" : <NowProposed now={row.now} proposed={row.proposed} next={next} />}</span>
                   </LTD>
-                  <LTD className={cx("hidden text-right font-mono tabular-nums text-zinc-700 md:table-cell dark:text-zinc-300", pending && "lv-blur")}>
+                  <LTD tight className={cx("hidden text-right font-mono text-[11px] tabular-nums text-zinc-700 @xl:table-cell dark:text-zinc-300", pending && "lv-blur")}>
                     <span aria-hidden={pending || undefined}>{positionText(row.gsc)}</span>
                   </LTD>
-                  <LTD className={cx("hidden text-right font-mono tabular-nums text-zinc-700 md:table-cell dark:text-zinc-300", pending && "lv-blur")}>
+                  <LTD tight className={cx("hidden text-right font-mono text-[11px] tabular-nums text-zinc-700 @xl:table-cell dark:text-zinc-300", pending && "lv-blur")}>
                     <span aria-hidden={pending || undefined}>{clicksText(row.gsc)}</span>
                   </LTD>
-                  <LTD className={cx("hidden sm:table-cell", pending && "lv-blur")}>
+                  <LTD className={cx("hidden @lg:table-cell", pending && "lv-blur")}>
                     {pending ? <span aria-hidden="true" className="font-mono text-[11px]">Jev ···</span> : <JevChip text={jev} tier={row.rule ? "act" : tier} title={jevTooltip(row)} />}
                   </LTD>
                   <LTD className="overflow-visible">
-                    <VerdictChip verdict={row.verdict} pending={pending} />
+                    <VerdictChip verdict={row.verdict} pending={pending} pendingLabel={pendingLabel} pendingStatic={pendingLabel === "Up next"} />
                   </LTD>
                 </tr>
               );

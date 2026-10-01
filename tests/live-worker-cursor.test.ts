@@ -104,7 +104,7 @@ describe("live SEO feed paging: per-source insertion high-water marks", () => {
     expect(c.ids).toEqual([]);
     expect(c.r.cursor).toBe(b.r.cursor);
     // Totals always cover the whole run.
-    expect(c.r.totals.elements.judged).toBe(4);
+    expect(c.r.totals!.elements.judged).toBe(4);
   });
 
   it("returns a later row with the same timestamp and a lexically smaller id", async () => {
@@ -154,7 +154,7 @@ describe("live SEO feed paging: per-source insertion high-water marks", () => {
     const a = await page(ctx, run, null, 20);
     expect(a.ids).toEqual([`dec:${first}`]);
     // They still count in the totals (Jev classified those queries' intent).
-    expect(a.r.totals.queries.intent).toEqual({ transactional: 250 });
+    expect(a.r.totals!.queries.intent).toEqual({ transactional: 250 });
 
     // Rows that pass the SQL but are hidden in code (whitespace-only query text) advance the mark; a read of
     // hidden rows only is followed by the next read in the same request.
@@ -221,6 +221,6 @@ describe("live SEO feed paging: per-source insertion high-water marks", () => {
     await seedDecision(ctx.db, ctx.ws, ctx.pid, other, { questionId: QUESTION.titleMatchesQuery, answer: noul(0.9) });
     await seedRec(ctx.db, ctx.ws, ctx.pid, other, { dedupKey: "x", target: { kind: "site" } });
     expect((await page(ctx, run, null)).ids).toEqual([]);
-    expect((await page(ctx, run, null)).r.totals.elements.judged).toBe(0);
+    expect((await page(ctx, run, null)).r.totals!.elements.judged).toBe(0);
   });
 });

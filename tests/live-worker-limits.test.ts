@@ -104,9 +104,9 @@ describe("live SEO feed: D1 limits", () => {
     expect(all.filter((e) => e.element === "Links").every((e) => e.linkSuggestionId && e.now?.includes("internal link"))).toBe(true);
     expect(all.filter((e) => e.role === "action").every((e) => e.recommendationId && e.proposed?.startsWith("New title "))).toBe(true);
     // Totals: action rows of candidates with an element row are not counted.
-    expect(last!.totals.elements).toMatchObject({ judged: 3 * N, keep: N / 2, change: N / 2 + N + N, review: 0 });
-    expect(last!.totals.queries).toMatchObject({ distinct: N, relevance: { yes: N, no: 0, middle: 0, unanswered: 0 } });
-    expect(last!.totals.pipeline).toMatchObject({ candidates: 2 * N, judged: N, rejectedByReason: { budget: N }, created: N });
+    expect(last!.totals!.elements).toMatchObject({ judged: 3 * N, keep: N / 2, change: N / 2 + N + N, review: 0 });
+    expect(last!.totals!.queries).toMatchObject({ distinct: N, relevance: { yes: N, no: 0, middle: 0, unanswered: 0 } });
+    expect(last!.totals!.pipeline).toMatchObject({ candidates: 2 * N, judged: N, rejectedByReason: { budget: N }, created: N });
   });
 
   it("serves a 200-row page through the mounted route", async () => {

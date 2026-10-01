@@ -16,7 +16,13 @@
  * drained, so a page shorter than `limit` means nothing more is stored right now.
  *
  * Enrichment is batched over the page's rows only (lookups.ts). Totals always cover the whole run and are
- * grouped queries capped at LIVE_TOTALS_GROUP_CAP groups (`truncated` when a cap was hit).
+ * grouped queries capped at LIVE_TOTALS_GROUP_CAP groups (`truncated` when a cap was hit); they (and the run's
+ * sync row) are computed only on the last page of a read (fewer rows than `limit`; null on full pages), so a
+ * replay paging in a long run does not rescan the run per page.
+ *
+ * A drafted snippet ("proposed") is shown only against rows of the element the candidate's DECIDED action
+ * addresses (decidedActionElement mirrors seo/recommend/decide.ts over the stored rows); when that action
+ * cannot be told from the stored rows, no snippet is shown.
  *
  * Rules: every query filters workspace_id AND project_id (and run_id or the run's crawl attempt) and has a
  * LIMIT; dynamic IN lists stay under D1's 100 bound parameters; untrusted text is clipped plain text.
@@ -79,6 +85,8 @@ import {
 } from "./lookups";
 
 export const LIVE_TOTALS_GROUP_CAP = 500;
+/** Same wording as the web panel (src/web/pages/live/text.ts LIVE_TEXT.noJevAnswers). */
+export const NO_JEV_ANSWERS_LABEL = "No Jev answers were stored in this run: rule findings only.";
 /** Reads per request while hidden rows keep a page from filling (see the module note). */
 const MAX_READ_ROUNDS = 5;
 /** Query-batch cache keys (seo/recommend/query-batch.ts): relevance pre-filter and buyer-query view. */
@@ -313,6 +321,54 @@ function jevOf(questionId: string, d: DecisionRaw, answer: Record<string, unknow
   };
 }
 
+// ------------------------------------------------------------------ decided action (snippet placement)
+
+/** Stored rows that decide a candidate's action (seo/recommend/decide.ts). */
+const ACTION_INPUT_QUESTIONS = [QUESTION.actionChoice, QUESTION.titleMatchesQuery, QUESTION.metaMatchesQuery, QUESTION.pageAction] as const;
+
+export interface ActionInputRow {
+  candidate_key: string;
+  question_id: string;
+  tier: string | null;
+  answer_json: string | null;
+}
+
+/**
+ * The element of a candidate's DECIDED action, from its stored rows, mirroring seo/recommend/decide.ts:
+ * - seo.action_choice counts only with a usable tier (act or flag; drop and n/a are not answers);
+ * - a confident (act) "no" on title/meta-matches-query means rewrite_title_meta ("Title + meta") when there is
+ *   no action, when it is no_action, and for weak_ctr candidates (the only ones asked those questions);
+ * - an act-tier seo.page_action "merge" means consolidate_duplicate ("Duplicate").
+ * null when the action cannot be told from the stored rows (e.g. a candidate default action): then no snippet
+ * is placed against any element row.
+ */
+export function decidedActionElement(rows: readonly ActionInputRow[]): LiveSeoElement | null {
+  const by = new Map(rows.map((r) => [r.question_id, r]));
+  const spec = LIVE_SEO_ELEMENT_MAP.questions[QUESTION.actionChoice];
+  let action: { choice: string; element: LiveSeoElement | null } | null = null;
+  const act = by.get(QUESTION.actionChoice);
+  const actTier = tierOf(act?.tier);
+  if (act && (actTier === "act" || actTier === "flag") && spec?.type === "choice") {
+    const a = storedAnswer(parseJson<unknown>(act.answer_json, null));
+    if (a?.type === "choice" && a.choice !== null) action = { choice: a.choice, element: spec.options[a.choice]?.element ?? null };
+  }
+  const confidentNo = (q: string) => {
+    const r = by.get(q);
+    if (!r || tierOf(r.tier) !== "act") return false;
+    const a = storedAnswer(parseJson<unknown>(r.answer_json, null));
+    return a?.type === "noul" && a.noul !== null && a.noul < 0.5;
+  };
+  const misaligned = confidentNo(QUESTION.titleMatchesQuery) || confidentNo(QUESTION.metaMatchesQuery);
+  const pa = by.get(QUESTION.pageAction);
+  const paAnswer = pa && tierOf(pa.tier) === "act" ? storedAnswer(parseJson<unknown>(pa.answer_json, null)) : null;
+  const merge = paAnswer?.type === "choice" && paAnswer.choice === "merge";
+  if (merge) return "Duplicate";
+  const noAction = !action || action.choice === "no_action" || action.choice === "none";
+  if (misaligned) return "Title + meta";
+  if (noAction) return null;
+  return action!.element;
+}
+
 // ------------------------------------------------------------------ builder
 
 export interface BuildLiveSeoOptions {
@@ -456,34 +512,34 @@ export async function buildLiveSeo(db: Db, project: ProjectRow, runId: string, o
     );
     for (const r of rows) if (!recByKey.has(r.dedup_key)) recByKey.set(r.dedup_key, r);
   }
-  // The chosen action of candidates that have a drafted snippet: a snippet is shown only against rows of
+  // The decided action of candidates that have a drafted snippet: a snippet is shown only against rows of
   // the elements that action addresses (elements.ts actionFamily).
   const actionElementByKey = new Map<string, LiveSeoElement>();
   const snippetKeys = candidateKeys.filter((k) => recByKey.get(k)?.suggested_snippet);
   if (snippetKeys.length > 0) {
     const rows = await inChunks(snippetKeys, (chunk, p) =>
-      // The newest stored action choice per candidate (one row per key).
-      db.all<{ candidate_key: string; tier: string | null; answer_json: string | null }>(
-        `SELECT candidate_key, tier, answer_json FROM decision_records
+      // The newest stored row per candidate and decisive question.
+      db.all<ActionInputRow>(
+        `SELECT candidate_key, question_id, tier, answer_json FROM decision_records
           WHERE workspace_id = ? AND project_id = ?
             AND rowid IN (SELECT MAX(rowid) FROM decision_records
-                           WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND question_id = ? AND candidate_key IN (${p}) GROUP BY candidate_key)
-          LIMIT ${chunk.length}`,
+                           WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND question_id IN (${ph(ACTION_INPUT_QUESTIONS.length)}) AND candidate_key IN (${p})
+                           GROUP BY candidate_key, question_id)
+          LIMIT ${chunk.length * ACTION_INPUT_QUESTIONS.length}`,
         ws,
         pid,
         ws,
         pid,
         run.id,
-        QUESTION.actionChoice,
+        ...ACTION_INPUT_QUESTIONS,
         ...chunk,
       ),
     );
-    const spec = LIVE_SEO_ELEMENT_MAP.questions[QUESTION.actionChoice];
-    for (const r of rows) {
-      if (actionElementByKey.has(r.candidate_key) || spec?.type !== "choice") continue;
-      const a = storedAnswer(parseJson<unknown>(r.answer_json, null));
-      const el = a?.type === "choice" && a.choice !== null ? spec.options[a.choice]?.element : undefined;
-      if (el) actionElementByKey.set(r.candidate_key, el);
+    const byKey = new Map<string, ActionInputRow[]>();
+    for (const r of rows) byKey.set(r.candidate_key, [...(byKey.get(r.candidate_key) ?? []), r]);
+    for (const [key, list] of byKey) {
+      const el = decidedActionElement(list);
+      if (el) actionElementByKey.set(key, el);
     }
   }
 
@@ -594,9 +650,11 @@ export async function buildLiveSeo(db: Db, project: ProjectRow, runId: string, o
         linkSuggestionId: null,
       };
     }
-    // The candidate's drafted snippet, only on rows that still need work and that its action addresses.
+    // The candidate's drafted snippet, only on rows that still need work and that its decided action
+    // addresses; never when the decided action is unknown, never on a drop-tier action row.
     const actionEl = actionElementByKey.get(d.candidate_key) ?? null;
-    const showsSnippet = row.verdict !== "keep" && (row.role === "action" || actionEl === null || actionFamily(actionEl).includes(row.element));
+    const showsSnippet =
+      row.verdict !== "keep" && actionEl !== null && (row.role === "action" ? row.jev?.tier !== "drop" && actionFamily(actionEl).includes(row.element) : actionFamily(actionEl).includes(row.element));
     elements.push({ ...row, proposed: showsSnippet && rec?.suggested_snippet ? text(rec.suggested_snippet) : null });
   }
   for (const x of findingPayloads) {
@@ -652,7 +710,11 @@ export async function buildLiveSeo(db: Db, project: ProjectRow, runId: string, o
   recommendations.sort(compareAtId);
 
   // ---------------------------------------------------------------- totals, sync, labels
-  const [totals, gscSync] = await Promise.all([seoTotals(db, ws, pid, run.id, crawl?.id ?? null), runGscSync(db, ws, pid, run.id)]);
+  // Whole-run totals only on the last page of a read: a full page means more rows follow right away.
+  const lastPage = taken.length < limit;
+  const [totals, gscSync] = lastPage
+    ? await Promise.all([seoTotals(db, ws, pid, run.id, crawl?.id ?? null), runGscSync(db, ws, pid, run.id)])
+    : [null, null];
 
   const labels: string[] = [];
   if (project.is_demo === 1) labels.push(DEMO_LABEL);
@@ -664,10 +726,8 @@ export async function buildLiveSeo(db: Db, project: ProjectRow, runId: string, o
       `Search Console: latest usable sync, ${gsc.window.start} to ${gsc.window.end}; positions are impression-weighted averages of stored rows; query+page sums are lower bounds.`,
     );
   }
-  if (!active && totals.pipeline.judged === 0 && totals.elements.judged > 0) {
-    labels.push("No Jev answers were stored in this run: element rows come from rule findings only.");
-  }
-  if (totals.truncated) labels.push(`Totals are lower bounds: a grouped count reached its ${LIVE_TOTALS_GROUP_CAP}-group cap.`);
+  if (totals && !active && totals.pipeline.judged === 0 && totals.elements.judged > 0) labels.push(NO_JEV_ANSWERS_LABEL);
+  if (totals?.truncated) labels.push(`Totals are lower bounds: a grouped count reached its ${LIVE_TOTALS_GROUP_CAP}-group cap.`);
 
   const startedMs = run.started_at ? Date.parse(run.started_at) : NaN;
   const endMs = run.finished_at ? Date.parse(run.finished_at) : active ? opts.now.getTime() : NaN;
@@ -799,7 +859,9 @@ export async function pipelineTotals(db: Db, ws: string, pid: string, runId: str
   };
 }
 
-export async function seoTotals(db: Db, ws: string, pid: string, runId: string, crawlId: string | null): Promise<LiveSeoBoardResponse["totals"]> {
+type SeoTotals = NonNullable<LiveSeoBoardResponse["totals"]>;
+
+export async function seoTotals(db: Db, ws: string, pid: string, runId: string, crawlId: string | null): Promise<SeoTotals> {
   const elementIds = [...ELEMENT_QUESTION_IDS, ...ACTION_QUESTION_IDS];
   const [elementGroups, linkGroups, ruleGroups, queryGroups, distinct, pipe] = await Promise.all([
     // Element + action rows; an action row counts only for candidates with no element-question row.
@@ -866,7 +928,7 @@ export async function seoTotals(db: Db, ws: string, pid: string, runId: string, 
     pipelineTotals(db, ws, pid, runId),
   ]);
 
-  const elements: LiveSeoBoardResponse["totals"]["elements"] = { judged: 0, keep: 0, change: 0, review: 0, byElement: {} };
+  const elements: SeoTotals["elements"] = { judged: 0, keep: 0, change: 0, review: 0, byElement: {} };
   const count = (element: LiveSeoElement, verdict: LiveSeoVerdict, n: number) => {
     elements.judged += n;
     elements[verdict] += n;
@@ -887,7 +949,7 @@ export async function seoTotals(db: Db, ws: string, pid: string, runId: string, 
     if (j) count(j.element, j.verdict, g.n);
   }
 
-  const queries: LiveSeoBoardResponse["totals"]["queries"] = {
+  const queries: SeoTotals["queries"] = {
     distinct: distinct?.n ?? 0,
     relevance: emptyBand(),
     buyer: emptyBand(),

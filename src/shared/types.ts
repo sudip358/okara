@@ -1372,7 +1372,10 @@ export interface LiveSeoBoardResponse {
   queries: LiveSeoQueryRow[];
   recommendations: LiveRecommendationRow[];
   gscSync: LiveGscSync | null;
-  /** Whole run, regardless of `after`. */
+  /**
+   * Whole run, regardless of `after`; computed only on the last page of a read (a page shorter than `limit`),
+   * null on full pages (keep the previous totals).
+   */
   totals: {
     elements: {
       judged: number;
@@ -1385,7 +1388,7 @@ export interface LiveSeoBoardResponse {
     pipeline: LivePipelineTotals;
     /** True when a whole-run scan hit its cap (docs/api.md "Live view"); counts are then lower bounds. */
     truncated: boolean;
-  };
+  } | null;
   /** Opaque; pass as ?after= for newer rows only. */
   cursor: string | null;
   labels: string[];
@@ -1448,8 +1451,8 @@ export interface LiveGeoBoardResponse {
    */
   plannedPrompts: Array<{ promptId: string; text: string }> | null;
   recommendations: LiveRecommendationRow[];
-  /** Whole run, regardless of `after`. */
-  totals: { lanes: LiveGeoLaneTotals[]; pipeline: LivePipelineTotals; truncated: boolean };
+  /** Whole run, regardless of `after`; only on the last page of a read (fewer rows than `limit`), else null. */
+  totals: { lanes: LiveGeoLaneTotals[]; pipeline: LivePipelineTotals; truncated: boolean } | null;
   cursor: string | null;
   labels: string[];
 }
@@ -1494,4 +1497,13 @@ export interface CustomProviderPatchInput {
   model?: string;
   apiKey?: string;
   keepKeyForNewHost?: boolean;
+}
+
+// ------------------------------------------------------------------ live view: answer model (appended 2026-10-01)
+/** Declaration merge into LiveGeoAnswerRow: the model and grounding mode that produced this stored answer. */
+export interface LiveGeoAnswerRow {
+  /** geo_observations.model (plain text, clipped). */
+  model: string | null;
+  /** geo_observations.grounding_mode, e.g. "google_search"; null when not recorded. */
+  groundingMode: string | null;
 }

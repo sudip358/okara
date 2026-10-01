@@ -219,6 +219,8 @@ export function answer(over: Partial<LiveGeoAnswerRow> = {}): LiveGeoAnswerRow {
     provider: "gemini",
     promptId: "p1",
     promptText: "best washable sofa",
+    model: "gemini-run-model",
+    groundingMode: "google_search",
     outcome: "missing",
     grounded: true,
     latencyMs: 377,
@@ -242,7 +244,7 @@ export function geoFeed(over: Partial<LiveGeoBoardResponse> = {}): LiveGeoBoardR
     answers: [
       answer(),
       answer({ id: "obs:2", observationId: "o2", at: at(25), promptId: "p2", promptText: HOSTILE, outcome: "cited", citedInstead: null, ownCitedUrl: "https://shop.example/sofas", position: 2 }),
-      answer({ id: "obs:3", observationId: "o3", at: at(30), provider: "openai_geo", outcome: "named", latencyMs: 820 }),
+      answer({ id: "obs:3", observationId: "o3", at: at(30), provider: "openai_geo", outcome: "named", latencyMs: 820, model: "gpt-run-model", groundingMode: "web_search" }),
     ],
     plannedPrompts: [
       { promptId: "p1", text: "best washable sofa" },

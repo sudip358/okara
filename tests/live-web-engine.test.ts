@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_SPEED,
+  GAP_LEAD_WALL_MS,
   IDLE_GAP_MS,
   MAX_ANIMATED,
   MAX_PENDING,
@@ -15,6 +16,7 @@ import {
   animatedIds,
   answerIndex,
   arrivalSummary,
+  citedInsteadBars,
   buildTimeline,
   callTicks,
   decisionCounts,
@@ -31,6 +33,9 @@ import {
   latestSkipped,
   medianLatency,
   mergeById,
+  mergeGeoFeed,
+  mergeKeepingSteps,
+  mergeSeoFeed,
   parseSpeed,
   parseStep,
   pauseClock,
@@ -48,13 +53,15 @@ import {
   spendSeries,
   spendSoFar,
   splitAt,
+  staggerDelay,
   stepSegments,
+  stepStatus,
   togglePlay,
   tweenValue,
   type TimelineEvent,
 } from "../src/web/pages/live/engine";
-import { clockText, dedupeLabels, jevChipText, pillText, positionText, replayLabel, spendPhrase, spendSoFarText, windowShort } from "../src/web/pages/live/text";
-import { HOSTILE, activity, answer, at, call, element, item, query, read, rec, seoFeed, step } from "./live-web-fixtures";
+import { clicksText, clockText, dedupeLabels, jevChipText, pillText, positionText, replayLabel, spendPhrase, spendSoFarText, windowShort } from "../src/web/pages/live/text";
+import { HOSTILE, activity, answer, at, call, element, geoFeed as geoFeedBase, item, query, read, rec, seoFeed, step } from "./live-web-fixtures";
 
 const ms = (sec: number) => Date.parse(at(sec));
 
@@ -119,12 +126,29 @@ describe("replay clock", () => {
     expect(resumed.playing).toBe(true);
     expect(setClockSpeed(resumed, 30).p).toBe(c.p);
   });
-  it("shortens idle gaps over 10 s: jumps to 1 s before the next stored event", () => {
+  it("shortens idle gaps over 10 s: jumps to 1 s before the next stored event at 1×", () => {
     let c = seekClock(initClock(bounds, 1), ms(3));
     c = advanceClock(c, 100, times);
     expect(c.p).toBe(ms(60) - 1000 + 100);
     expect(hasLongGaps(times, bounds.t0, bounds.tEnd)).toBe(true);
     expect(hasLongGaps([0, 5, 9].map(ms), ms(0), ms(9) + IDLE_GAP_MS - 1)).toBe(false);
+  });
+  it("after a shortened gap the next event is still ~0.45 s of wall time away at 10× and ~0.33 s at 30× (order unchanged)", () => {
+    const c10 = advanceClock(seekClock(initClock(bounds, 10), ms(3)), 100, times);
+    expect(c10.p).toBe(ms(60) - GAP_LEAD_WALL_MS * 10 + 100 * 10);
+    // Wall time from landing to the event: lead / speed.
+    expect((ms(60) - (c10.p - 1000)) / 10).toBe(GAP_LEAD_WALL_MS);
+    const c30 = advanceClock(seekClock(initClock(bounds, 30), ms(3)), 100, times);
+    expect(c30.p).toBe(ms(60) - (IDLE_GAP_MS - 1) + 100 * 30);
+    expect(c30.p).toBeLessThan(ms(60)); // the event is not skipped past
+    // A sparse run takes several ticks per row: rows 1 s apart still reveal on different frames at 10×.
+    let c = seekClock(initClock(bounds, 10), ms(3));
+    const seen: number[] = [];
+    for (let i = 0; i < 40 && !c.finished; i++) {
+      c = advanceClock(c, 100, times);
+      seen.push(revealCount(times.map((t) => ({ t })), c.p));
+    }
+    expect(seen.indexOf(5)).toBeGreaterThan(seen.indexOf(4) + 2);
   });
   it("finishes at the end and stops; toggling a finished replay restarts it; seek clamps", () => {
     let c = advanceClock(seekClock(initClock(bounds, 30), ms(69)), 10_000, times);
@@ -168,24 +192,25 @@ describe("SEO selectors", () => {
   it("element counts follow the server rule: action rows count only for candidates without an element row", () => {
     expect(elementCounts(feed.elements)).toEqual({ judged: 4, keep: 1, change: 2, review: 1 });
   });
-  it("display: action row folds into a 'Next:' note; newest first; replay-pending rows sit above, flagged", () => {
-    const rows = elementDisplay(feed.elements, [element({ id: "dec:9", at: at(200), element: "Schema" })]);
-    expect(rows[0]).toMatchObject({ pending: true });
-    expect(rows[0]!.row.id).toBe("dec:9");
-    const resolved = rows.filter((r) => !r.pending);
-    expect(resolved.map((r) => r.row.id)).toEqual(["dec:4", "dec:2", "dec:1", "find:1"]);
-    expect(resolved.find((r) => r.row.id === "dec:2")!.next).toBe("Next: Title + meta");
+  it("display: action row folds into a 'Next:' note; time order (oldest first); replay-pending rows sit under the resolved ones, flagged", () => {
+    const rows = elementDisplay(feed.elements, [element({ id: "dec:9", at: at(200), element: "Schema" }), element({ id: "dec:8", at: at(150), element: "Meta" })]);
+    expect(rows.map((r) => r.row.id)).toEqual(["find:1", "dec:1", "dec:2", "dec:4", "dec:8", "dec:9"]);
+    expect(rows.slice(0, 4).every((r) => !r.pending)).toBe(true);
+    expect(rows.slice(4).every((r) => r.pending)).toBe(true);
+    expect(rows.find((r) => r.row.id === "dec:2")!.next).toBe("Next: Title + meta");
     expect(rows.some((r) => r.row.id === "dec:3")).toBe(false);
+    // maxResolved keeps the NEWEST resolved rows.
+    expect(elementDisplay(feed.elements, [], 2).map((r) => r.row.id)).toEqual(["dec:2", "dec:4"]);
   });
   it("queries group by key, cells fill as answers arrive; counts by band", () => {
     const g = queryGroups(feed.queries);
-    expect(g.map((x) => x.queryKey)).toEqual(["q:x", "q:oak table"]);
+    expect(g.map((x) => x.queryKey)).toEqual(["q:oak table", "q:x"]);
     const oak = g.find((x) => x.queryKey === "q:oak table")!;
     expect(oak.relevance?.band).toBe("yes");
     expect(oak.intent?.jev.choice).toBe("transactional");
     expect(queryCounts(feed.queries)).toEqual({ distinct: 2, relevant: 1, notRelevant: 1, unsure: 0 });
     const withPending = queryGroups([query()], [query({ id: "dec:q7", queryKey: "q:new", query: "new" })]);
-    expect(withPending[0]).toMatchObject({ queryKey: "q:new", pending: true });
+    expect(withPending.map((x) => [x.queryKey, x.pending])).toEqual([["q:oak table", false], ["q:new", true]]);
   });
   it("crawl skips are counted by stored reason", () => {
     expect(skippedReasons(activity().items)).toEqual([{ reason: "robots_disallowed", count: 1 }]);
@@ -200,12 +225,29 @@ describe("run rail", () => {
     expect(steps.map((s) => s.status)).toEqual(["completed", "completed", "completed", "running"]);
     expect(steps[3]!.end).toBeNull();
   });
+  it("an info note after a step's terminal event never re-opens it (Workflows retry: 'already finished … not run again')", () => {
+    const evs = [step("s1", 0, "seo.recommend", "started"), step("s2", 10, "seo.recommend", "completed"), step("s3", 20, "seo.recommend", "info", "Step seo.recommend already finished (completed) on an earlier attempt; not run again.")];
+    expect(parseStep(evs[2]!)).toEqual({ step: "seo.recommend", status: "info" });
+    expect(stepStatus(evs, "seo.recommend")).toBe("completed");
+    const seg = stepSegments(evs, "seo").steps.find((x) => x.step === "seo.recommend")!;
+    expect(seg).toMatchObject({ status: "completed", end: ms(10) });
+    expect(seg.message).toContain("already finished");
+    // Any unknown raw status is a note too, and a lane's per-answer analysis failure is not a lane end.
+    expect(parseStep(step("s4", 1, "seo.crawl", "warming"))!.status).toBe("info");
+    const lane = [step("l1", 0, "geo_batch:gemini", "started"), step("l2", 5, "geo_batch:gemini", "failed", "Analysis failed for observation obs_1: boom")];
+    expect(stepStatus(lane, "geo_batch:gemini")).toBe("running");
+    expect(laneStateAt(lane, "gemini", 1)).toBe("asking");
+  });
   it("GEO lane sub-bars come from geo_batch:<engine> steps; lane state at the playhead", () => {
     const geoItems = [step("e1", 0, "geo.batch", "started"), step("e2", 1, "geo_batch:gemini", "started"), step("e3", 30, "geo_batch:gemini", "completed")];
     expect(stepSegments(geoItems, "geo").lanes.map((l) => [l.lane, l.status])).toEqual([["gemini", "completed"]]);
     expect(laneStateAt(geoItems.slice(0, 2), "gemini", 0)).toBe("asking");
     expect(laneStateAt(geoItems, "gemini", 3)).toBe("done");
     expect(laneStateAt(geoItems.slice(0, 1), "openai_geo", 0)).toBe("queued");
+    // Without a lane step (legacy events), stored answers mean asking only until geo.batch ends.
+    expect(laneStateAt(geoItems.slice(0, 1), "openai_geo", 2)).toBe("asking");
+    expect(laneStateAt([...geoItems, step("e4", 40, "geo.batch", "partial")], "openai_geo", 2)).toBe("done");
+    expect(laneStateAt([step("e5", 40, "geo.batch", "completed")], "openai_geo", 0)).toBe("idle");
   });
   it("p50 latency only from 5 stored latencies; spend line stops at the first unpriced call", () => {
     const ticks = callTicks([call("c1", 1, 0.01, 100), call("c2", 2, 0.02, 300), call("c3", 3, null, 200), call("c4", 4, 0.01, 500)]);
@@ -251,11 +293,24 @@ describe("GEO selectors", () => {
     expect(k.row!.id).toBe("obs:14");
     expect(k.total).toBe(10);
   });
+  it("cited-instead bars count only answers that left us out (missing or named), like the lane stat", () => {
+    const bars = citedInsteadBars([
+      answer({ id: "a1", outcome: "missing" }),
+      answer({ id: "a2", outcome: "named" }),
+      answer({ id: "a3", outcome: "cited", ownCitedUrl: "https://shop.example/x" }),
+      answer({ id: "a4", outcome: null }),
+      answer({ id: "a5", outcome: "failed" }),
+    ]);
+    expect(bars).toEqual([{ host: "reviews.example", sourceType: "review_site", count: 2, providers: ["gemini"] }]);
+    expect(bars[0]!.count).toBe(laneTotalsFrom([answer({ id: "a1" }), answer({ id: "a2", outcome: "named" }), answer({ id: "a3", outcome: "cited" })], "gemini").citedInstead!.answers);
+  });
   it("heatmap cells: pending only when genuinely pending; not run only when the run is over", () => {
     const idx = answerIndex([answer(), answer({ id: "obs:n", promptId: "p2", outcome: null })]);
     const none = new Set<string>();
     expect(heatCell(idx, none, none, "p1", "gemini", { liveActive: false, laneBusy: false })).toMatchObject({ kind: "answer", outcome: "missing" });
     expect(heatCell(idx, none, none, "p2", "gemini", { liveActive: true, laneBusy: true }).kind).toBe("analysing");
+    // Finished run or replay: an answer without an outcome will never be analysed.
+    expect(heatCell(idx, none, none, "p2", "gemini", { liveActive: false, laneBusy: false }).kind).toBe("not_analysed");
     expect(heatCell(idx, none, none, "p3", "gemini", { liveActive: true, laneBusy: true }).kind).toBe("pending");
     expect(heatCell(idx, none, none, "p3", "gemini", { liveActive: true, laneBusy: false }).kind).toBe("none");
     expect(heatCell(idx, none, none, "p3", "gemini", { liveActive: false, laneBusy: false }).kind).toBe("not_run");
@@ -283,12 +338,25 @@ describe("run selection", () => {
 });
 
 describe("arrivals: animation batching and announcements", () => {
-  it("animates only the newest MAX_ANIMATED rows of a batch", () => {
+  it("animates only the newest MAX_ANIMATED rows of a batch, staggered in time order (presentation only)", () => {
     const evs = Array.from({ length: 20 }, (_, i) => ({ id: `e${i}`, t: i }));
     const ids = animatedIds(evs);
     expect(ids.size).toBe(MAX_ANIMATED);
     expect(ids.has("e19")).toBe(true);
     expect(ids.has("e0")).toBe(false);
+    expect([...ids][0]).toBe("e8");
+    expect(staggerDelay(ids, "e8")).toBe(0);
+    expect(staggerDelay(ids, "e9")).toBe(70);
+    expect(staggerDelay(ids, "e19")).toBe(8 * 70);
+    expect(staggerDelay(ids, "nope")).toBe(0);
+  });
+  it("the capped item list never evicts step items (rail and panels derive from them)", () => {
+    const steps = [step("evt:a", 0, "seo.crawl", "started"), step("evt:b", 1, "seo.crawl", "completed")];
+    const reads = Array.from({ length: 10 }, (_, i) => read(`snap:${String(i).padStart(2, "0")}`, 10 + i, `https://shop.example/${i}`));
+    const out = mergeKeepingSteps(steps, reads, 5);
+    expect(out.map((i) => i.id)).toEqual(["evt:a", "evt:b", "snap:07", "snap:08", "snap:09"]);
+    expect(stepStatus(out, "seo.crawl")).toBe("completed");
+    expect(mergeKeepingSteps(out, [read("snap:00", 10, "https://shop.example/0")], 5).map((i) => i.id)).toEqual(["evt:a", "evt:b", "snap:07", "snap:08", "snap:09"]);
   });
   it("summarises arrivals in one sentence and never echoes untrusted text", () => {
     const feed = seoFeed();
@@ -309,10 +377,14 @@ describe("labels (exact honesty wording)", () => {
     expect(spendPhrase({ usd: null, isEstimate: false, unknownCalls: 0 }, 0)).toBe("$0.00 spent (no provider calls)");
   });
   it("pill: live, queued, finished, replay and demo", () => {
-    const base = { demo: false, elapsedMs: 402_000, spend, providerCalls: 4, startedAt: "2026-09-29T14:02:00", speed: 10 as const, gapsShortened: false };
+    const base = { demo: false, elapsedMs: 402_000, spend, providerCalls: 4, startedAt: "2026-09-29T14:02:00", speed: 10 as const, gapsShortened: false, status: "completed" };
     expect(pillText({ ...base, mode: "live" })).toBe("Live run · 06:42 elapsed · $0.07 spent (estimate)");
     expect(pillText({ ...base, mode: "pending" })).toBe("Queued run · waiting to start");
     expect(pillText({ ...base, mode: "finished", elapsedMs: 432_000 })).toBe("Run finished · 07:12 · $0.07 spent (estimate)");
+    // The run's status is shown: a failed or partial run never reads as complete.
+    expect(pillText({ ...base, mode: "finished", elapsedMs: 432_000, status: "failed" })).toBe("Run failed · 07:12 · $0.07 spent (estimate)");
+    expect(pillText({ ...base, mode: "finished", elapsedMs: 432_000, status: "rate_limited" })).toBe("Run rate limited · 07:12 · $0.07 spent (estimate)");
+    expect(pillText({ ...base, mode: "replay", status: "partial" })).toBe("Replay of the run on 29 Sep 2026, 14:02 · real stored events · 10× speed · run partial");
     expect(pillText({ ...base, mode: "replay" })).toBe("Replay of the run on 29 Sep 2026, 14:02 · real stored events · 10× speed");
     expect(pillText({ ...base, mode: "replay", speed: 30, gapsShortened: true })).toBe("Replay of the run on 29 Sep 2026, 14:02 · real stored events · 30× speed · idle gaps over 10 s shortened");
     expect(pillText({ ...base, mode: "live", demo: true })).toMatch(/^Demo data - simulated run · Live run/);
@@ -333,8 +405,33 @@ describe("labels (exact honesty wording)", () => {
     expect(positionText(null)).toBe("—");
     expect(windowShort({ start: "2026-09-01", end: "2026-09-28" })).toBe("1–28 Sep");
     expect(dedupeLabels(["Demo data - simulated run", "Demo data – simulated run", "x"])).toEqual(["Demo data - simulated run", "x"]);
+    // Same first clause (before ';'): the later wording is dropped.
+    expect(dedupeLabels(["API-sampled answers; consumer apps may answer differently.", "API-sampled answers; not consumer-app answers", "Other note."])).toEqual([
+      "API-sampled answers; consumer apps may answer differently.",
+      "Other note.",
+    ]);
+    // Search Console sums over query+page rows are lower bounds.
+    expect(clicksText({ ...element().gsc!, basis: "query_page_rows" })).toBe("≥ 310");
+    expect(clicksText(element().gsc)).toBe("310");
   });
   it("itemsOf keeps activity items of revealed events only", () => {
     expect(itemsOf(buildTimeline([read("snap:1", 1, "https://a.example/")], { recommendations: [rec()] })).map((i) => i.id)).toEqual(["snap:1"]);
   });
 });
+
+describe("feed merge", () => {
+  it("keeps the previous totals on full pages (totals null) and takes the complete label set from the page with totals", () => {
+    const g1 = mergeGeoFeed(null, geoFeedPage({ labels: ["2 stored answer(s) are awaiting analysis; their outcome is not counted yet."] }));
+    const g2 = mergeGeoFeed(g1, geoFeedPage({ totals: null, labels: ["x"] }));
+    expect(g2.totals).toBe(g1.totals);
+    expect(g2.labels).toContain("2 stored answer(s) are awaiting analysis; their outcome is not counted yet.");
+    const g3 = mergeGeoFeed(g2, geoFeedPage({ labels: ["API-sampled answers; consumer apps may answer differently."] }));
+    expect(g3.labels).toEqual(["API-sampled answers; consumer apps may answer differently."]);
+    const s1 = mergeSeoFeed(null, seoFeed());
+    expect(mergeSeoFeed(s1, seoFeed({ totals: null, gscSync: null, elements: [] })).totals).toBe(s1.totals);
+  });
+});
+
+function geoFeedPage(over: Partial<import("../src/shared/types").LiveGeoBoardResponse>) {
+  return { ...geoFeedBase(), ...over };
+}

@@ -4,30 +4,40 @@
  * the Step log (replaces the Okara "CMO decisions" log). Built only from revealed `step`, `provider_call` and
  * `engine_answer` items. The spend line is decorative (aria-hidden); the counters are its text equivalent.
  */
+import type { ReactNode } from "react";
 import type { ActivityItem } from "@shared/types";
 import { cx } from "@web/components/ui";
 import { callTicks, medianLatency, parseStep, spendSeries, stepSegments, STEP_LABEL, toMs, type SegmentStatus, type StepSegment } from "./engine";
 import { EngineBadge } from "./parts";
 import { clipText, clockText, fmtInt, fmtUsd } from "./text";
 
-const SEG_TONE: Record<SegmentStatus, string> = {
+/**
+ * What the rail draws: a step still "running" when the run is over (and the view is not mid-replay) ended
+ * without a terminal event, so it is drawn as "ended without a result", never as running.
+ */
+type RailStatus = SegmentStatus | "ended";
+
+const SEG_TONE: Record<RailStatus, string> = {
   not_started: "bg-zinc-100 dark:bg-zinc-800",
+  ended: "bg-zinc-400 dark:bg-zinc-600",
   running: "bg-sky-500 dark:bg-sky-400",
   completed: "bg-emerald-600 dark:bg-emerald-500",
   partial: "bg-amber-500 dark:bg-amber-400",
   failed: "bg-rose-600 dark:bg-rose-500",
   skipped: "lv-hatch bg-zinc-200 dark:bg-zinc-700",
 };
-const SEG_WORD: Record<SegmentStatus, string> = {
+const SEG_WORD: Record<RailStatus, string> = {
   not_started: "not started",
+  ended: "ended without a result",
   running: "running",
   completed: "completed",
   partial: "partial",
   failed: "failed",
   skipped: "skipped",
 };
-const CHIP_TONE: Record<SegmentStatus, string> = {
+const CHIP_TONE: Record<RailStatus, string> = {
   not_started: "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400",
+  ended: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
   running: "bg-sky-50 text-sky-800 dark:bg-sky-950 dark:text-sky-300",
   completed: "bg-emerald-50 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
   partial: "bg-amber-50 text-amber-900 dark:bg-amber-950 dark:text-amber-300",
@@ -39,19 +49,25 @@ function pct(t: number, t0: number, span: number): number {
   return Math.max(0, Math.min(100, ((t - t0) / span) * 100));
 }
 
-function Segment({ s, t0, span, now }: { s: StepSegment; t0: number; span: number; now: number }) {
+/** Display status of a segment: running is only shown while the run can still be running at this point. */
+export function railStatus(status: SegmentStatus, runOver: boolean): RailStatus {
+  return status === "running" && runOver ? "ended" : status;
+}
+
+function Segment({ s, t0, span, now, runOver }: { s: StepSegment; t0: number; span: number; now: number; runOver: boolean }) {
   if (s.start === null) return null;
+  const status = railStatus(s.status, runOver);
   const end = s.end ?? now;
   const left = pct(s.start, t0, span);
   const width = Math.max(0.6, pct(end, t0, span) - left);
   return (
     <span
-      title={`${s.label}: ${SEG_WORD[s.status]}${s.message ? ` · ${clipText(s.message, 120)}` : ""}`}
-      className={cx("absolute top-0 bottom-0 overflow-hidden rounded-sm", SEG_TONE[s.status])}
+      title={`${s.label}: ${SEG_WORD[status]}${s.message ? ` · ${clipText(s.message, 120)}` : ""}`}
+      className={cx("absolute top-0 bottom-0 overflow-hidden rounded-sm", SEG_TONE[status])}
       style={{ left: `${left}%`, width: `${width}%` }}
     >
-      {s.status === "running" && <span className="lv-pulse absolute top-0 right-0 bottom-0 w-1 bg-white/70" />}
-      <span className={cx("block truncate px-1 text-[10px] leading-4 font-medium", s.status === "skipped" || s.status === "not_started" ? "text-zinc-700 dark:text-zinc-200" : "text-white dark:text-zinc-950")}>{s.lane ? "" : s.label}</span>
+      {status === "running" && <span className="lv-pulse absolute top-0 right-0 bottom-0 w-1 bg-white/70" />}
+      <span className={cx("block truncate px-1 text-[10px] leading-4 font-medium", status === "skipped" || status === "not_started" ? "text-zinc-700 dark:text-zinc-200" : "text-white dark:text-zinc-950")}>{s.lane ? "" : s.label}</span>
     </span>
   );
 }
@@ -66,7 +82,11 @@ export function RunRail({
   decisions,
   providerCalls,
   laneLabels,
+  runOver = false,
+  controls,
 }: {
+  /** Replay controls, drawn at the top of the rail (they drive the same run-time axis). */
+  controls?: ReactNode;
   agent: "seo" | "geo";
   /** Revealed items, ascending. */
   items: ActivityItem[];
@@ -79,6 +99,8 @@ export function RunRail({
   decisions: { act: number; flag: number; drop: number };
   providerCalls: number;
   laneLabels: ReadonlyMap<string, string>;
+  /** The run is not active and the view is not mid-replay: a step without a terminal event ended without one. */
+  runOver?: boolean;
 }) {
   const span = Math.max(1000, axisEnd - t0);
   const now = playhead ?? axisEnd;
@@ -94,23 +116,27 @@ export function RunRail({
   const stepLog = items.filter((it) => it.kind === "step");
   const shownTicks = ticks.slice(-300);
   return (
-    <section aria-label="Run rail" className="min-w-0 rounded-xl border border-zinc-200 bg-white px-4 py-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <section aria-label="Run rail" className="min-w-0 space-y-1.5 rounded-xl border border-zinc-200 bg-white px-4 py-2 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+      {controls}
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-1">
-        <ol className="flex min-w-0 flex-wrap items-center gap-1 text-[11px]" aria-label="Steps">
-          {steps.map((s, i) => (
-            <li key={s.step} className="flex items-center gap-1">
-              {i > 0 && (
-                <span aria-hidden="true" className="text-zinc-400">
-                  ▸
+        <ol className="lv-strip flex min-w-0 items-center gap-1 text-[11px] max-md:w-full max-md:overflow-x-auto md:flex-wrap" aria-label="Steps">
+          {steps.map((s, i) => {
+            const status = railStatus(s.status, runOver);
+            return (
+              <li key={s.step} className="flex shrink-0 items-center gap-1">
+                {i > 0 && (
+                  <span aria-hidden="true" className="text-zinc-400">
+                    ▸
+                  </span>
+                )}
+                <span className={cx("inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-medium", CHIP_TONE[status])} title={status === "ended" ? "No terminal event was stored for this step" : undefined}>
+                  {STEP_LABEL[s.step] ?? s.step}
+                  {status === "ended" ? <span className="font-normal"> · ended without a result</span> : <span className="sr-only"> {SEG_WORD[status]}</span>}
+                  {status === "running" && <span aria-hidden="true" className="lv-pulse h-1.5 w-1.5 rounded-full bg-current" />}
                 </span>
-              )}
-              <span className={cx("inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-medium", CHIP_TONE[s.status])}>
-                {STEP_LABEL[s.step] ?? s.step}
-                <span className="sr-only"> {SEG_WORD[s.status]}</span>
-                {s.status === "running" && <span aria-hidden="true" className="lv-pulse h-1.5 w-1.5 rounded-full bg-current" />}
-              </span>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ol>
         <p className="flex flex-wrap gap-x-3 font-mono text-[11px] text-zinc-700 tabular-nums dark:text-zinc-300">
           <span>calls {fmtInt(providerCalls)}</span>
@@ -125,23 +151,54 @@ export function RunRail({
             </span>
           )}
         </p>
+        <details className="text-[11px] open:basis-full">
+          <summary className="cursor-pointer text-zinc-700 dark:text-zinc-300">Step log ({fmtInt(stepLog.length)})</summary>
+          <ol role="log" aria-live="off" aria-label="Step log" className="mt-1 max-h-40 space-y-0.5 overflow-y-auto rounded bg-zinc-950 p-2 font-mono text-zinc-200">
+            {stepLog.length === 0 && <li className="text-zinc-400">No step stored yet.</li>}
+            {stepLog.map((it) => {
+              const s = parseStep(it);
+              const st = s?.status ?? null;
+              return (
+                <li key={it.id} className="flex min-w-0 gap-2">
+                  <span className="shrink-0 text-zinc-500">+{clockText(toMs(it.at) - t0)}</span>
+                  <span className="shrink-0 text-sky-300">{s ? (STEP_LABEL[s.step] ?? s.step) : "step"}</span>
+                  <span
+                    className={cx(
+                      "shrink-0",
+                      st === "failed" ? "text-rose-300" : st === "completed" ? "text-emerald-300" : st === "started" ? "text-sky-200" : st === "info" || st === null ? "text-zinc-400" : "text-amber-200",
+                    )}
+                  >
+                    {st ?? "—"}
+                  </span>
+                  <span className="min-w-0 truncate" title={it.title}>
+                    {clipText(it.title, 160)}
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+        </details>
       </div>
-      <div className="mt-2 hidden md:block">
-        <div className="relative h-4 rounded-sm bg-zinc-50 dark:bg-zinc-950" aria-hidden="true">
+      {/* Every row shares one time axis: with lane rows, all rows keep the badge gutter on the left. */}
+      <div className={cx("hidden md:block", lanes.length > 0 && "pl-[1.625rem]")}>
+        <div className="relative h-4 rounded-sm bg-zinc-100 dark:bg-zinc-950" aria-hidden="true">
           {steps.map((s) => (
-            <Segment key={s.step} s={s} t0={t0} span={span} now={now} />
+            <Segment key={s.step} s={s} t0={t0} span={span} now={now} runOver={runOver} />
           ))}
-          {playhead !== null && <span className="absolute -top-1 -bottom-1 w-0.5 bg-zinc-900 dark:bg-zinc-100" style={{ left: `${pct(playhead, t0, span)}%` }} />}
+          {playhead !== null && <span className="absolute -top-1 -bottom-1 z-[1] w-0.5 bg-zinc-900 dark:bg-zinc-100" style={{ left: `${pct(playhead, t0, span)}%` }} />}
         </div>
         {lanes.map((l) => (
-          <div key={l.step} className="mt-1 flex items-center gap-1.5" aria-hidden="true">
-            <EngineBadge provider={l.lane!} label={laneLabels.get(l.lane!) ?? null} />
-            <div className="relative h-1.5 flex-1 rounded-sm bg-zinc-50 dark:bg-zinc-950">
-              <Segment s={l} t0={t0} span={span} now={now} />
+          <div key={l.step} className="relative mt-0.5 h-5" aria-hidden="true">
+            <span className="absolute top-0 -left-[1.625rem]">
+              <EngineBadge provider={l.lane!} label={laneLabels.get(l.lane!) ?? null} />
+            </span>
+            <div className="absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 rounded-sm bg-zinc-100 dark:bg-zinc-950">
+              <Segment s={l} t0={t0} span={span} now={now} runOver={runOver} />
             </div>
+            {playhead !== null && <span className="absolute top-0.5 bottom-0.5 w-px bg-zinc-900/60 dark:bg-zinc-100/60" style={{ left: `${pct(playhead, t0, span)}%` }} />}
           </div>
         ))}
-        <div className="relative mt-1 h-10" aria-hidden="true">
+        <div className={cx("relative mt-1", line ? "h-8" : "h-2.5")} aria-hidden="true">
           {shownTicks.map((tk) => (
             <span
               key={tk.id}
@@ -167,26 +224,6 @@ export function RunRail({
           <span>+{clockText(span)}</span>
         </p>
       </div>
-      <details className="mt-1 text-[11px]">
-        <summary className="cursor-pointer text-zinc-700 dark:text-zinc-300">Step log ({fmtInt(stepLog.length)})</summary>
-        <ol role="log" aria-live="off" aria-label="Step log" className="mt-1 max-h-40 space-y-0.5 overflow-y-auto rounded bg-zinc-950 p-2 font-mono text-zinc-200">
-          {stepLog.length === 0 && <li className="text-zinc-400">No step stored yet.</li>}
-          {stepLog.map((it) => {
-            const s = parseStep(it);
-            const st: SegmentStatus = s ? (s.status === "started" ? "running" : s.status) : "not_started";
-            return (
-              <li key={it.id} className="flex min-w-0 gap-2">
-                <span className="shrink-0 text-zinc-500">+{clockText(toMs(it.at) - t0)}</span>
-                <span className="shrink-0 text-sky-300">{s ? (STEP_LABEL[s.step] ?? s.step) : "step"}</span>
-                <span className={cx("shrink-0", st === "failed" ? "text-rose-300" : st === "completed" ? "text-emerald-300" : st === "running" ? "text-sky-200" : "text-amber-200")}>{s?.status ?? "—"}</span>
-                <span className="min-w-0 truncate" title={it.title}>
-                  {clipText(it.title, 160)}
-                </span>
-              </li>
-            );
-          })}
-        </ol>
-      </details>
     </section>
   );
 }

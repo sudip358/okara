@@ -3,7 +3,7 @@
  * Console sync (the run's gsc_syncs row + GET /seo/overview), 03 Queries classified by Jev (LiveSeoQueryRow).
  * Plain text only; measured values with their window; no volume, difficulty or projection.
  */
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link } from "react-router";
 import type { ActivityItem, BuyerQueryRow, LiveGscSync, LiveSeoQueryRow, RunActivity, SeoOverview } from "@shared/types";
 import { projectPath } from "@web/lib/project-context";
@@ -11,9 +11,9 @@ import { cx, ErrorState, StateBanner } from "@web/components/ui";
 import { LineChart } from "@web/components/LineChart";
 import { DemandCurveChart } from "@web/components/DemandCurveChart";
 import type { QueryGroup, SegmentStatus } from "../engine";
-import { Shimmer } from "../motion";
-import { JevChip, LTD, LTH, Panel, PanelEmpty, ToneChip, type ToneName } from "../parts";
-import { bandLabel, clipText, fmtInt, jevChipText, positionText, shortDate, urlHost, urlPath, windowShort } from "../text";
+import { Shimmer, staggerStyle, useFollowRow, useSeenPending } from "../motion";
+import { ACCENT, JevChip, LTD, LTH, Panel, PanelEmpty, PendingChip, THEAD, ToneChip, type ToneName } from "../parts";
+import { LIVE_TEXT, bandLabel, clipText, fmtInt, jevChipText, lowerBoundPrefix, positionText, shortDate, urlHost, urlPath, windowShort } from "../text";
 
 // ------------------------------------------------------------------ 01 Pages being read
 export function PagesPanel({
@@ -55,7 +55,7 @@ export function PagesPanel({
       accent="sky"
       reduced={reduced}
       testId="pages"
-      counter={{ value: pagesRead, suffix: pagesPlanned !== null ? `/ ${fmtInt(pagesPlanned)} pages` : "pages read", sub: pagesPlanned !== null ? `of the ${fmtInt(pagesPlanned)}-page limit` : undefined }}
+      counter={{ value: pagesRead, suffix: pagesPlanned !== null ? `/ ${fmtInt(pagesPlanned)} pages` : "pages read", sub: pagesPlanned !== null ? `of the ${fmtInt(pagesPlanned)}\u2011page limit` : undefined }}
       subtitle="The crawler reads verified pages through the SSRF guard; each card is a stored page snapshot."
     >
       {crawl === "skipped" || (crawl === "failed" && reads.length === 0) ? (
@@ -159,20 +159,31 @@ export function GscPanel({
   const cur = overview?.totals.current ?? null;
   const prev = overview?.totals.previous ?? null;
   const notConnected = overview?.state === "setup_required";
-  const earlier = overview?.syncedAt && sync?.syncedAt && overview.syncedAt !== sync.syncedAt ? `From an earlier sync (${shortDate(overview.syncedAt)})` : null;
+  // Replay: this run's sync row is shown only once the seo.gsc_sync step has ended at the playhead.
+  const stepEnded = step === "completed" || step === "partial" || step === "failed" || step === "skipped";
+  const runSync = replaying && !stepEnded ? null : sync;
+  // The charts come from the latest usable sync; say so when that is not this run's (or this run has none yet).
+  const earlier =
+    overview?.syncedAt && (runSync ? runSync.syncedAt !== overview.syncedAt : !replaying) ? `From an earlier sync (${shortDate(overview.syncedAt)})` : null;
+  // Two chips at most (this run's sync; the chart window and its freshness), so the chart keeps its room.
+  const join = (xs: Array<string | null | undefined>) => xs.filter((x): x is string => !!x).join(" · ") || null;
   const captions = [
-    sync ? SOURCE_LABEL[sync.source] ?? sync.source : overview?.source ? SOURCE_LABEL[overview.source] ?? overview.source : null,
-    sync ? `Sync ${sync.status.replace(/_/g, " ")}` : step === "running" ? "Sync running" : null,
-    sync ? `Rows ${fmtInt(sync.rowsFetched)} of ${fmtInt(sync.rowCap)}` : null,
-    sync?.truncated ? "Truncated at cap" : null,
-    overview?.current ? `${windowShort(overview.current)}${overview.previous ? ` vs ${windowShort(overview.previous)}` : ""}` : null,
-    earlier,
-    replaying ? "Charts: current stored state" : null,
+    join([
+      runSync ? SOURCE_LABEL[runSync.source] ?? runSync.source : !replaying && overview?.source ? SOURCE_LABEL[overview.source] ?? overview.source : null,
+      runSync ? `Sync ${runSync.status.replace(/_/g, " ")}` : step === "running" ? "Sync running" : null,
+      runSync ? `Rows ${fmtInt(runSync.rowsFetched)} of ${fmtInt(runSync.rowCap)}` : null,
+      runSync?.truncated ? "Truncated at cap" : null,
+    ]),
+    join([
+      overview?.current ? `${windowShort(overview.current)}${overview.previous ? ` vs ${windowShort(overview.previous)}` : ""}` : null,
+      earlier,
+      replaying ? "Charts: current stored state" : null,
+    ]),
   ].filter((x): x is string => !!x);
   return (
     <Panel
       num="02"
-      title="Search Console sync"
+      title="Search Console"
       accent="sky"
       reduced={reduced}
       testId="gsc"
@@ -187,15 +198,15 @@ export function GscPanel({
         </div>
       ) : (
         <div className="space-y-2">
-          {sync?.status === "failed" && <StateBanner state="failed" title="Sync failed" message={clipText(sync.error, 200) || undefined} />}
-          {step === "skipped" && !sync && <p className="text-xs text-zinc-700 dark:text-zinc-300">{clipText(stepMessage, 200) || "The Search Console step was skipped."}</p>}
+          {runSync?.status === "failed" && <StateBanner state="failed" title="Sync failed" message={clipText(runSync.error, 200) || undefined} />}
+          {step === "skipped" && !runSync && <p className="text-xs text-zinc-700 dark:text-zinc-300">{clipText(stepMessage, 200) || "The Search Console step was skipped."}</p>}
           {overviewError !== null && overviewError !== undefined && !overview ? (
             <ErrorState error={overviewError} title="Could not load Search Console data" />
           ) : !overview ? (
             <Shimmer label="Loading stored Search Console data…" />
           ) : (
             <>
-              <dl className="grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-[11px] tabular-nums sm:grid-cols-4">
+              <dl className="grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-[11px] leading-tight tabular-nums @sm:grid-cols-4">
                 <div className="min-w-0">
                   <dt className="font-sans text-zinc-500 dark:text-zinc-400">Clicks</dt>
                   <dd className="text-zinc-900 dark:text-zinc-100">
@@ -295,7 +306,10 @@ export function QueriesPanel({
   fresh,
   reduced,
   finished,
+  pendingLabel = "Reading…",
 }: {
+  /** Replay pending rows: "Reading…" (shimmer) while the step runs, else "Up next" (static). */
+  pendingLabel?: "Reading…" | "Up next";
   groups: QueryGroup[];
   relevant: number;
   distinct: number;
@@ -306,6 +320,11 @@ export function QueriesPanel({
 }) {
   const buyerBy = new Map((buyer ?? []).map((b) => [b.query.trim().toLowerCase(), b]));
   const win = groups.find((g) => g.gsc)?.gsc?.window ?? null;
+  // Follow the first pending group (replay), else the newest one.
+  const followKey = groups.find((g) => g.pending)?.queryKey ?? groups[groups.length - 1]?.queryKey ?? "";
+  const followRef = useRef<HTMLTableRowElement>(null);
+  useFollowRow(followRef, `${groups.length}|${followKey}`);
+  const seenPending = useSeenPending(groups.filter((g) => g.pending).map((g) => g.queryKey));
   return (
     <Panel
       num="03"
@@ -320,10 +339,10 @@ export function QueriesPanel({
         <PanelEmpty>{finished ? "No query was classified in this run. Query classification needs Jev and Search Console data." : "Waiting for stored query answers."}</PanelEmpty>
       ) : (
         <table className="w-full table-fixed border-collapse text-xs">
-          <caption className="sr-only">Queries classified by Jev in this run</caption>
-          <thead className="border-b border-zinc-200 dark:border-zinc-800">
+          <caption className="sr-only">Queries classified by Jev in this run, in time order; the newest is at the bottom</caption>
+          <thead className={THEAD}>
             <tr>
-              <LTH className="w-[36%]" title={win ? `Clicks · impressions · position: Search Console, ${windowShort(win)} (measured)` : "Search Console (measured)"}>
+              <LTH className="w-[36%]" title={`${win ? `Clicks · impressions · position: Search Console, ${windowShort(win)} (measured)` : "Search Console (measured)"} · ${LIVE_TEXT.lowerBound}`}>
                 Query
                 <span className="block text-[10px]">{win ? `clicks · impr. · pos., GSC ${windowShort(win)}` : "clicks · impr. · pos."}</span>
               </LTH>
@@ -335,16 +354,22 @@ export function QueriesPanel({
           <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
             {groups.map((g) => {
               const b = buyerBy.get(g.query.trim().toLowerCase());
-              const isFresh = [g.relevance, g.intent, g.buyer, g.buyerReady].some((r) => r && fresh.has(r.id));
+              const freshId = [g.relevance, g.intent, g.buyer, g.buyerReady].find((r) => r && fresh.has(r.id))?.id ?? null;
               return (
-                <tr key={g.queryKey} data-pending={g.pending ? "true" : undefined} className={cx(isFresh && "lv-row-in", g.pending && "text-zinc-500 dark:text-zinc-400")}>
+                <tr
+                  key={g.queryKey}
+                  ref={g.queryKey === followKey ? followRef : undefined}
+                  data-pending={g.pending ? "true" : undefined}
+                  className={cx(!g.pending && ACCENT.sky.row, freshId && (seenPending.has(g.queryKey) ? "lv-resolve" : "lv-row-in"), g.pending && "text-zinc-500 dark:text-zinc-400")}
+                  style={freshId ? staggerStyle(fresh, freshId) : undefined}
+                >
                   <LTD className="text-zinc-900 dark:text-zinc-100" title={g.query}>
                     <span className="block truncate">{g.query}</span>
                     <span aria-hidden={g.pending || undefined} className={cx("block truncate font-mono text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400", g.pending && "lv-blur")}>
-                      {g.gsc ? `${fmtInt(g.gsc.clicks)} · ${fmtInt(g.gsc.impressions)} · ${positionText(g.gsc)}` : "no GSC row"}
+                      {g.gsc ? `${lowerBoundPrefix(g.gsc)}${fmtInt(g.gsc.clicks)} · ${lowerBoundPrefix(g.gsc)}${fmtInt(g.gsc.impressions)} · ${positionText(g.gsc)}` : "no GSC row"}
                     </span>
                   </LTD>
-                  <LTD className="overflow-visible">{g.pending ? <Shimmer label="Reading…" /> : <JevCell row={g.relevance} kind="band" />}</LTD>
+                  <LTD className="overflow-visible">{g.pending ? pendingLabel === "Up next" ? <PendingChip label={pendingLabel} /> : <Shimmer label={pendingLabel} /> : <JevCell row={g.relevance} kind="band" />}</LTD>
                   <LTD className="overflow-visible">{g.pending ? null : <JevCell row={g.intent} kind="choice" />}</LTD>
                   <LTD>
                     {g.pending ? null : b ? (

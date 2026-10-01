@@ -6,6 +6,7 @@
  * No ranks without a source, no "cited %" share, no chance / after percentages: counts of stored rows and
  * measured statuses only. We adapt competitor structure, never copy text.
  */
+import { Fragment } from "react";
 import { Link } from "react-router";
 import type { AnswerCoverageRow, CitationEvidenceRow, CompetitorCheckKey, CompetitorPageAssessment, FactorStatus, LiveGeoAnswerRow, PageSkipFactors, SkipFactorKey } from "@shared/types";
 import { projectPath } from "@web/lib/project-context";
@@ -13,7 +14,7 @@ import { cx, ErrorState } from "@web/components/ui";
 import { ASSESSMENT_STATE, VERDICT, checkStatus } from "@web/pages/geo/board/lib";
 import { sourceTypeLabel } from "@web/pages/geo/lib";
 import { Shimmer } from "./motion";
-import { BlockBar, EngineBadge, LTD, LTH, MiniBar, Panel, PanelEmpty, StatusDot, ToneChip, type Accent, type ToneName } from "./parts";
+import { ACCENT, BlockBar, EngineBadge, LTD, LTH, MiniBar, Panel, PanelEmpty, THEAD, ToneChip, type Accent, type ToneName } from "./parts";
 import { LIVE_TEXT, clipText, fmtInt, shortDate, urlHost, urlPath } from "./text";
 
 interface Loadable<T> {
@@ -26,6 +27,9 @@ function LoadState({ state, what }: { state: Loadable<unknown>; what: string }) 
   if (state.error) return <ErrorState error={state.error} title={`Could not load ${what}`} />;
   return <Shimmer label={`Loading ${what}…`} />;
 }
+
+/** "41%" for a whole-number percentage computed from stored rows (n of m is always printed next to it). */
+const fmtPct = (n: number) => `${Math.round(n)}%`;
 
 // ------------------------------------------------------------------ 05 Competitor pages worth adapting
 const COMP_CHECKS: Array<{ key: CompetitorCheckKey; label: string }> = [
@@ -73,32 +77,34 @@ export function CompetitorsPanel({
       ) : (
         <table className="w-full table-fixed border-collapse text-xs">
           <caption className="sr-only">Approved competitor pages and their measured checks</caption>
-          <thead className="border-b border-zinc-200 dark:border-zinc-800">
+          <thead className={THEAD}>
             <tr>
-              <LTH className="w-[30%] sm:w-[24%] md:w-[16%]">Site</LTH>
-              <LTH className="hidden sm:table-cell sm:w-[34%] md:w-[18%]">Page</LTH>
+              <LTH className="w-[40%] @xl:w-[27%]">Site · page</LTH>
               {COMP_CHECKS.map((c) => (
-                <LTH key={c.key} className="hidden md:table-cell md:w-[8%]">
+                <LTH key={c.key} tight className="hidden text-center @xl:table-cell @xl:w-[7.5%]">
                   {c.label}
                 </LTH>
               ))}
-              <LTH className="w-[40%] sm:w-[24%] md:w-[14%]">Cited in</LTH>
-              <LTH className="w-[30%] sm:w-[18%] md:w-[12%]">Verdict</LTH>
+              <LTH className="w-[32%] @xl:w-[22.5%]">Cited in</LTH>
+              <LTH className="w-[28%] @xl:w-[13%]">Verdict</LTH>
             </tr>
           </thead>
-          <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+          <tbody>
             {list.map((a) => {
               const st = ASSESSMENT_STATE[a.state];
               const byKey = new Map(a.checks.map((c) => [c.key, c]));
               const providers = Array.from(new Set(a.citedIn.map((c) => c.provider)));
+              // Few approved pages: each row also shows what their page has (observed reasons, plain text).
+              const reasons = list.length <= 4 && !st.pending ? a.reasons.slice(0, 3) : [];
               return (
-                <tr key={a.id}>
-                  <LTD className="font-semibold text-zinc-900 dark:text-zinc-100" title={a.host}>
-                    <span className="block truncate">{a.host}</span>
-                    <span className="block truncate text-[11px] font-normal text-zinc-500 dark:text-zinc-400">{sourceTypeLabel(a.sourceType)}</span>
-                  </LTD>
-                  <LTD className="hidden font-mono text-zinc-700 sm:table-cell dark:text-zinc-300" title={a.url}>
-                    <a href={a.url} target="_blank" rel="noopener noreferrer nofollow" className="block truncate text-inherit">
+                <Fragment key={a.id}>
+                <tr className={cx("border-t border-zinc-100 first:border-t-0 dark:border-zinc-800", !st.pending && ACCENT.amber.row)}>
+                  <LTD className="text-zinc-900 dark:text-zinc-100" title={`${a.host} · ${sourceTypeLabel(a.sourceType)}`}>
+                    <span className="flex min-w-0 items-baseline gap-1.5">
+                      <span className="truncate font-semibold">{a.host}</span>
+                      <span className="hidden shrink-0 text-[11px] text-zinc-500 @lg:inline dark:text-zinc-400">{sourceTypeLabel(a.sourceType)}</span>
+                    </span>
+                    <a href={a.url} target="_blank" rel="noopener noreferrer nofollow" title={a.url} className="block truncate font-mono text-[11px] text-zinc-600 no-underline hover:underline dark:text-zinc-400">
                       {urlPath(a.url)}
                     </a>
                   </LTD>
@@ -111,19 +117,19 @@ export function CompetitorsPanel({
                         : `${ck.label}: ${status}${c.detail ? ` · ${clipText(c.detail, 80)}` : ""} · measured`
                       : `${ck.label}: not checked`;
                     return (
-                      <LTD key={ck.key} className="hidden md:table-cell">
+                      <LTD key={ck.key} tight className="hidden text-center @xl:table-cell">
                         {st.pending ? <span className="lv-shimmer inline-block h-2 w-8 rounded" aria-hidden="true" /> : <BlockBar status={status} label={ck.label} title={tip} />}
                       </LTD>
                     );
                   })}
-                  <LTD className="whitespace-normal">
-                    <span className="block font-mono text-[11px] text-zinc-700 dark:text-zinc-300">
-                      {fmtInt(a.citedIn.length)} stored answer{a.citedIn.length === 1 ? "" : "s"}
-                    </span>
-                    <span className="mt-0.5 flex flex-wrap gap-0.5">
+                  <LTD>
+                    <span className="flex min-w-0 items-center gap-1">
                       {providers.map((p) => (
                         <EngineBadge key={p} provider={p} />
                       ))}
+                      <span className="min-w-0 truncate font-mono text-[11px] text-zinc-700 dark:text-zinc-300">
+                        {fmtInt(a.citedIn.length)} stored answer{a.citedIn.length === 1 ? "" : "s"}
+                      </span>
                     </span>
                   </LTD>
                   <LTD className="overflow-visible">
@@ -140,6 +146,17 @@ export function CompetitorsPanel({
                     )}
                   </LTD>
                 </tr>
+                {reasons.length > 0 && (
+                  <tr className={ACCENT.amber.row}>
+                    <td colSpan={8} className="pt-0 pb-1.5 text-[11px] text-zinc-600 dark:text-zinc-400">
+                      <span className="line-clamp-2">
+                        <span className="font-medium text-zinc-700 dark:text-zinc-300">What their page has (observed): </span>
+                        {reasons.map((r) => clipText(r, 90)).join(" · ")}
+                      </span>
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               );
             })}
           </tbody>
@@ -226,7 +243,8 @@ export function CoveragePanel({
 }) {
   const rows = (state.data?.rows ?? []).slice().sort((a, b) => GAP_ORDER[a.gap] - GAP_ORDER[b.gap] || (a.text < b.text ? -1 : 1));
   const c = coverageCounts(rows);
-  const pct = c.total > 0 ? `${Math.round((c.noPage / c.total) * 100)}%` : undefined;
+  // Big number as in the reference ("41% of questions we have no page for"): computed by code, n of m below.
+  const pctOf = (n: number, d: number) => Math.round((n / d) * 100);
   return (
     <Panel
       num={num}
@@ -234,7 +252,13 @@ export function CoveragePanel({
       accent={accent}
       reduced={reduced}
       testId="coverage"
-      counter={state.data ? { value: c.noPage, suffix: `of ${fmtInt(c.total)} approved prompts`, sub: `have no matching page${pct ? ` · ${pct}` : ""}` } : null}
+      counter={
+        state.data
+          ? c.total > 0
+            ? { value: pctOf(c.noPage, c.total), format: fmtPct, suffix: "no page", sub: `${fmtInt(c.noPage)} of ${fmtInt(c.total)} approved prompts` }
+            : { value: 0, suffix: "approved prompts", sub: "Approve prompts to match them to your pages" }
+          : null
+      }
       subtitle="Your approved prompts matched to your best page (measured overlap) and to who the engines cited."
       captions={captions}
     >
@@ -247,17 +271,17 @@ export function CoveragePanel({
       ) : (
         <table className="w-full table-fixed border-collapse text-xs">
           <caption className="sr-only">Approved prompts, matched page and who the engines cited</caption>
-          <thead className="border-b border-zinc-200 dark:border-zinc-800">
+          <thead className={THEAD}>
             <tr>
-              <LTH className="w-[42%] sm:w-[32%] md:w-[22%]">Approved prompt</LTH>
-              <LTH className="hidden md:table-cell md:w-[7%]" title="Engines that answered this prompt (no question-volume source exists)">
-                Engines
+              <LTH className="w-[42%] @lg:w-[32%] @xl:w-[25%] @3xl:w-[25%]">Approved prompt</LTH>
+              <LTH tight className="hidden text-center @3xl:table-cell @3xl:w-[5%]" title="Engines asked: engines that answered this prompt (no question-volume source exists)">
+                Eng.
               </LTH>
-              <LTH className="hidden sm:table-cell sm:w-[20%] md:w-[15%]">Our best page</LTH>
-              <LTH className="hidden md:table-cell md:w-[13%]">Match</LTH>
-              <LTH className="w-[30%] sm:w-[18%] md:w-[15%]">AI cites</LTH>
-              <LTH className="w-[28%] sm:w-[16%] md:w-[14%]">Verdict</LTH>
-              <LTH className="hidden sm:table-cell sm:w-[14%] md:w-[14%]">Next step</LTH>
+              <LTH className="hidden @lg:table-cell @lg:w-[20%] @xl:w-[14%] @3xl:w-[14%]">Our best page</LTH>
+              <LTH className="hidden @xl:table-cell @xl:w-[11%]">Match</LTH>
+              <LTH className="w-[30%] @lg:w-[18%] @xl:w-[16%] @3xl:w-[15%]">AI cites</LTH>
+              <LTH className="w-[28%] @lg:w-[16%] @xl:w-[18%] @3xl:w-[15%]">Verdict</LTH>
+              <LTH className="hidden @lg:table-cell @lg:w-[14%] @xl:w-[16%] @3xl:w-[15%]">Next step</LTH>
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
@@ -267,22 +291,20 @@ export function CoveragePanel({
               const asking = askingPrompts?.has(r.promptId) ?? false;
               const pagePath = r.matchedPage ? urlPath(r.matchedPage.url) : null;
               return (
-                <tr key={r.promptId} className="lv-move">
+                <tr key={r.promptId} className={cx("lv-move", !(asking && !answer) && ACCENT[accent].row)}>
                   <LTD className="text-zinc-900 dark:text-zinc-100" title={r.text}>
                     <span className="block truncate">{r.text}</span>
                   </LTD>
-                  <LTD className="hidden font-mono tabular-nums text-zinc-700 md:table-cell dark:text-zinc-300">{fmtInt(r.providersRun)}</LTD>
-                  <LTD className="hidden font-mono text-zinc-700 sm:table-cell dark:text-zinc-300" title={r.matchedPage?.url}>
+                  <LTD tight className="hidden text-center font-mono tabular-nums text-zinc-700 @3xl:table-cell dark:text-zinc-300">{fmtInt(r.providersRun)}</LTD>
+                  <LTD className="hidden font-mono text-[11px] text-zinc-700 @lg:table-cell dark:text-zinc-300" title={r.matchedPage?.url}>
                     {pagePath ?? "—"}
                   </LTD>
-                  <LTD className="hidden md:table-cell" title={r.basis}>
+                  <LTD className="hidden @xl:table-cell" title={r.matchedPage ? `overlap ${r.matchedPage.score.toFixed(2)} · ${METHOD_TAG[r.matchedPage.method]} · ${r.basis}` : r.basis}>
                     {r.matchedPage ? (
-                      <span className="block min-w-0">
-                        <span className="flex min-w-0 items-center gap-1">
-                          <MiniBar value={r.matchedPage.score} label={`overlap ${r.matchedPage.score.toFixed(2)}`} className="w-6 shrink-0" />
-                          <span className="truncate font-mono text-[11px] text-zinc-700 dark:text-zinc-300">overlap {r.matchedPage.score.toFixed(2)}</span>
-                        </span>
-                        <span className="block truncate text-[10px] text-zinc-500 dark:text-zinc-400">{METHOD_TAG[r.matchedPage.method]}</span>
+                      <span className="flex min-w-0 items-center gap-1">
+                        <MiniBar value={r.matchedPage.score} label={`overlap ${r.matchedPage.score.toFixed(2)} · ${METHOD_TAG[r.matchedPage.method]}`} className="w-8 shrink-0" />
+                        <span className="font-mono text-[11px] text-zinc-700 tabular-nums dark:text-zinc-300">{r.matchedPage.score.toFixed(2)}</span>
+                        <span className="sr-only"> overlap, {METHOD_TAG[r.matchedPage.method]}</span>
                       </span>
                     ) : (
                       "—"
@@ -291,8 +313,16 @@ export function CoveragePanel({
                   <LTD>
                     <AiCites row={r} answer={answer} asking={asking} ownHost={ownHost} />
                   </LTD>
-                  <LTD className="overflow-visible">{asking && !answer ? <Shimmer label="Asking…" /> : <ToneChip tone={v.tone}>{v.label}</ToneChip>}</LTD>
-                  <LTD className="hidden text-zinc-700 sm:table-cell dark:text-zinc-300">
+                  <LTD className="overflow-visible">
+                    {asking && !answer ? (
+                      <Shimmer label="Asking…" />
+                    ) : (
+                      <ToneChip tone={v.tone} className="max-w-none">
+                        {v.label}
+                      </ToneChip>
+                    )}
+                  </LTD>
+                  <LTD className="hidden text-[11px] leading-tight whitespace-normal text-zinc-700 @lg:table-cell dark:text-zinc-300">
                     {r.gap === "improve" && pagePath && planPages?.has(pagePath) ? (
                       <Link to={projectPath(projectId, "geo/board")}>{v.next}</Link>
                     ) : r.gap === "create_page" ? (
@@ -315,7 +345,7 @@ export function CoveragePanel({
 export const FACTOR_COLUMNS: Array<{ key: SkipFactorKey; label: string; long: string }> = [
   { key: "answer_first", label: "Answer", long: "Answer first" },
   { key: "entity_facts", label: "Facts", long: "Entity facts" },
-  { key: "sources_cited", label: "Sources", long: "Sources cited" },
+  { key: "sources_cited", label: "Source", long: "Sources cited" },
   { key: "faq_schema", label: "Schema", long: "FAQ schema" },
   { key: "freshness", label: "Fresh", long: "Freshness" },
 ];
@@ -360,23 +390,34 @@ export function evidencePages(evidence: readonly CitationEvidenceRow[], coverage
   return out;
 }
 
+/**
+ * Skip factors of one page: the result, "error", undefined while genuinely being fetched, or "not_loaded"
+ * for a page whose factors are never requested (only the first few pages are).
+ */
+export type SkipLookup = PageSkipFactors | "error" | "not_loaded" | undefined;
+
 export function AiAnswersPanel({
   evidence,
   coverage,
   skipFor,
+  factorPages,
   reduced,
   captions,
   num = "07",
 }: {
   evidence: Loadable<{ rows: CitationEvidenceRow[] }>;
   coverage: AnswerCoverageRow[] | null;
-  skipFor: (pageId: string) => PageSkipFactors | "error" | undefined;
+  skipFor: (pageId: string) => SkipLookup;
+  /** How many pages get factors (for the caption when more rows are listed). */
+  factorPages?: number;
   reduced: boolean;
   captions: string[];
   num?: string;
 }) {
   const rows = evidence.data ? evidencePages(evidence.data.rows, coverage ?? []) : [];
   const c = coverage ? coverageCounts(coverage) : null;
+  const notLoaded = rows.some((r) => r.pageId && skipFor(r.pageId) === "not_loaded");
+  const notLoadedNote = `Factors are loaded for the first ${fmtInt(factorPages ?? 8)} pages only`;
   return (
     <Panel
       num={num}
@@ -384,9 +425,15 @@ export function AiAnswersPanel({
       accent="rose"
       reduced={reduced}
       testId="ai-answers"
-      counter={c ? { value: c.citeUs, suffix: `of ${fmtInt(c.answered)} answered prompts`, sub: "cite our site · latest stored answer per prompt" } : null}
-      subtitle="Stored citations of your pages and five measured page attributes. No likelihood of any kind is shown."
-      captions={captions}
+      counter={
+        c
+          ? c.answered > 0
+            ? { value: Math.round((c.citeUs / c.answered) * 100), format: fmtPct, suffix: "cite us", sub: `${fmtInt(c.citeUs)} of ${fmtInt(c.answered)} answered prompts` }
+            : { value: 0, suffix: "answered prompts", sub: "No stored answer yet" }
+          : null
+      }
+      subtitle="Stored citations of your pages (latest stored answer per prompt) and five measured page attributes. No likelihood of any kind is shown."
+      captions={notLoaded ? [...captions, `${notLoadedNote}.`] : captions}
     >
       {!evidence.data ? (
         <LoadState state={evidence} what="citation evidence" />
@@ -395,59 +442,66 @@ export function AiAnswersPanel({
       ) : (
         <table className="w-full table-fixed border-collapse text-xs">
           <caption className="sr-only">Your pages in stored AI answers, with measured attributes</caption>
-          <thead className="border-b border-zinc-200 dark:border-zinc-800">
+          <thead className={THEAD}>
             <tr>
-              <LTH className="w-[40%] sm:w-[34%] md:w-[21%]">Page</LTH>
-              <LTH className="w-[28%] sm:w-[22%] md:w-[15%]">Cited in</LTH>
+              <LTH className="w-[40%] @lg:w-[34%] @xl:w-[21%]">Page</LTH>
+              <LTH className="w-[28%] @lg:w-[22%] @xl:w-[14%]">Cited in</LTH>
               {FACTOR_COLUMNS.map((f) => (
-                <LTH key={f.key} className="hidden text-center md:table-cell md:w-[5%]" title={f.long}>
+                <LTH key={f.key} tight className="hidden text-center @xl:table-cell @xl:w-[7.5%]" title={f.long}>
                   {f.label}
                 </LTH>
               ))}
-              <LTH className="hidden sm:table-cell sm:w-[22%] md:w-[15%]">Cited alongside</LTH>
-              <LTH className="w-[32%] sm:w-[22%] md:w-[24%]">Next step</LTH>
+              <LTH tight className="hidden @lg:table-cell @lg:w-[22%] @xl:w-[11.5%]" title="Cited alongside: other hosts in the same stored answers">
+                Alongside
+              </LTH>
+              <LTH className="w-[32%] @lg:w-[22%] @xl:w-[16%]">Next step</LTH>
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
             {rows.map((r) => {
               const sf = r.pageId ? skipFor(r.pageId) : undefined;
-              const factors = sf && sf !== "error" ? new Map(sf.factors.map((f) => [f.key, f])) : null;
+              const factors = sf && sf !== "error" && sf !== "not_loaded" ? new Map(sf.factors.map((f) => [f.key, f])) : null;
               const firstMissing = factors ? FACTOR_COLUMNS.find((f) => factors.get(f.key)?.status === "missing") : undefined;
               const next = r.nextStep ?? (firstMissing ? `First missing: ${firstMissing.long}` : "—");
               return (
-                <tr key={r.url}>
+                <tr key={r.url} className={r.citedCount > 0 ? ACCENT.rose.row : undefined}>
                   <LTD className="font-mono text-zinc-900 dark:text-zinc-100" title={r.url}>
                     {urlPath(r.url)}
                   </LTD>
-                  <LTD className="whitespace-normal">
-                    <span className="block font-mono text-[11px] text-zinc-800 dark:text-zinc-200">
-                      Cited in {fmtInt(r.citedCount)} answer{r.citedCount === 1 ? "" : "s"}
-                    </span>
-                    <span className="mt-0.5 flex flex-wrap items-center gap-0.5">
+                  <LTD title={`Cited in ${fmtInt(r.citedCount)} stored answer${r.citedCount === 1 ? "" : "s"}${r.lastCitedAt ? `, last ${shortDate(r.lastCitedAt)}` : ""}`}>
+                    <span className="flex min-w-0 items-center gap-1 whitespace-nowrap">
+                      <span className="font-mono text-[11px] text-zinc-800 tabular-nums dark:text-zinc-200">
+                        <span className="sr-only">Cited in {fmtInt(r.citedCount)} answer{r.citedCount === 1 ? "" : "s"}</span>
+                        <span aria-hidden="true">Cited {fmtInt(r.citedCount)}×</span>
+                      </span>
                       {r.providers.map((p) => (
                         <EngineBadge key={p} provider={p} />
                       ))}
-                      {r.lastCitedAt && <span className="text-[11px] text-zinc-500 dark:text-zinc-400">last {shortDate(r.lastCitedAt)}</span>}
                     </span>
                   </LTD>
                   {FACTOR_COLUMNS.map((fc) => {
                     const f = factors?.get(fc.key);
                     return (
-                      <LTD key={fc.key} className="hidden text-center md:table-cell">
+                      <LTD key={fc.key} tight className="hidden text-center @xl:table-cell">
                         {f ? (
-                          <StatusDot status={f.status} label={fc.long} title={`${fc.long}: ${f.status} · ${clipText(f.measured, 80)} · ${f.method === "heuristic" ? "Heuristic" : "Measured"}`} />
+                          <BlockBar status={f.status} label={fc.long} accent="rose" title={`${fc.long}: ${f.status} · ${clipText(f.measured, 80)} · ${f.method === "heuristic" ? "Heuristic" : "Measured"}`} />
                         ) : r.pageId && sf === undefined ? (
-                          <span className="lv-shimmer inline-block h-2.5 w-2.5 rounded-full" aria-hidden="true" />
+                          // Genuinely pending: this page's factors are being fetched.
+                          <span className="lv-shimmer inline-block h-2 w-7 rounded" aria-hidden="true" />
+                        ) : sf === "not_loaded" ? (
+                          <span className="text-zinc-400 dark:text-zinc-500" title={notLoadedNote}>
+                            —
+                          </span>
                         ) : (
                           <span className="text-zinc-400 dark:text-zinc-500">—</span>
                         )}
                       </LTD>
                     );
                   })}
-                  <LTD className="hidden text-zinc-700 sm:table-cell dark:text-zinc-300" title={r.citedAlongside.map((h) => h.host).join(", ")}>
+                  <LTD className="hidden text-[11px] text-zinc-700 @lg:table-cell dark:text-zinc-300" title={r.citedAlongside.map((h) => h.host).join(", ")}>
                     {r.citedAlongside.length ? r.citedAlongside.slice(0, 3).map((h) => h.host).join(", ") : "—"}
                   </LTD>
-                  <LTD className="whitespace-normal text-zinc-700 dark:text-zinc-300" title={r.reason ?? undefined}>
+                  <LTD className="text-[11px] leading-tight whitespace-normal text-zinc-700 dark:text-zinc-300" title={r.reason ?? undefined}>
                     <span className="line-clamp-2">{next}</span>
                   </LTD>
                 </tr>

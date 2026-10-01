@@ -552,6 +552,11 @@ stay in `GET /runs/:runId/activity`, which is the view's 2 s heartbeat.
 
 **Totals:**
 - `totals` always cover the whole run, regardless of `after`.
+- They are computed only on the **last page of a read**: a page with fewer rows than `limit`. A full page
+  returns `totals: null` (more rows follow right away; keep the previous totals), so a client paging in a
+  long run does not rescan the whole run per page. The SEO feed's `gscSync` follows the same rule.
+- `labels` carry their complete set (with current counts) on the page that carries totals; other pages
+  may carry only part of it.
 - They are computed with grouped queries, never by loading every row. For example, element verdicts group
   by `question_id`, `tier`, the stored answer type, the Noul side (`noul >= 0.5`) and the Choice option,
   read from `answer_json` the same way as the rows (a top-level string `type` is a bare answer, else
@@ -566,9 +571,15 @@ stay in `GET /runs/:runId/activity`, which is the view's 2 s heartbeat.
 - Demo projects return their seeded demo runs' rows, with `labels` including "Demo data - simulated run".
   The demo SEO run seeds Jev element judgments for 6 demo pages (title, meta, intro, schema, freshness,
   topics, page action and action choice, in the runtime `answer_json` format with policy tiers) and query
-  relevance answers for its 8 Search Console queries, so the labelled replay fills "Every SEO element,
-  judged one by one" and "Queries classified by Jev" (`src/worker/demo/fixtures.ts` `DEMO_SEO_JUDGMENTS`,
-  `DEMO_QUERY_RELEVANCE`).
+  relevance answers for its 8 Search Console queries (2.4 s apart), so the labelled replay fills "Every SEO
+  element, judged one by one" and "Queries classified by Jev" (`src/worker/demo/fixtures.ts`
+  `DEMO_SEO_JUDGMENTS`, `DEMO_QUERY_RELEVANCE`). Its step events use the runtime step names with a
+  `started` and a terminal event each (`seo.validate`, `seo.crawl`, `seo.gsc_sync`, `seo.recommend`,
+  `seo.summary`; `geo.validate`, `geo.batch`, `geo_batch:<engine>` per demo lane, `geo.proposals`,
+  `geo.summary`), and the former orchestrator sub-steps are `info` notes, so the run rail, pending rows and
+  lane states replay as in a real run. The demo also seeds a fictional internal link run whose act-tier
+  suggestions the SEO run reuses ("Links" rows, `DEMO_LINK_SUGGESTIONS`) and two fictional approved
+  competitor-page assessments of URLs its answers cite (`DEMO_COMPETITOR_PAGES`, approved after the GEO run).
 
 ### GET /projects/:pid/live/seo?runId=&after=&limit= → `LiveSeoBoardResponse`
 
@@ -630,9 +641,17 @@ Builder `src/worker/live/seo-board.ts`. Sources and cursor keys `{d, f, r, k?}`:
   | others | null |
 
 - **`proposed`:** the candidate recommendation's `suggested_snippet` (clipped to 160). It is never set on
-  a keep row or a rule row. When the candidate's stored `seo.action_choice` maps to an element, it is set
-  only on the action row and on rows of that element's family ("Title + meta" covers Title and Meta), so
-  a meta-description draft is never shown as a new title.
+  a keep row or a rule row. It is set only on rows of the element family ("Title + meta" covers Title and
+  Meta) of the candidate's **decided** action, which `decidedActionElement` derives from the stored rows
+  the way `seo/recommend/decide.ts` decides:
+  - `seo.action_choice` counts only at act or flag tier (a drop or n/a tier is not an answer);
+  - an act-tier "no" on `seo.title_matches_query` or `seo.meta_matches_query` makes it rewrite_title_meta
+    ("Title + meta");
+  - an act-tier `seo.page_action` merge makes it consolidate_duplicate ("Duplicate").
+
+  When the decided action cannot be told from the stored rows (for example a candidate default action),
+  no row gets the snippet. A drop-tier action row never gets it. So a title draft is never shown as a
+  new intro, nor a meta-description draft as a new title.
 - **`gsc`:** current window of the latest usable sync (completed or partial), device rows excluded.
   - Pages: the page's page-dimension rows (`basis` page_rows) when the sync stored any for it, else the
     sum of its query+page rows (`query_page_rows`, a lower bound: anonymized queries are omitted).
@@ -646,11 +665,12 @@ Builder `src/worker/live/seo-board.ts`. Sources and cursor keys `{d, f, r, k?}`:
 
 **Other fields:**
 - **`gscSync`:** the newest `gsc_syncs` row with `run_id` = the run (error clipped to 200). It is null
-  when the run did not sync; the UI then uses `GET /seo/overview` for charts.
+  when the run did not sync (or on a full page, see "Totals"); the UI then uses `GET /seo/overview` for
+  charts.
 - **`labels`:** "Demo data - simulated run" for demo projects; a note that verdicts are code over stored
   answers; the Search Console window when any row carries figures; "No Jev answers were stored in this
-  run: element rows come from rule findings only." for a finished run without provider answers; the
-  lower-bound note when `totals.truncated`.
+  run: rule findings only." for a finished run without provider answers (the web panel uses the same
+  wording); the lower-bound note when `totals.truncated`.
 - **`totals`:**
   - **`elements`:** counts verdicts over element, action, Links and rule rows. Action rows count only
     for candidates with no element-question row in the run (`candidate_key IN (…)` subquery), matching
@@ -685,6 +705,8 @@ Builder `src/worker/live/geo-board.ts`. Sources and cursor keys `{o, r, p?}`:
     null when not exposed.
   - **`latencyMs`:** the `geo_answer%` provider call of the run joined on `request_id`.
   - **`cost`:** the observation's `cost_usd` (null = unknown, never $0) and `cost_is_estimate`.
+  - **`model`, `groundingMode`:** the stored `geo_observations.model` and `grounding_mode` of this answer
+    (the lane header of a replayed run shows the run's model, not the latest configuration).
   - **`matchedPage`:** `coverage/answer-coverage.ts` `matchPrompt` with the answer's own engine search
     queries, over the latest completed crawl of a verified site (titles/H1s of up to 2,000 pages) and the
     latest usable sync's query+page rows for those queries. Loaded once per request, only when the page
@@ -693,7 +715,9 @@ Builder `src/worker/live/geo-board.ts`. Sources and cursor keys `{o, r, p?}`:
   activity lanes: approved prompts of the run's prompt set (the active set while an active run has no
   answer yet), ordered by position, capped by `project_limits.geo_prompts_per_run` (or
   `DEFAULT_PROMPTS_PER_RUN`), at most 200; `[]` when the cap is 0 or less. It is null on later pages or
-  when unknown.
+  when unknown. It reads the CURRENT approvals and cap, so for a finished run the UI lists the prompts the
+  run actually answered as well (a prompt unapproved since still shows its stored answers), and a planned
+  prompt with no stored answer reads "no stored answer", not "not run".
 - **`totals.lanes`:** one entry per provider with answers in the run (board order, then custom lanes).
   Lanes without answers come from `RunActivity.lanes`.
   - `cited`, `named`, `missing`, `failed` and `pending` (stored `ok` answers not yet analysed) are
@@ -706,7 +730,9 @@ Builder `src/worker/live/geo-board.ts`. Sources and cursor keys `{o, r, p?}`:
 - **`totals.truncated`:** true when the answer or citation cap was hit, or a pipeline group cap.
 - **`labels`:** "Demo data - simulated run" for demo projects; "API-sampled answers; consumer apps may
   answer differently."; the outcome definitions; the best-page heuristic note when any answer has a
-  matched page; "N stored answer(s) are awaiting analysis…" when any lane has pending answers; the custom
-  engine note when a custom lane answered; the lower-bound note when truncated.
+  matched page; when any lane has stored answers without an outcome: "N stored answer(s) are awaiting
+  analysis…" while the run is active, else "N stored answer(s) were not analysed; their outcome is not
+  counted." (analysis only runs inside the run, so it will not come later); the custom engine note when a
+  custom lane answered; the lower-bound note when truncated.
 - **Not shown:** a per-run citation rate. The UI derives it from the lane counts and always shows the
   numerator and denominator. There is no score, projection, or prompts-per-second rate.

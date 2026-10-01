@@ -336,7 +336,8 @@ export const DEMO_ANSWERS: DemoAnswer[][] = [
  * the real policy (runs/policy.ts tierFor), so tiers and verdicts are consistent with production rules.
  * Kinds and questions follow recommend/decide.ts (e.g. weak_ctr asks title/meta-match, gate kinds ask only
  * their gate question). `path` is relative to DEMO_ORIGIN; `minutesAgo` falls inside the demo run's
- * "decisions" step. `recKey` marks the candidate a demo recommendation was drafted from (its dedup key).
+ * seo.recommend step, after its query relevance answers, 2.4 s apart. `recKey` marks the candidate a demo
+ * recommendation was drafted from (its dedup key).
  */
 export type DemoJevAnswer =
   | { type: "noul"; noul: number }
@@ -361,9 +362,9 @@ const pick = (choice: string, confidence: number, other: string): DemoJevAnswer 
 });
 
 export const DEMO_SEO_JUDGMENTS: DemoSeoJudgment[] = [
-  { kind: "answer_clarity", path: "/blog/how-to-choose-a-washable-sofa", outcome: "rejected", reason: "low_fit", minutesAgo: 120.76, questions: [{ id: "seo.answer_is_direct", answer: noul(0.91) }] },
+  { kind: "answer_clarity", path: "/blog/how-to-choose-a-washable-sofa", outcome: "rejected", reason: "low_fit", minutesAgo: 120.68, questions: [{ id: "seo.answer_is_direct", answer: noul(0.91) }] },
   {
-    kind: "weak_ctr", path: "/products/brass-table-lamp", outcome: "rejected", reason: "budget", minutesAgo: 120.72,
+    kind: "weak_ctr", path: "/products/brass-table-lamp", outcome: "rejected", reason: "budget", minutesAgo: 120.64,
     questions: [
       { id: "seo.query_page_relevance", answer: noul(0.9) },
       { id: "seo.action_choice", answer: pick("rewrite_title_meta", 0.72, "no_action") },
@@ -371,24 +372,24 @@ export const DEMO_SEO_JUDGMENTS: DemoSeoJudgment[] = [
       { id: "seo.meta_matches_query", answer: noul(0.58) },
     ],
   },
-  { kind: "freshness", path: "/blog/how-to-choose-a-washable-sofa", outcome: "rejected", reason: "low_fit", minutesAgo: 120.68, questions: [{ id: "seo.outdated_information", answer: noul(0.07) }] },
-  { kind: "schema_mismatch", path: "/products/oak-side-table", outcome: "rejected", reason: "budget", minutesAgo: 120.64, questions: [{ id: "seo.schema_content_match", answer: noul(0.34) }] },
+  { kind: "freshness", path: "/blog/how-to-choose-a-washable-sofa", outcome: "rejected", reason: "low_fit", minutesAgo: 120.6, questions: [{ id: "seo.outdated_information", answer: noul(0.07) }] },
+  { kind: "schema_mismatch", path: "/products/oak-side-table", outcome: "rejected", reason: "budget", minutesAgo: 120.56, questions: [{ id: "seo.schema_content_match", answer: noul(0.34) }] },
   {
-    kind: "weak_ctr", path: "/collections/sofas", recKey: "url:sofas:meta", outcome: "selected", reason: null, minutesAgo: 120.6,
+    kind: "weak_ctr", path: "/collections/sofas", recKey: "url:sofas:meta", outcome: "selected", reason: null, minutesAgo: 120.52,
     questions: [
       { id: "seo.query_page_relevance", answer: noul(0.94) },
       { id: "seo.title_matches_query", answer: noul(0.83) },
     ],
   },
   {
-    kind: "declining", path: "/products/oak-side-table", outcome: "rejected", reason: "budget", minutesAgo: 120.56,
+    kind: "declining", path: "/products/oak-side-table", outcome: "rejected", reason: "budget", minutesAgo: 120.48,
     questions: [
       { id: "seo.action_choice", answer: pick("improve_intro_answer", 0.83, "add_section") },
       { id: "seo.page_action", answer: pick("update", 0.62, "keep") },
     ],
   },
   {
-    kind: "coverage_gap", path: "/blog/how-to-choose-a-washable-sofa", outcome: "rejected", reason: "budget", minutesAgo: 120.52,
+    kind: "coverage_gap", path: "/blog/how-to-choose-a-washable-sofa", outcome: "rejected", reason: "budget", minutesAgo: 120.44,
     questions: [
       { id: "seo.action_choice", answer: pick("add_section", 0.86, "no_action") },
       { id: "seo.covers_topic", key: "seo.covers_topic#t1", answer: noul(0.14) },
@@ -396,7 +397,7 @@ export const DEMO_SEO_JUDGMENTS: DemoSeoJudgment[] = [
     ],
   },
   {
-    kind: "weak_ctr", path: "/products/linen-slipcover-sofa", outcome: "rejected", reason: "low_fit", minutesAgo: 120.45,
+    kind: "weak_ctr", path: "/products/linen-slipcover-sofa", outcome: "rejected", reason: "low_fit", minutesAgo: 120.37,
     questions: [
       { id: "seo.query_page_relevance", answer: noul(0.96) },
       { id: "seo.action_choice", answer: pick("no_action", 0.88, "rewrite_title_meta") },
@@ -404,7 +405,7 @@ export const DEMO_SEO_JUDGMENTS: DemoSeoJudgment[] = [
       { id: "seo.meta_matches_query", answer: noul(0.9) },
     ],
   },
-  { kind: "answer_clarity", path: "/collections/table-lamps", outcome: "rejected", reason: "budget", minutesAgo: 120.4, questions: [{ id: "seo.answer_is_direct", answer: noul(0.09) }] },
+  { kind: "answer_clarity", path: "/collections/table-lamps", outcome: "rejected", reason: "budget", minutesAgo: 120.32, questions: [{ id: "seo.answer_is_direct", answer: noul(0.09) }] },
 ];
 
 /** Fictional query relevance answers (Noul) for the demo GSC queries, judged before candidates. */
@@ -417,4 +418,82 @@ export const DEMO_QUERY_RELEVANCE: Array<[string, number]> = [
   ["demo furnishings", 0.98],
   ["table lamps for reading", 0.84],
   ["pet friendly sofa fabric", 0.61],
+];
+
+// ------------------------------------------------------------------ internal link suggestions (Live view panel 08)
+/**
+ * Fictional internal link suggestions of the demo link run (labelled demo data; method "jev" with fictional
+ * should-exist Noul answers tiered by the real policy in the seed). `reused` ones are reused as candidates by
+ * the demo SEO run (question-less decision rows, as recommend/generate.ts stores them), so the replay shows
+ * "Links" rows and panel 08's highlight moves.
+ */
+export interface DemoLinkSuggestion {
+  source: string;
+  target: string;
+  anchor: string;
+  sentence: string;
+  role: "explains_concept" | "deeper_detail" | "broader_guide" | "next_step" | "product_service" | "comparison";
+  shouldExist: number;
+  reused: boolean;
+}
+
+export const DEMO_LINK_SUGGESTIONS: DemoLinkSuggestion[] = [
+  { source: "/blog/how-to-choose-a-washable-sofa", target: "/products/linen-slipcover-sofa", anchor: "linen slipcover sofa", sentence: d("A linen slipcover sofa with removable covers is the easiest to keep clean."), role: "product_service", shouldExist: 0.92, reused: true },
+  { source: "/blog/how-to-choose-a-washable-sofa", target: "/collections/sofas", anchor: "washable sofas", sentence: d("Compare washable sofas by cover fabric, cushion fill and frame."), role: "broader_guide", shouldExist: 0.88, reused: true },
+  { source: "/collections/sofas", target: "/blog/how-to-choose-a-washable-sofa", anchor: "choose a washable sofa", sentence: d("Not sure where to start? Read how to choose a washable sofa."), role: "explains_concept", shouldExist: 0.9, reused: false },
+  { source: "/products/brass-table-lamp", target: "/collections/table-lamps", anchor: "table lamps", sentence: d("See all table lamps in the collection."), role: "broader_guide", shouldExist: 0.86, reused: true },
+  { source: "/", target: "/pages/about", anchor: "about the store", sentence: d("Read more about the store and how we test fabrics."), role: "next_step", shouldExist: 0.62, reused: false },
+];
+
+// ------------------------------------------------------------------ approved competitor pages (Live view panel 05, GEO C)
+/**
+ * Fictional assessments of two pages the demo answers cite (lamp-house.example by Perplexity, marketplace.example
+ * by Gemini), "approved" by the demo user after the GEO run. Every string says demo; nothing was fetched.
+ * Checks follow geo/competitor-pages.ts (Jev checks carry a Noul and tier; measured checks a detail). We adapt
+ * structure, never copy text.
+ */
+export interface DemoCompetitorPage {
+  url: string;
+  verdict: "adapt" | "skip" | "review";
+  wordCount: number;
+  jsonldTypes: string[];
+  checks: Array<{ key: "answer_first" | "depth" | "proof" | "schema" | "freshness" | "author" | "entity" | "faq"; status: "present" | "partial" | "missing" | "unknown"; detail: string | null; noul?: number }>;
+  reasons: string[];
+}
+
+export const DEMO_COMPETITOR_PAGES: DemoCompetitorPage[] = [
+  {
+    url: "https://lamp-house.example/reading-lamps",
+    verdict: "adapt",
+    wordCount: 1240,
+    jsonldTypes: ["Product", "FAQPage"],
+    checks: [
+      { key: "answer_first", status: "present", detail: "Answer in first 38 words", noul: 0.9 },
+      { key: "depth", status: "present", detail: "1,240 words" },
+      { key: "proof", status: "partial", detail: "2 outbound source links" },
+      { key: "schema", status: "present", detail: "Product, FAQPage" },
+      { key: "freshness", status: "present", detail: "Updated 21 days ago" },
+      { key: "author", status: "missing", detail: "No author or byline markup found" },
+      { key: "entity", status: "present", detail: "14 numeric/spec facts", noul: 0.84 },
+      { key: "faq", status: "present", detail: "FAQPage with 6 questions" },
+    ],
+    reasons: [d("Answers the question in the opening"), d("1,240 words"), d("FAQPage with 6 questions"), d("1 HTML table comparing lamp heights")],
+  },
+  {
+    url: "https://marketplace.example/oak-side-tables",
+    verdict: "skip",
+    wordCount: 310,
+    jsonldTypes: ["ItemList"],
+    checks: [
+      { key: "answer_first", status: "missing", detail: "Listing grid; no opening answer", noul: 0.12 },
+      { key: "depth", status: "missing", detail: "310 words" },
+      { key: "proof", status: "missing", detail: "0 outbound source links" },
+      { key: "schema", status: "partial", detail: "ItemList" },
+      { key: "freshness", status: "unknown", detail: null },
+      { key: "author", status: "missing", detail: "No author or byline markup found" },
+      { key: "entity", status: "present", detail: "22 numeric/spec facts", noul: 0.71 },
+      { key: "faq", status: "missing", detail: "No FAQ markup" },
+    ],
+    reasons: [d("Marketplace listing grid"), d("22 numeric/spec facts (prices, sizes)")],
+  },
 ];

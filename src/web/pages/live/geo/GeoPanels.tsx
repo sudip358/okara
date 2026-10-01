@@ -37,8 +37,13 @@ export function HeatmapPanel({
   captions: string[];
 }) {
   const shown = prompts.slice(0, 40);
+  // A failed call is not an answer: only stored answers with an outcome other than failed count.
   let answered = 0;
-  for (const p of shown) for (const l of lanes) if (cell(p.promptId, l.provider).kind === "answer") answered++;
+  for (const p of shown)
+    for (const l of lanes) {
+      const c = cell(p.promptId, l.provider);
+      if (c.kind === "answer" && c.outcome !== "failed") answered++;
+    }
   return (
     <Panel
       num="01"
@@ -47,7 +52,7 @@ export function HeatmapPanel({
       reduced={reduced}
       testId="heatmap"
       counter={{ value: answered, suffix: `of ${fmtInt(shown.length * lanes.length)} pairs answered`, sub: "this run, stored outcomes" }}
-      subtitle="Outcome of this run's answer for each approved prompt and engine: C cited, N named, M missing, F failed."
+      subtitle="Outcome of this run's answer for each approved prompt and engine: C cited, N named, M missing, F failed (not an answer), ? not analysed."
       captions={captions}
     >
       {shown.length === 0 || lanes.length === 0 ? (
@@ -91,10 +96,22 @@ export function HeatmapPanel({
                     );
                   } else if (c.kind === "analysing") {
                     body = <span className="lv-shimmer block h-5 w-full rounded-sm" title={`${name}: analysing`} aria-label={`${name}: analysing`} role="img" />;
+                  } else if (c.kind === "not_analysed") {
+                    body = (
+                      <button
+                        type="button"
+                        aria-label={`${name}, not analysed: '${clipText(p.text, 80)}'`}
+                        title={`${name}: not analysed (the run ended without storing this answer's analysis)`}
+                        onClick={() => onOpen?.(c.answer.observationId, c.answer.promptText)}
+                        className="lv-hatch block h-5 w-full rounded-sm border border-zinc-300 font-mono text-[10px] text-zinc-600 focus-visible:outline-2 focus-visible:outline-sky-600 dark:border-zinc-600 dark:text-zinc-300"
+                      >
+                        ?
+                      </button>
+                    );
                   } else if (c.kind === "pending") {
                     body = <span className="lv-shimmer block h-5 w-full rounded-sm opacity-60" title={`${name}: asking`} aria-label={`${name}: asking`} role="img" />;
                   } else if (c.kind === "not_run") {
-                    body = <span className="lv-hatch block h-5 w-full rounded-sm" title={`${name}: not run`} aria-label={`${name}: not run`} role="img" />;
+                    body = <span className="lv-hatch block h-5 w-full rounded-sm" title={`${name}: no stored answer`} aria-label={`${name}: no stored answer`} role="img" />;
                   } else {
                     body = <span className="block h-5 w-full rounded-sm bg-zinc-100 dark:bg-zinc-800" aria-label={`${name}: no answer yet`} role="img" />;
                   }
@@ -201,7 +218,7 @@ export function CitedInsteadPanel({ bars, reduced }: { bars: CitedInsteadBar[]; 
       reduced={reduced}
       testId="cited-instead"
       counter={bars[0] ? { value: bars[0].count, suffix: "answers", sub: `top host: ${bars[0].host}` } : null}
-      subtitle="First non-own citation per answer, this run."
+      subtitle="First non-own citation per answer that left us out (missing or named), this run."
     >
       {bars.length === 0 ? (
         <PanelEmpty>No answer of this run cited another site instead yet.</PanelEmpty>

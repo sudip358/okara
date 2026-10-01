@@ -1,8 +1,8 @@
 /**
- * One shared poller of GET /projects/:pid/activity/current per project, for the Live view and its nav dot
- * (useSyncExternalStore). Same cadence as the Activity launcher: 10 s idle, 3 s while a run is active,
- * visible tab only; it stops when nothing is subscribed. Never polls more than once per tick however many
- * components read it.
+ * One shared poller of GET /projects/:pid/activity/current per project, for the Activity launcher, the Live
+ * view and its nav dot (useSyncExternalStore): 10 s idle, 3 s while a run is active, visible tab only; it
+ * stops when nothing is subscribed. Never polls more than once per tick however many components read it; a
+ * reload asked for while a request is in flight runs right after it.
  */
 import { useCallback, useSyncExternalStore } from "react";
 import type { CurrentActivityResponse } from "@shared/types";
@@ -20,6 +20,8 @@ interface Entry {
   listeners: Set<() => void>;
   timer: ReturnType<typeof setTimeout> | null;
   inflight: boolean;
+  /** A reload was asked for while a request was in flight. */
+  again: boolean;
   onVisible: (() => void) | null;
 }
 
@@ -30,7 +32,7 @@ const visible = () => typeof document === "undefined" || document.visibilityStat
 function entry(projectId: string): Entry {
   let e = entries.get(projectId);
   if (!e) {
-    e = { snap: EMPTY, listeners: new Set(), timer: null, inflight: false, onVisible: null };
+    e = { snap: EMPTY, listeners: new Set(), timer: null, inflight: false, again: false, onVisible: null };
     entries.set(projectId, e);
   }
   return e;
@@ -50,7 +52,11 @@ function schedule(projectId: string, e: Entry) {
 
 async function poll(projectId: string) {
   const e = entry(projectId);
-  if (e.listeners.size === 0 || e.inflight) return;
+  if (e.listeners.size === 0) return;
+  if (e.inflight) {
+    e.again = true;
+    return;
+  }
   if (!visible()) {
     if (!e.onVisible && typeof document !== "undefined") {
       e.onVisible = () => {
@@ -71,7 +77,10 @@ async function poll(projectId: string) {
     emit(e, { ...e.snap, error: err });
   } finally {
     e.inflight = false;
-    schedule(projectId, e);
+    if (e.again) {
+      e.again = false;
+      void poll(projectId);
+    } else schedule(projectId, e);
   }
 }
 

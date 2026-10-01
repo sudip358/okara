@@ -84,10 +84,11 @@ export function LinksPanel({
   const focusKey = focus ? focus.target.pageId || focus.target.url : null;
   const suggested = suggestions.filter((s) => s.status === "suggested").length;
   const review = suggestions.filter((s) => s.status === "review").length;
+  // The report (counter, buckets, focus card) is the CURRENT stored link run; only the "judged in this run"
+  // marks come from this run's revealed rows.
   const captions = [
-    runRows.length === 0 && r?.generatedAt ? `From the link run on ${shortDate(r.generatedAt)} (not part of this run)` : null,
+    r ? `Report generated ${r.generatedAt ? shortDate(r.generatedAt) : "—"} · current state${replaying ? " · not replayed" : ""}${runRows.length === 0 ? " · not part of this run" : ""}` : null,
     runRows.length > 0 ? `${fmtInt(runRows.length)} link judgment${runRows.length === 1 ? "" : "s"} in this run` : null,
-    replaying && runRows.length === 0 ? "Current state, not replayed" : null,
   ].filter((x): x is string => !!x);
   return (
     <Panel

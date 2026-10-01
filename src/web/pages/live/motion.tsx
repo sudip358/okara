@@ -4,9 +4,9 @@
  * loops that mark GENUINELY pending work (shimmer, live dot). Animations use transform and opacity only.
  * prefers-reduced-motion: CSS keyframes are wrapped in `no-preference`, and tweens are disabled in code.
  */
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
 import { cx } from "@web/components/ui";
-import { retarget, tweenDone, tweenValue, type Tween } from "./engine";
+import { retarget, staggerDelay, tweenDone, tweenValue, type Tween } from "./engine";
 
 export const LIVE_CSS = [
   "@keyframes lv-row-in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}",
@@ -31,6 +31,7 @@ export const LIVE_CSS = [
   ".lv-strip{scrollbar-width:thin}",
   "@media (prefers-reduced-motion:no-preference){",
   ".lv-row-in{animation:lv-row-in 240ms ease-out both,lv-hl 1200ms ease-out 240ms both}",
+  ".lv-resolve{animation:lv-hl 1200ms ease-out both}",
   ".lv-card-in{animation:lv-card-in 280ms ease-out both}",
   ".lv-fade{animation:lv-fade 200ms ease-out both}",
   ".lv-rise{animation:lv-rise 200ms ease-out both}",
@@ -44,7 +45,7 @@ export const LIVE_CSS = [
   ".lv-bar{transition:width 400ms ease-out}",
   ".lv-move{transition:transform 300ms ease-in-out}",
   "}",
-  "@media (prefers-reduced-motion:reduce){.lv-row-in{box-shadow:inset 2px 0 0 rgb(14 165 233)}.lv-blur{filter:none}}",
+  "@media (prefers-reduced-motion:reduce){.lv-row-in,.lv-resolve{box-shadow:inset 2px 0 0 rgb(14 165 233)}.lv-blur{filter:none}}",
 ].join("");
 
 /** True when the viewer asked for reduced motion (SSR/tests: false). */
@@ -122,4 +123,60 @@ export function Crossfade({ k, children, className }: { k: string; children: Rea
       {children}
     </div>
   );
+}
+
+/** The viewer scrolled a panel this recently: rows arriving do not move its scroll position. */
+export const FOLLOW_PAUSE_MS = 10_000;
+
+/**
+ * Keeps a row (the first pending row, else the newest) in view inside its panel body (`[data-panel-body]`)
+ * as stored rows arrive or are revealed, about 55% down the body, unless the viewer scrolled that panel in
+ * the last FOLLOW_PAUSE_MS. Presentation only; never moves the page itself.
+ */
+export function useFollowRow(rowRef: RefObject<HTMLElement | null>, key: string): void {
+  const userAt = useRef(0);
+  useEffect(() => {
+    const el = rowRef.current;
+    const body = el?.closest<HTMLElement>("[data-panel-body]");
+    if (!el || !body) return;
+    if (Date.now() - userAt.current >= FOLLOW_PAUSE_MS && body.scrollHeight > body.clientHeight) {
+      const top = el.getBoundingClientRect().top - body.getBoundingClientRect().top + body.scrollTop;
+      body.scrollTop = Math.max(0, top - body.clientHeight * 0.55);
+    }
+    const mark = () => {
+      userAt.current = Date.now();
+    };
+    body.addEventListener("wheel", mark, { passive: true });
+    body.addEventListener("touchstart", mark, { passive: true });
+    body.addEventListener("pointerdown", mark);
+    body.addEventListener("keydown", mark);
+    return () => {
+      body.removeEventListener("wheel", mark);
+      body.removeEventListener("touchstart", mark);
+      body.removeEventListener("pointerdown", mark);
+      body.removeEventListener("keydown", mark);
+    };
+  }, [rowRef, key]);
+}
+
+/**
+ * Ids that have been on screen as pending rows ("Reading…" / "Up next"), bounded. A stored row arriving with
+ * one of these ids RESOLVES IN PLACE (highlight only, as in the reference) instead of sliding in from nothing,
+ * so a pending row never blinks out before its stored values appear.
+ */
+export function useSeenPending(pendingIds: readonly string[]): ReadonlySet<string> {
+  const ref = useRef<Set<string>>(new Set());
+  if (ref.current.size > 5_000) ref.current = new Set();
+  for (const id of pendingIds) ref.current.add(id);
+  return ref.current;
+}
+
+/**
+ * Inline style staggering a fresh row's entry (lv-row-in = slide + highlight 240 ms later; lv-card-in uses the
+ * first value). Presentation only: rows revealed on the same tick enter top to bottom.
+ */
+export function staggerStyle(fresh: ReadonlySet<string>, id: string): { animationDelay: string } | undefined {
+  if (!fresh.has(id)) return undefined;
+  const d = staggerDelay(fresh, id);
+  return d > 0 ? { animationDelay: `${d}ms, ${d + 240}ms` } : undefined;
 }

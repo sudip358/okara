@@ -11,9 +11,10 @@
  * null; its rowid is kept in the opaque cursor (`p`, at most CURSOR_LIST_MAX) and it is re-sent with the same
  * id once its analysis is stored. Paging otherwise uses per-source rowid marks (cursor.ts).
  *
- * Totals (lanes, pipeline) always cover the whole run. Rules: every query filters workspace_id AND project_id
- * (and run_id) and has a LIMIT; dynamic IN lists stay under D1's 100 bound parameters; untrusted text is
- * clipped plain text; unknown cost stays null (never $0).
+ * Totals (lanes, pipeline) always cover the whole run and are computed only on the last page of a read (fewer
+ * rows than `limit`; null on full pages), so a replay paging in a long run does not rescan the run per page.
+ * Rules: every query filters workspace_id AND project_id (and run_id) and has a LIMIT; dynamic IN lists stay
+ * under D1's 100 bound parameters; untrusted text is clipped plain text; unknown cost stays null (never $0).
  */
 import type {
   BoardLaneProviderId,
@@ -97,6 +98,8 @@ interface ObsRaw {
   prompt_set_id: string | null;
   prompt_text: string;
   status: string;
+  model: string | null;
+  grounding_mode: string | null;
   grounded: number;
   request_id: string | null;
   usage_json: string;
@@ -109,7 +112,7 @@ interface ObsRaw {
 }
 
 /** Analysis subqueries match workspace AND project (same columns as runs/activity.ts). */
-const OBS_COLUMNS = `o.rowid AS rid, o.id, o.provider, o.prompt_id, o.prompt_set_id, o.prompt_text, o.status, o.grounded, o.request_id, o.usage_json,
+const OBS_COLUMNS = `o.rowid AS rid, o.id, o.provider, o.prompt_id, o.prompt_set_id, o.prompt_text, o.status, o.model, o.grounding_mode, o.grounded, o.request_id, o.usage_json,
               o.cost_usd, o.cost_is_estimate, o.created_at,
               EXISTS (SELECT 1 FROM geo_brand_observations b WHERE b.observation_id = o.id AND b.workspace_id = o.workspace_id AND b.project_id = o.project_id) AS analysed,
               (SELECT MAX(b.cited) FROM geo_brand_observations b
@@ -235,9 +238,11 @@ export async function buildLiveGeo(db: Db, project: ProjectRow, runId: string, o
   recommendations.sort(compareAtId);
 
   // ---------------------------------------------------------------- totals, planned prompts, labels
+  // Whole-run totals only on the last page of a read: a full page means more rows follow right away.
+  const lastPage = merged.taken.length < limit;
   const [lanes, pipe, plannedPrompts] = await Promise.all([
-    laneTotals(db, project, run.id),
-    pipelineTotals(db, ws, pid, run.id),
+    lastPage ? laneTotals(db, project, run.id) : Promise.resolve(null),
+    lastPage ? pipelineTotals(db, ws, pid, run.id) : Promise.resolve(null),
     cursor ? Promise.resolve(null) : plannedPromptsOf(db, ws, pid, run.id, active),
   ]);
 
@@ -245,10 +250,10 @@ export async function buildLiveGeo(db: Db, project: ProjectRow, runId: string, o
   if (project.is_demo === 1) labels.push(DEMO_LABEL);
   labels.push(LIVE_GEO_LABELS.apiSampled, LIVE_GEO_LABELS.outcome);
   if (answers.some((a) => a.matchedPage)) labels.push(LIVE_GEO_LABELS.match);
-  const pendingTotal = lanes.lanes.reduce((a, l) => a + l.pending, 0);
-  if (pendingTotal > 0) labels.push(`${pendingTotal} stored answer(s) are awaiting analysis; their outcome is not counted yet.`);
-  if (lanes.lanes.some((l) => isCustomGeoId(l.provider))) labels.push(`Custom GEO engines: ${CUSTOM_GEO_NOTE}.`);
-  const truncated = lanes.truncated || pipe.truncated;
+  const pendingTotal = lanes ? lanes.lanes.reduce((a, l) => a + l.pending, 0) : 0;
+  if (pendingTotal > 0) labels.push(notAnalysedLabel(pendingTotal, active));
+  if (lanes?.lanes.some((l) => isCustomGeoId(l.provider))) labels.push(`Custom GEO engines: ${CUSTOM_GEO_NOTE}.`);
+  const truncated = !!lanes?.truncated || !!pipe?.truncated;
   if (truncated) labels.push(`Totals are lower bounds: the run has more stored rows than a totals read covers (${ACTIVITY_OBSERVATION_CAP} answers).`);
 
   const startedMs = run.started_at ? Date.parse(run.started_at) : NaN;
@@ -270,10 +275,20 @@ export async function buildLiveGeo(db: Db, project: ProjectRow, runId: string, o
     answers,
     plannedPrompts,
     recommendations,
-    totals: { lanes: lanes.lanes, pipeline: pipe.pipeline, truncated },
+    totals: lanes && pipe ? { lanes: lanes.lanes, pipeline: pipe.pipeline, truncated } : null,
     cursor: nextCursor,
     labels,
   };
+}
+
+/**
+ * Label for stored 'ok' answers without an outcome: while the run is active their analysis is still to come;
+ * once it is over it never will (geo/batch.ts analyses inside the run), so they are "not analysed".
+ */
+export function notAnalysedLabel(n: number, active: boolean): string {
+  return active
+    ? `${n} stored answer(s) are awaiting analysis; their outcome is not counted yet.`
+    : `${n} stored answer(s) were not analysed; their outcome is not counted.`;
 }
 
 // ------------------------------------------------------------------ answer enrichment
@@ -366,6 +381,8 @@ async function enrichAnswers(db: Db, project: ProjectRow, runId: string, obs: Ob
       provider: o.provider as BoardLaneProviderId,
       promptId: o.prompt_id,
       promptText: clip(o.prompt_text, PROMPT_TEXT_MAX),
+      model: o.model ? clip(o.model, 120) : null,
+      groundingMode: o.grounding_mode ? clip(o.grounding_mode, 60) : null,
       outcome: outcomeOf(o),
       grounded: o.grounded === 1,
       latencyMs: o.request_id ? (latencyOf.get(o.request_id) ?? null) : null,

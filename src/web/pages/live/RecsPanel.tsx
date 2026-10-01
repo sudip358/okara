@@ -1,16 +1,20 @@
 /**
  * 09 Recommendations drafted and checked (SEO) / 05 Proposals drafted and checked (GEO). The pipeline bar is
- * the run's whole-run stored counts; cards are this run's recommendation rows (newest first). Priority is
- * code-computed with its formula version. Publishing is never offered.
+ * the run's whole-run stored counts (shown live and at the end of a replay; mid-replay the stations show "—",
+ * since whole-run totals would reveal what the replay has not reached); "Awaiting approval" and "Implemented"
+ * are the recommendations' CURRENT status. Cards are this run's recommendation rows (newest first). Priority
+ * is code-computed with its formula version. Publishing is never offered.
  */
 import { Link } from "react-router";
 import type { LivePipelineTotals, LiveRecommendationRow } from "@shared/types";
 import { projectPath } from "@web/lib/project-context";
 import { cx, TierBadge } from "@web/components/ui";
 import { reasonLabel } from "@web/components/DecisionLog";
-import { AnimatedNumber } from "./motion";
+import { AnimatedNumber, staggerStyle } from "./motion";
 import { Panel, PanelEmpty, ToneChip, type Accent } from "./parts";
 import { clipText, fmtInt } from "./text";
+
+export const PIPELINE_LABELS = ["Candidates", "Judged by Jev", "Drafted", "Awaiting approval", "Implemented"] as const;
 
 export function pipelineStations(p: LivePipelineTotals): Array<{ label: string; value: number }> {
   return [
@@ -30,6 +34,7 @@ export function RecsPanel({
   accent = "zinc",
   recs,
   pipeline,
+  replaying = false,
   fresh,
   reduced,
   projectId,
@@ -42,6 +47,8 @@ export function RecsPanel({
   /** Revealed rows, ascending. */
   recs: LiveRecommendationRow[];
   pipeline: LivePipelineTotals | null;
+  /** Mid-replay: whole-run totals are withheld until the replay reaches the end of the run. */
+  replaying?: boolean;
   fresh: ReadonlySet<string>;
   reduced: boolean;
   projectId: string;
@@ -61,9 +68,28 @@ export function RecsPanel({
       counter={{ value: recs.length, suffix: "drafted", sub: "in this run · nothing is published" }}
       subtitle="Writers draft only from stored evidence; priority is computed by code. Approval and publishing stay manual."
     >
+      {!pipeline && replaying && (
+        <div className="mb-2">
+          <p className="mb-1 text-[11px] text-zinc-600 dark:text-zinc-400">Pipeline totals appear at the end of the replay.</p>
+          <ol className="grid grid-cols-2 gap-1 sm:grid-cols-5" aria-label="Pipeline, whole run: shown at the end of the replay">
+            {PIPELINE_LABELS.map((label, i) => (
+              <li key={label} className="relative min-w-0 rounded-md bg-zinc-100 px-2 py-1 dark:bg-zinc-800">
+                <p className="truncate text-[11px] text-zinc-600 dark:text-zinc-400">
+                  <span aria-hidden="true" className="mr-1 font-mono">
+                    {i + 1}
+                  </span>
+                  {label}
+                </p>
+                <span className="font-mono text-lg font-bold text-zinc-400 dark:text-zinc-500">—</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
       {pipeline && (
         <div className="mb-2">
-          <ol className="grid grid-cols-2 gap-1 sm:grid-cols-5" aria-label="Pipeline, whole run (stored counts)">
+          <p className="mb-1 text-[11px] text-zinc-600 dark:text-zinc-400">Whole run · approval and implemented are current status</p>
+          <ol className="grid grid-cols-2 gap-1 sm:grid-cols-5" aria-label="Pipeline, whole run (stored counts; approval and implemented are current status)">
             {pipelineStations(pipeline).map((s, i) => (
               <li key={s.label} className="relative min-w-0 rounded-md bg-zinc-100 px-2 py-1 dark:bg-zinc-800">
                 <p className="truncate text-[11px] text-zinc-600 dark:text-zinc-400">
@@ -93,7 +119,7 @@ export function RecsPanel({
       ) : (
         <ol className="grid min-w-0 grid-cols-1 gap-2 lg:grid-cols-2" aria-label="Recommendations of this run, newest first">
           {cards.map((r) => (
-            <li key={r.id} className={cx("min-w-0 rounded-lg border border-zinc-200 p-2.5 text-xs dark:border-zinc-800", fresh.has(r.id) && "lv-row-in")}>
+            <li key={r.id} className={cx("min-w-0 rounded-lg border border-zinc-200 p-2.5 text-xs dark:border-zinc-800", fresh.has(r.id) && "lv-row-in")} style={staggerStyle(fresh, r.id)}>
               <p className="flex min-w-0 items-center justify-between gap-2">
                 <span className="truncate font-mono font-semibold text-zinc-900 dark:text-zinc-100" title={r.targetLabel}>
                   {r.targetLabel}

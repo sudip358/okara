@@ -1,9 +1,10 @@
 /**
  * Live view header (docs/live-view-design.md section 2): logo square, "Live · SEO agent", project domain,
  * engine letter badges (no vendor logos), SEO | GEO toggle, the status pill with exact honesty wording, the
- * full-screen button, and the honesty strip with deduped label chips.
+ * full-screen button, and the honesty strip: the honesty sentence plus the pinned chips (demo data, the
+ * API-sampled disclosure) on one line; the other deduped data notes sit behind a "N data notes" toggle.
  */
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { cx } from "@web/components/ui";
 import { PulseDot } from "./motion";
 import { EngineBadge } from "./parts";
@@ -11,11 +12,12 @@ import { LIVE_TEXT, dedupeLabels, type LiveMode } from "./text";
 
 export function LivePill({ mode, text, sub }: { mode: LiveMode; text: string; sub?: string | null }) {
   return (
-    <div className="min-w-0 text-right">
+    // `contents`: the pill, its sub line and the honesty strip flow in one wrapping row of the header.
+    <div className="contents">
       <p
         data-testid="live-pill"
         className={cx(
-          "inline-flex max-w-full items-center gap-2 rounded-full border px-3 py-1 font-mono text-xs tabular-nums",
+          "inline-flex max-w-full items-center gap-2 rounded-xl border px-2.5 py-1 text-left font-mono text-[11px] tabular-nums sm:rounded-full sm:px-3 sm:text-xs",
           mode === "live" ? "border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200" : "border-zinc-300 bg-white text-zinc-800 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200",
         )}
       >
@@ -28,7 +30,7 @@ export function LivePill({ mode, text, sub }: { mode: LiveMode; text: string; su
         )}
         <span className="min-w-0 break-words whitespace-normal">{text}</span>
       </p>
-      {sub && <p className="mt-0.5 font-mono text-[11px] text-zinc-600 tabular-nums dark:text-zinc-400">{sub}</p>}
+      {sub && <p className="min-w-0 font-mono text-[11px] text-zinc-600 tabular-nums dark:text-zinc-400">{sub}</p>}
     </div>
   );
 }
@@ -56,10 +58,19 @@ export function LiveHeader({
   replaying: boolean;
   extra?: ReactNode;
 }) {
+  const [notesOpen, setNotesOpen] = useState(false);
   const chips = dedupeLabels([...labels, agent === "geo" && !labels.some((l) => /api-sampled/i.test(l)) ? LIVE_TEXT.apiSampled : null]);
+  const isPinned = (l: string) => /demo data/i.test(l) || /^api-sampled/i.test(l);
+  const pinned = chips.filter(isPinned);
+  const rest = chips.filter((l) => !isPinned(l));
+  const chip = (l: string) => (
+    <span key={l} className="max-w-full truncate rounded bg-zinc-100 px-1.5 py-0.5 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300" title={l}>
+      {l}
+    </span>
+  );
   return (
-    <header className="min-w-0 space-y-2">
-      <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2">
+    <header className="min-w-0 space-y-1.5">
+      <div className="flex min-w-0 items-start justify-between gap-x-4 gap-y-2">
         <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
           <span aria-hidden="true" className="relative inline-block h-5 w-5 shrink-0">
             <span className="absolute inset-0 right-1 bottom-1 rounded-[3px] bg-sky-700 dark:bg-sky-400" />
@@ -93,8 +104,7 @@ export function LiveHeader({
             ))}
           </div>
         </div>
-        <div className="flex min-w-0 items-start gap-2">
-          {pill}
+        <div className="flex shrink-0 items-start gap-2">
           <button
             type="button"
             aria-pressed={fullscreen}
@@ -103,18 +113,36 @@ export function LiveHeader({
             className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-zinc-300 bg-white px-2 text-xs text-zinc-800 hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-sky-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
             <span aria-hidden="true">⛶</span>
-            <span className="sr-only sm:not-sr-only">{fullscreen ? "Exit full screen" : "Enter full screen"}</span>
+            <span className="sr-only lg:not-sr-only">{fullscreen ? "Exit full screen" : "Enter full screen"}</span>
           </button>
         </div>
       </div>
-      <p className="flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-400">
-        <span>{replaying ? LIVE_TEXT.honestyReplay : LIVE_TEXT.honestyLive}</span>
-        {chips.map((l) => (
-          <span key={l} className="max-w-full truncate rounded bg-zinc-100 px-1.5 py-0.5 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
-            {l}
-          </span>
-        ))}
-      </p>
+      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+        {pill}
+        <p className="flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-400">
+          <span>{replaying ? LIVE_TEXT.honestyReplay : LIVE_TEXT.honestyLive}</span>
+          {pinned.map(chip)}
+          {rest.length > 0 && (
+            <button
+              type="button"
+              aria-expanded={notesOpen}
+              onClick={() => setNotesOpen((o) => !o)}
+              className="rounded bg-zinc-100 px-1.5 py-0.5 text-zinc-700 hover:underline focus-visible:outline-2 focus-visible:outline-sky-600 dark:bg-zinc-800 dark:text-zinc-300"
+            >
+              {notesOpen ? "Hide data notes" : `${rest.length} data note${rest.length === 1 ? "" : "s"}`}
+            </button>
+          )}
+        </p>
+      </div>
+      {notesOpen && rest.length > 0 && (
+        <ul className="flex min-w-0 flex-wrap gap-1.5 text-[11px]" aria-label="Data notes">
+          {rest.map((l) => (
+            <li key={l} className="max-w-full min-w-0 rounded bg-zinc-100 px-1.5 py-0.5 break-words text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+              {l}
+            </li>
+          ))}
+        </ul>
+      )}
       {extra}
     </header>
   );

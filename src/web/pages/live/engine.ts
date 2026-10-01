@@ -16,8 +16,10 @@ import type {
   ActivityItem,
   CostUsd,
   LiveGeoAnswerRow,
+  LiveGeoBoardResponse,
   LiveGeoLaneTotals,
   LiveRecommendationRow,
+  LiveSeoBoardResponse,
   LiveSeoElementRow,
   LiveSeoQueryRow,
   Ratio,
@@ -31,8 +33,13 @@ export type Speed = (typeof SPEEDS)[number];
 export const DEFAULT_SPEED: Speed = 10;
 /** Replay: run-time gaps longer than this between stored events are shortened (and labelled). */
 export const IDLE_GAP_MS = 10_000;
-/** Replay: after a shortened gap the playhead lands this long before the next stored event. */
+/** Replay: after a shortened gap the playhead lands at least this long (run time) before the next stored event. */
 export const GAP_LEAD_MS = 1_000;
+/**
+ * Replay: ...and at least this long in WALL time (lead = GAP_LEAD_WALL_MS × speed, below IDLE_GAP_MS), so a
+ * sparse run still reveals about one stored row per ~0.3–0.45 s instead of all of them in a flash.
+ */
+export const GAP_LEAD_WALL_MS = 450;
 /** Replay: pending ("Reading…") rows shown per panel. */
 export const MAX_PENDING = 8;
 /** Live: unlabelled skeleton rows while the recommend step runs. */
@@ -136,6 +143,53 @@ export function mergeById<T extends { id: string; at: string }>(prev: readonly T
   return out.length > max ? out.slice(out.length - max) : out;
 }
 
+// ------------------------------------------------------------------ feeds (merged pages of GET /live/seo, /live/geo)
+export interface SeoFeed {
+  elements: LiveSeoBoardResponse["elements"];
+  queries: LiveSeoBoardResponse["queries"];
+  recommendations: LiveSeoBoardResponse["recommendations"];
+  gscSync: LiveSeoBoardResponse["gscSync"];
+  totals: LiveSeoBoardResponse["totals"] | null;
+  labels: string[];
+}
+
+export interface GeoFeed {
+  answers: LiveGeoBoardResponse["answers"];
+  plannedPrompts: LiveGeoBoardResponse["plannedPrompts"];
+  recommendations: LiveGeoBoardResponse["recommendations"];
+  totals: LiveGeoBoardResponse["totals"] | null;
+  labels: string[];
+}
+
+/**
+ * Labels: the server sends the complete set (with current counts, e.g. "N answers awaiting analysis") on the
+ * page that carries totals (the last page of a read); other pages add to what is kept.
+ */
+function mergeLabels(prev: readonly string[] | undefined, res: { labels: string[]; totals: unknown }): string[] {
+  return res.totals ? Array.from(new Set(res.labels)) : Array.from(new Set([...(prev ?? []), ...res.labels]));
+}
+
+export function mergeSeoFeed(prev: SeoFeed | null, res: LiveSeoBoardResponse): SeoFeed {
+  return {
+    elements: mergeById(prev?.elements ?? [], res.elements),
+    queries: mergeById(prev?.queries ?? [], res.queries),
+    recommendations: mergeById(prev?.recommendations ?? [], res.recommendations),
+    gscSync: res.gscSync ?? prev?.gscSync ?? null,
+    totals: res.totals ?? prev?.totals ?? null,
+    labels: mergeLabels(prev?.labels, res),
+  };
+}
+
+export function mergeGeoFeed(prev: GeoFeed | null, res: LiveGeoBoardResponse): GeoFeed {
+  return {
+    answers: mergeById(prev?.answers ?? [], res.answers),
+    plannedPrompts: prev?.plannedPrompts ?? res.plannedPrompts ?? null,
+    recommendations: mergeById(prev?.recommendations ?? [], res.recommendations),
+    totals: res.totals ?? prev?.totals ?? null,
+    labels: mergeLabels(prev?.labels, res),
+  };
+}
+
 /** Number of events at or before the playhead (binary search; events ascending). null playhead = all. */
 export function revealCount(events: readonly { t: number }[], playhead: number | null): number {
   if (playhead === null) return events.length;
@@ -200,15 +254,20 @@ export function nextTimeAfter(times: readonly number[], p: number): number | nul
   return lo < times.length ? times[lo]! : null;
 }
 
+/** Run time the playhead lands before the next stored event after a shortened gap (see GAP_LEAD_WALL_MS). */
+export function gapLead(speed: number): number {
+  return Math.min(IDLE_GAP_MS - 1, Math.max(GAP_LEAD_MS, GAP_LEAD_WALL_MS * speed));
+}
+
 /**
  * Advance the playhead by `dtWallMs × speed`. When the next stored event (or the end) is more than
- * IDLE_GAP_MS of run time ahead, the playhead first jumps to GAP_LEAD_MS before it.
+ * IDLE_GAP_MS of run time ahead, the playhead first jumps to gapLead(speed) before it (order is unchanged).
  */
 export function advanceClock(c: ReplayClock, dtWallMs: number, times: readonly number[]): ReplayClock {
   if (!c.playing || c.finished) return c;
   let p = c.p;
   const next = nextTimeAfter(times, p) ?? c.tEnd;
-  if (next - p > IDLE_GAP_MS) p = next - GAP_LEAD_MS;
+  if (next - p > IDLE_GAP_MS) p = next - gapLead(c.speed);
   p += Math.max(0, Number.isFinite(dtWallMs) ? dtWallMs : 0) * c.speed;
   if (p >= c.tEnd) return { ...c, p: c.tEnd, playing: false, finished: true };
   return { ...c, p };
@@ -349,9 +408,9 @@ export interface ElementDisplayRow {
 }
 
 /**
- * Rows for panel 04, in one strictly descending time order: pending rows (replay; the next ones at the
- * bottom of the pending block, right above the newest resolved row) then resolved rows, newest first.
- * Action rows show only for candidates with no element row; otherwise they become a "Next:" note.
+ * Rows for panel 04, in ascending time order (as the stored rows were written): resolved rows, oldest of the
+ * kept `maxResolved` first and the newest at the bottom, then (replay) the pending rows under them, the next
+ * one first. Action rows show only for candidates with no element row; otherwise they become a "Next:" note.
  */
 export function elementDisplay(revealedIn: readonly LiveSeoElementRow[], pendingIn: readonly LiveSeoElementRow[] = [], maxResolved = 200): ElementDisplayRow[] {
   const byTime = (a: LiveSeoElementRow, b: LiveSeoElementRow) => compareEvents({ t: toMs(a.at), id: a.id }, { t: toMs(b.at), id: b.id });
@@ -379,7 +438,7 @@ export function elementDisplay(revealedIn: readonly LiveSeoElementRow[], pending
     const r = pending[i]!;
     if (keep(r)) pend.push({ row: r, next: null, pending: true });
   }
-  return [...pend, ...resolved];
+  return [...resolved.reverse(), ...pend.reverse()];
 }
 
 // ------------------------------------------------------------------ SEO: queries
@@ -395,7 +454,10 @@ export interface QueryGroup {
   pending: boolean;
 }
 
-/** Group answers by query (newest group first); a group's cells fill as its answers are revealed. */
+/**
+ * Group answers by query, in ascending time order (newest group at the bottom, then the pending groups of a
+ * replay under it); a group's cells fill as its answers are revealed. `max` keeps the newest groups.
+ */
 export function queryGroups(revealed: readonly LiveSeoQueryRow[], pending: readonly LiveSeoQueryRow[] = [], max = 200): QueryGroup[] {
   const build = (rows: readonly LiveSeoQueryRow[], isPending: boolean, skip: Set<string>) => {
     const map = new Map<string, QueryGroup>();
@@ -418,7 +480,7 @@ export function queryGroups(revealed: readonly LiveSeoQueryRow[], pending: reado
   const resolved = build(revealed, false, new Set()).slice(0, max);
   const seen = new Set(resolved.map((g) => g.queryKey));
   const pend = build(pending, true, seen);
-  return [...pend, ...resolved];
+  return [...resolved.reverse(), ...pend.reverse()];
 }
 
 export interface QueryCounts {
@@ -484,17 +546,24 @@ export const STEP_LABEL: Record<string, string> = {
   "geo.summary": "Summary",
 };
 
-export type StepStatus = "started" | "completed" | "partial" | "failed" | "skipped";
+/**
+ * "info" is a note about a step (e.g. orchestrate.ts "already finished on an earlier attempt; not run again",
+ * geo/batch.ts budget notes): it never changes a step's state.
+ */
+export type StepStatus = "started" | "completed" | "partial" | "failed" | "skipped" | "info";
 const TERMINAL = new Set<StepStatus>(["completed", "partial", "failed", "skipped"]);
+/** geo/batch.ts logs a per-answer analysis failure as `geo_batch:<engine> · failed`: a note, not a lane end. */
+const ANALYSIS_FAILED_PREFIX = "Analysis failed for observation";
 
-/** Step name and status from a `step` item (server detail "<step> · <status>"). */
+/** Step name and status from a `step` item (server detail "<step> · <status>"). Only "started" starts a step. */
 export function parseStep(it: ActivityItem): { step: string; status: StepStatus } | null {
   if (it.kind !== "step" || !it.detail) return null;
   const i = it.detail.lastIndexOf(" · ");
   if (i <= 0) return null;
   const step = it.detail.slice(0, i).trim();
   const raw = it.detail.slice(i + 3).trim();
-  const status: StepStatus = TERMINAL.has(raw as StepStatus) ? (raw as StepStatus) : "started";
+  let status: StepStatus = raw === "started" ? "started" : TERMINAL.has(raw as StepStatus) ? (raw as StepStatus) : "info";
+  if (status === "failed" && step.startsWith("geo_batch:") && (it.title ?? "").includes(ANALYSIS_FAILED_PREFIX)) status = "info";
   return step ? { step, status } : null;
 }
 
@@ -519,6 +588,7 @@ function segmentFor(step: string, events: Array<{ t: number; status: StepStatus;
   let message: string | null = null;
   for (const e of events) {
     message = e.message;
+    if (e.status === "info") continue; // a note: keeps the message (tooltip), never the state
     if (e.status === "started") {
       if (status !== "running") start = e.t;
       end = null;
@@ -526,7 +596,7 @@ function segmentFor(step: string, events: Array<{ t: number; status: StepStatus;
     } else {
       if (start === null) start = e.t;
       end = e.t;
-      status = e.status;
+      status = e.status as SegmentStatus;
     }
   }
   return { step, label: lane ? lane : (STEP_LABEL[step] ?? step), lane, start, end, status, message };
@@ -549,20 +619,26 @@ export function stepSegments(items: readonly ActivityItem[], agent: "seo" | "geo
   return { steps, lanes };
 }
 
-/** Lane state at the replay playhead, from revealed geo_batch:<engine> steps (never invented: no step = queued/idle). */
+/**
+ * Lane state at the replay playhead, from revealed geo_batch:<engine> steps (never invented: no step =
+ * queued/idle). Without a lane step, stored answers mean "asking" only while geo.batch has not ended.
+ */
 export function laneStateAt(items: readonly ActivityItem[], provider: string, answered: number): "queued" | "asking" | "done" | "idle" {
   const st = stepStatus(items, `geo_batch:${provider}`);
   if (st === "running") return "asking";
   if (st !== "not_started") return "done";
-  if (answered > 0) return "asking";
-  return stepStatus(items, "geo.batch") === "running" ? "queued" : "idle";
+  const batch = stepStatus(items, "geo.batch");
+  if (answered > 0) return batch === "running" || batch === "not_started" ? "asking" : "done";
+  return batch === "running" ? "queued" : "idle";
 }
 
+/** A step's state from its started / terminal events; "info" notes are skipped. */
 export function stepStatus(items: readonly ActivityItem[], step: string): SegmentStatus {
   let st: SegmentStatus = "not_started";
   for (const it of items) {
     const s = parseStep(it);
-    if (s?.step === step) st = s.status === "started" ? "running" : s.status;
+    if (s?.step !== step || s.status === "info") continue;
+    st = s.status === "started" ? "running" : s.status;
   }
   return st;
 }
@@ -715,11 +791,14 @@ export interface CitedInsteadBar {
   providers: string[];
 }
 
-/** Hosts by how many of this run's answers cited them first instead of us (top `max`). */
+/**
+ * Hosts by how many of this run's answers that left us out (missing or named) cited them first instead of us
+ * (top `max`): the same rule as the lane stat "Cited instead" and the server's lane totals.
+ */
 export function citedInsteadBars(answers: readonly LiveGeoAnswerRow[], max = 8): CitedInsteadBar[] {
   const m = new Map<string, CitedInsteadBar>();
   for (const a of answers) {
-    if (!a.citedInstead) continue;
+    if (!a.citedInstead || (a.outcome !== "missing" && a.outcome !== "named")) continue;
     const b = m.get(a.citedInstead.host) ?? { host: a.citedInstead.host, sourceType: a.citedInstead.sourceType, count: 0, providers: [] };
     b.count++;
     if (!b.providers.includes(a.provider)) b.providers.push(a.provider);
@@ -733,6 +812,7 @@ export function citedInsteadBars(answers: readonly LiveGeoAnswerRow[], max = 8):
 export type HeatCell =
   | { kind: "answer"; outcome: NonNullable<LiveGeoAnswerRow["outcome"]>; answer: LiveGeoAnswerRow }
   | { kind: "analysing"; answer: LiveGeoAnswerRow }
+  | { kind: "not_analysed"; answer: LiveGeoAnswerRow }
   | { kind: "pending" }
   | { kind: "not_run" }
   | { kind: "none" };
@@ -741,6 +821,8 @@ export type HeatCell =
  * Prompt × engine cell. pending = genuinely pending: live, the lane is queued/asking while the run is active;
  * replay, one of the next stored answers (`pendingKeys`, at most MAX_PENDING). A pair answered later in the
  * replay (`futureKeys`) stays empty; not_run = the run is over (or replayed) and no answer was stored for it.
+ * A stored answer without an outcome is "analysing" only while the run is active; otherwise its analysis
+ * will never come (geo/batch.ts analyses inside the run) and it is "not_analysed".
  */
 export function heatCell(
   revealed: ReadonlyMap<string, LiveGeoAnswerRow>,
@@ -752,7 +834,7 @@ export function heatCell(
 ): HeatCell {
   const key = `${promptId}|${provider}`;
   const a = revealed.get(key);
-  if (a) return a.outcome === null ? { kind: "analysing", answer: a } : { kind: "answer", outcome: a.outcome, answer: a };
+  if (a) return a.outcome !== null ? { kind: "answer", outcome: a.outcome, answer: a } : opts.liveActive ? { kind: "analysing", answer: a } : { kind: "not_analysed", answer: a };
   if (pendingKeys.has(key)) return { kind: "pending" };
   if (futureKeys.has(key)) return { kind: "none" };
   if (opts.liveActive) return opts.laneBusy ? { kind: "pending" } : { kind: "none" };
@@ -812,10 +894,51 @@ export function pickLiveRun(current: readonly RunPick[] | null, requested: strin
 }
 
 // ------------------------------------------------------------------ arrivals (animation + announcements)
-/** Ids to animate for one batch of arrivals: the newest MAX_ANIMATED only (the rest insert instantly). */
+/**
+ * Ids to animate for one batch of arrivals: the newest MAX_ANIMATED only (the rest insert instantly). The set
+ * iterates in time order (oldest first), so rows revealed on the same tick can be staggered (staggerDelay).
+ */
 export function animatedIds(arrived: readonly { id: string; t: number }[], max = MAX_ANIMATED): Set<string> {
   const sorted = arrived.slice().sort((a, b) => b.t - a.t || (a.id < b.id ? 1 : -1));
-  return new Set(sorted.slice(0, max).map((e) => e.id));
+  return new Set(sorted.slice(0, max).reverse().map((e) => e.id));
+}
+
+/** Presentation only: stagger step and cap for rows that arrive (or are revealed) on the same tick. */
+export const STAGGER_MS = 70;
+export const STAGGER_MAX = 8;
+
+/** Animation delay (ms) of a fresh row: its position in the fresh set (time order) × STAGGER_MS, capped. */
+export function staggerDelay(fresh: ReadonlySet<string>, id: string): number {
+  let i = 0;
+  for (const x of fresh) {
+    if (x === id) return Math.min(i, STAGGER_MAX) * STAGGER_MS;
+    i++;
+  }
+  return 0;
+}
+
+/**
+ * Activity items merged by id (newer copy wins), ascending (at, id), capped at `max` (oldest dropped), but
+ * `step` items are never dropped: the rail, the crawl / sync panels and the refetch keys derive from them
+ * (at most a few dozen per run).
+ */
+export function mergeKeepingSteps(prev: readonly ActivityItem[], next: readonly ActivityItem[], max = MAX_EVENTS): ActivityItem[] {
+  const byId = new Map<string, ActivityItem>();
+  for (const it of prev) byId.set(it.id, it);
+  for (const it of next) byId.set(it.id, it);
+  const all = Array.from(byId.values()).sort((a, b) => compareEvents({ t: toMs(a.at), id: a.id }, { t: toMs(b.at), id: b.id }));
+  if (all.length <= max) return all;
+  const drop = all.length - max;
+  const out: ActivityItem[] = [];
+  let dropped = 0;
+  for (const it of all) {
+    if (dropped < drop && it.kind !== "step") {
+      dropped++;
+      continue;
+    }
+    out.push(it);
+  }
+  return out;
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;

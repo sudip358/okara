@@ -118,7 +118,7 @@ describe("SEO panels", () => {
   it("02 Search Console: source, rows of cap, windows, measured totals with difference; not connected shows no zeros", () => {
     const html = render(h(seoPanels.GscPanel, { overview: overview(), overviewError: null, sync: feed.gscSync, step: "completed", stepMessage: null, reduced: false, projectId: "p1", replaying: false }));
     const t = text(html);
-    expect(t).toContain("02 Search Console sync");
+    expect(t).toContain("02 Search Console");
     expect(t).toContain("Search Console API");
     expect(t).toContain("Rows 4,812 of 25,000");
     expect(t).toContain("1–28 Sep vs 4–31 Aug");
@@ -157,8 +157,8 @@ describe("SEO panels", () => {
     expect(t).toContain("Oak Table | Shop");
     expect(t).toContain("Solid Oak Dining Table, 6 Seats");
     expect(t).toContain("≈ 11.2");
-    expect(t).toContain("Clicks GSC 1–28 Sep");
-    expect(html).toContain('title="Clicks (GSC, 1–28 Sep); measured, not projected"');
+    expect(t).toContain("Search Console 1–28 Sep · ≈ = page aggregate");
+    expect(html).toContain("Clicks (GSC, 1–28 Sep); measured, not projected");
     expect(t).toContain("310");
     expect(t).not.toContain("+310");
     expect(t).toContain("Jev act · 0.08");
@@ -168,7 +168,7 @@ describe("SEO panels", () => {
     expect(t).toContain("Next: Title + meta");
     for (const v of ["Change", "Keep", "Review"]) expect(t).toContain(v);
     expect(t).not.toContain("Reading…");
-    expect(html).toContain("border-l-rose-600");
+    expect(html).toContain("shadow-[inset_2px_0_0_var(--color-rose-600)]");
     expect(html).toContain("&lt;script&gt;");
     expect(html).toContain('href="/projects/p1/recommendations/rec1"');
     expectHonest(html);
@@ -181,6 +181,15 @@ describe("SEO panels", () => {
     expect(html).toContain("lv-blur");
     const sk = text(render(h(ElementsPanel, { rows: [], change: 0, judged: 0, skeletons: 3, fresh: NONE, reduced: false, projectId: "p1", runId: "run1", notReplayed: 0, jevMissing: false })));
     expect((sk.match(/Waiting for the next stored judgment/g) ?? []).length).toBe(3);
+  });
+  it("04 replay rows later in the run, before their step starts, are a static 'Up next' (no shimmer, values blurred)", () => {
+    const pending = elementDisplay([], [element({ id: "dec:21", at: at(600), element: "Schema", now: "Product, Offer" })]);
+    const html = render(h(ElementsPanel, { rows: pending, change: 0, judged: 0, skeletons: 0, fresh: NONE, reduced: false, projectId: "p1", runId: "run1", notReplayed: 0, jevMissing: false, pendingLabel: "Up next" }));
+    expect(text(html)).toContain("Up next");
+    expect(html).not.toContain("Reading…");
+    expect(html).not.toContain("lv-shimmer");
+    expect(html).toContain('data-pending="true"');
+    expect(html).toContain("lv-blur");
   });
   it("05 Competitors: Adapt (never steal), host not brand, block bars from stored statuses, cited in N stored answers, Assessing… only while queued", () => {
     const list = [assessment(), assessment({ id: "ca2", url: "https://q.example/x", host: "q.example", state: "queued", verdict: null, checks: [] })];
@@ -203,8 +212,11 @@ describe("SEO panels", () => {
     const html = render(h(proj.CoveragePanel, { state: st({ rows }), reduced: false, projectId: "p1", ownHost: "shop.example", captions: [] }));
     const t = text(html);
     expect(t).toContain("06 Do our pages answer what people ask AI?");
-    expect(t).toContain("1 of 3 approved prompts have no matching page · 33%");
-    expect(t).toContain("overlap 0.46 engine search query");
+    expect(t).toContain("33%");
+    expect(t).toContain("1 of 3 approved prompts");
+    expect(t).toContain("0.46 overlap, engine search query");
+    expect(t).toContain("Eng.");
+    expect(html).toContain('title="Engines asked: engines that answered this prompt (no question-volume source exists)"');
     expect(t).toContain("Page not cited");
     expect(t).toContain("No page");
     expect(t).toContain("Cited");
@@ -237,7 +249,9 @@ describe("SEO panels", () => {
     const html = render(h(proj.AiAnswersPanel, { evidence: st({ rows: [evidenceRow()] }), coverage: [coverageRow(), coverageRow({ promptId: "p3", aiSource: "your_site", gap: "covered" })], skipFor: (id: string) => (id === "pg2" ? sf : undefined), reduced: false, captions: [] }));
     const t = text(html);
     expect(t).toContain("07 How our pages show up in AI answers");
-    expect(t).toContain("1 of 2 answered prompts cite our site");
+    expect(t).toContain("50%");
+    expect(t).toContain("1 of 2 answered prompts");
+    expect(t).toContain("latest stored answer per prompt");
     expect(t).toContain("Cited in 4 answers");
     expect(t).toContain("Cited in 0 answers");
     expect(t).toContain("First missing: Answer first");
@@ -259,10 +273,15 @@ describe("SEO panels", () => {
     expect(t).toContain("+1 judged in this run");
     expectHonest(html);
     const idle = text(render(h(LinksPanel, { report: { data: linkReport(), error: null }, runRows: [], reduced: false, projectId: "p1", replaying: false })));
-    expect(idle).toContain("From the link run on 27 Sep (not part of this run)");
+    expect(idle).toContain("Report generated 27 Sep · current state · not part of this run");
+    // The report is current state: the caption says so whenever it shows, and "not replayed" in a replay.
+    expect(t).toContain("Report generated 27 Sep · current state");
+    expect(t).toContain("1 link judgment in this run");
+    const replay = text(render(h(LinksPanel, { report: { data: linkReport(), error: null }, runRows: [row], reduced: false, projectId: "p1", replaying: true })));
+    expect(replay).toContain("Report generated 27 Sep · current state · not replayed");
   });
   it("09 Recommendations: pipeline stations, rejected reasons, code priority with version, no publish", () => {
-    const html = render(h(RecsPanel, { num: "09", title: "Recommendations drafted and checked", recs: [rec()], pipeline: feed.totals.pipeline, fresh: NONE, reduced: false, projectId: "p1", finished: true }));
+    const html = render(h(RecsPanel, { num: "09", title: "Recommendations drafted and checked", recs: [rec()], pipeline: feed.totals!.pipeline, fresh: NONE, reduced: false, projectId: "p1", finished: true }));
     const t = text(html);
     expect(t).toContain("09 Recommendations drafted and checked");
     for (const s of ["Candidates", "Judged by Jev", "Drafted", "Awaiting approval", "Implemented"]) expect(t).toContain(s);
@@ -279,7 +298,7 @@ describe("run rail, header and replay controls", () => {
   it("rail: step chips, counters, step log with plain-text messages; p50 hidden under 5 latencies", () => {
     const a = activity();
     a.items.push(step("evt:9", 401, "seo.summary", "completed", HOSTILE));
-    const html = render(h(RunRail, { agent: "seo", items: a.items, t0: Date.parse(at(0)), axisEnd: Date.parse(at(432)), playhead: Date.parse(at(200)), pages: { read: 38, planned: 50 }, decisions: a.totals.decisions, providerCalls: 2, laneLabels: new Map() }));
+    const html = render(h(RunRail, { agent: "seo", items: a.items, t0: Date.parse(at(0)), axisEnd: Date.parse(at(432)), playhead: Date.parse(at(200)), pages: { read: 38, planned: 50 }, decisions: a.totals!.decisions, providerCalls: 2, laneLabels: new Map() }));
     const t = text(html);
     for (const s of ["Validate", "Crawl", "Search Console sync", "Judge and draft"]) expect(t).toContain(s);
     expect(t).toContain("calls 2");
@@ -356,8 +375,10 @@ describe("GEO engine column and panels", () => {
     lane: gem,
     board: { provider: "gemini", label: "Gemini API · google_search", model: "gemini-test-model", groundingMode: "google_search", state: "ready", stateDetail: null },
     laneState: "asking",
-    totals: feed.totals.lanes[0],
+    totals: feed.totals!.lanes[0],
     answered: 41,
+    runModel: { model: "gemini-test-model", groundingMode: "google_search" },
+    runActive: true,
     strip: feed.answers.filter((a) => a.provider === "gemini"),
     queued: { provider: "gemini", label: "Gemini", promptText: "sofa for small flat" },
     pending: null,
@@ -383,7 +404,10 @@ describe("GEO engine column and panels", () => {
     expect(t).toContain("Citation rate, this run");
     expect(t).toContain("23 of 98 answers");
     expect(t).toContain("Answered 41");
-    expect(t).toContain("of 60 planned · last 377 ms");
+    expect(t).toContain("of 60 planned · 1 failed · last 377 ms");
+    // Short engine name on top (full lane label as its title), the rest of the label on the model line.
+    expect(html).toMatch(/<h3[^>]*title="Gemini API · google_search"[^>]*>Gemini API<\/h3>/);
+    expect(t).not.toContain("latest configuration");
     expect(t).toContain("Citing us 23");
     expect(t).toContain("Naming us, not citing 10");
     expect(t).toContain("Skipping us 65");
@@ -430,9 +454,14 @@ describe("GEO engine column and panels", () => {
     expect(t).toContain("Cited in 3 stored answers");
     expectHonest(render(h(lane.LaneColumn, props)));
   });
-  it("an unanalysed answer shows Analysing…; custom lanes show mention rate and no B/C/D", () => {
+  it("an unanalysed answer shows Analysing… only while the run is active; custom lanes show mention rate and no B/C/D", () => {
     const t = text(render(h(lane.LaneColumn, { ...props, strip: [answer({ outcome: null })], queued: null })));
     expect(t).toContain("Analysing…");
+    // Finished run or replay: the analysis will never come, so a static "Not analysed" (no shimmer).
+    const done = render(h(lane.LaneColumn, { ...props, runActive: false, laneState: "done", strip: [answer({ outcome: null })], queued: null }));
+    expect(text(done)).toContain("Not analysed");
+    expect(text(done)).not.toContain("Analysing…");
+    expect(done).toMatch(/aria-label="Gemini, Not analysed: /);
     const c = text(render(h(lane.LaneColumn, { ...props, provider: "custom_geo:abc", lane: { ...gem, provider: "custom_geo:abc" }, board: undefined })));
     expect(c).toContain("Mention rate (no web search)");
     expect(c).toContain("mention rate only");
@@ -492,7 +521,7 @@ describe("GEO engine column and panels", () => {
     const t = text(html);
     expect(t).toContain("03 Cited instead, this run");
     expect(t).toContain("reviews.example Review site");
-    expect(t).toContain("First non-own citation per answer, this run.");
+    expect(t).toContain("First non-own citation per answer that left us out (missing or named), this run.");
     expectHonest(html);
   });
 });
@@ -529,7 +558,7 @@ describe("boards and page (composition)", () => {
       }),
     );
     const t = text(html);
-    for (const n of ["01 Pages being read", "02 Search Console sync", "03 Queries classified by Jev", "04 Every SEO element, judged one by one", "05 Competitor pages worth adapting", "06 Do our pages answer what people ask AI?", "07 How our pages show up in AI answers", "08 Internal links judged", "09 Recommendations drafted and checked"])
+    for (const n of ["01 Pages being read", "02 Search Console", "03 Queries classified by Jev", "04 Every SEO element, judged one by one", "05 Competitor pages worth adapting", "06 Do our pages answer what people ask AI?", "07 How our pages show up in AI answers", "08 Internal links judged", "09 Recommendations drafted and checked"])
       expect(t).toContain(n);
     expect(t).toContain("1,284 to change");
     expect(t).toContain("From your latest GEO data, not part of this run");
@@ -573,7 +602,12 @@ describe("boards and page (composition)", () => {
     const t = text(html);
     expect(t.indexOf("OpenAI Responses API · web_search")).toBeLessThan(t.indexOf("Gemini API · google_search"));
     for (const n of ["01 Prompt × engine", "02 Inside the latest answer", "03 Cited instead, this run", "04 Do our pages answer what people ask AI?", "05 Proposals drafted and checked"]) expect(t).toContain(n);
-    expect(t).toContain("gpt-test");
+    // Each lane shows the model stored with THIS run's answers, not the board's latest configuration.
+    expect(t).toContain("gpt-run-model");
+    expect(t).not.toContain("gpt-test");
+    expect(t).not.toContain("latest configuration");
+    // A failed call is not an answer: Gemini's "Answered" is cited + named + missing + pending of its totals.
+    expect(t).toContain("Answered 98 of 3 planned · 1 failed");
     expectHonest(html);
   });
   it("Live page renders its frame (h1, toggle) while looking for runs; the nav dot is silent without an active run", () => {
@@ -587,6 +621,220 @@ describe("boards and page (composition)", () => {
     expect(render(h(LiveNavDot, { projectId: "p1" }))).toBe("");
   });
 });
+
+describe("review fixes: nothing pending that is not pending, nothing shown before it existed", () => {
+  const seo = seoFeed();
+  const geo = geoFeed();
+  const seoData = {
+    overview: st(overview()),
+    buyer: st({ state: "ready", generatedAt: at(0), rows: [], completeness: null, labels: [] }),
+    links: st(linkReport()),
+    competitors: st([assessment()]),
+    coverage: st({ state: "ready", generatedAt: at(0), rows: [coverageRow()], completeness: null, labels: [] }),
+    evidence: st({ state: "ready", generatedAt: at(0), rows: [evidenceRow()], completeness: null, labels: [] }),
+  };
+  const seoBoard = (over: Record<string, unknown>) =>
+    text(
+      render(
+        h(SeoBoard, {
+          projectId: "p1",
+          runId: "run1",
+          ownHost: "shop.example",
+          verified: true,
+          activity: activity(),
+          revealed: buildTimeline(activity().items, { elements: seo.elements, queries: seo.queries, recommendations: seo.recommendations }),
+          upcoming: [],
+          replaying: false,
+          atEnd: true,
+          mode: "finished",
+          fresh: NONE,
+          reduced: false,
+          seo,
+          feedError: null,
+          data: seoData,
+          ...over,
+        }),
+      ),
+    );
+
+  it("07: pages whose factors are never requested show '—' with a caption, never a shimmer", () => {
+    const html = render(
+      h(proj.AiAnswersPanel, { evidence: st({ rows: [evidenceRow()] }), coverage: [coverageRow()], skipFor: () => "not_loaded", factorPages: 8, reduced: false, captions: [] }),
+    );
+    expect(html).not.toContain("lv-shimmer");
+    expect(text(html)).toContain("Factors are loaded for the first 8 pages only.");
+    expect(html).toContain('title="Factors are loaded for the first 8 pages only"');
+    // A requested page still loading is genuinely pending.
+    expect(render(h(proj.AiAnswersPanel, { evidence: st({ rows: [evidenceRow()] }), coverage: [], skipFor: () => undefined, reduced: false, captions: [] }))).toContain("lv-shimmer");
+  });
+
+  it("GEO: a stored answer without an outcome is 'not analysed' (static) once the run is over; failed pairs are not answered", () => {
+    const answers = [answer({ outcome: null }), answer({ id: "obs:f", promptId: "p2", outcome: "failed", citedInstead: null })];
+    const idx = geoLib.answerIndex(answers);
+    const none = new Set<string>();
+    const cell = (pid: string, prov: string) => geoLib.heatCell(idx, none, none, pid, prov, { liveActive: false, laneBusy: false });
+    const html = render(h(geoPanels.HeatmapPanel, { prompts: geo.plannedPrompts, lanes: [{ provider: "gemini", label: "Gemini" }], cell, reduced: false, fresh: NONE, captions: [] }));
+    const t = text(html);
+    expect(html).not.toContain("lv-shimmer");
+    expect(html).toMatch(/aria-label="Gemini, not analysed: /);
+    expect(t).toContain("0 of 3 pairs answered");
+    expect(html).toContain('aria-label="Gemini: no stored answer"');
+    expect(html).not.toContain("not run");
+  });
+
+  it("GEO cards: 'Cited instead' only for answers that left us out; 'Also cited' next to our own citation", () => {
+    const t = text(render(h(lane.LaneColumn, { ...geoLaneProps(), strip: [answer({ outcome: "cited", ownCitedUrl: "https://shop.example/x" })], queued: null })));
+    expect(t).toContain("Also cited: reviews.example via review site");
+    expect(t).not.toContain("Cited instead: reviews.example via review site");
+  });
+
+  it("GEO C and D are labelled current state during a replay; D labels a page-level plan", () => {
+    const t = text(render(h(lane.LaneColumn, { ...geoLaneProps(), replaying: true, planFallback: true })));
+    expect((t.match(/Current state, not replayed/g) ?? []).length).toBe(2);
+    expect(t).toContain("Manual plan · Publishing: manual (not connected)");
+    expect(t).toContain("Rewrite plan for this page (not engine-specific)");
+    // A lane with no answer in the run falls back to the board's model, labelled as the latest configuration.
+    expect(text(render(h(lane.LaneColumn, { ...geoLaneProps(), runModel: null })))).toContain("gemini-test-model (latest configuration)");
+  });
+
+  it("09: pipeline totals are withheld mid-replay and captioned as whole-run / current status otherwise", () => {
+    const mid = text(render(h(RecsPanel, { num: "09", title: "Recommendations drafted and checked", recs: [], pipeline: null, replaying: true, fresh: NONE, reduced: false, projectId: "p1", finished: false })));
+    expect(mid).toContain("Pipeline totals appear at the end of the replay.");
+    expect(mid).not.toMatch(/Candidates \d/);
+    const end = text(render(h(RecsPanel, { num: "09", title: "Recommendations drafted and checked", recs: [rec()], pipeline: seo.totals!.pipeline, fresh: NONE, reduced: false, projectId: "p1", finished: true })));
+    expect(end).toContain("Whole run · approval and implemented are current status");
+  });
+
+  it("02: this run's sync row is not shown before the replay reaches the end of the sync step; live without a sync says 'earlier sync'", () => {
+    const base = { overview: overview(), overviewError: null, stepMessage: null, reduced: false, projectId: "p1" };
+    const mid = text(render(h(seoPanels.GscPanel, { ...base, sync: seo.gscSync, step: "running", replaying: true })));
+    expect(mid).toContain("Sync running");
+    for (const s of ["Search Console API", "Sync completed", "Rows 4,812"]) expect(mid).not.toContain(s);
+    const before = text(render(h(seoPanels.GscPanel, { ...base, sync: { ...seo.gscSync!, status: "failed", error: "boom" }, step: "not_started", replaying: true })));
+    expect(before).not.toContain("Sync failed");
+    const after = text(render(h(seoPanels.GscPanel, { ...base, sync: seo.gscSync, step: "completed", replaying: true })));
+    expect(after).toContain("Rows 4,812 of 25,000");
+    const live = text(render(h(seoPanels.GscPanel, { ...base, sync: null, step: "running", replaying: false })));
+    expect(live).toContain("From an earlier sync (29 Sep)");
+  });
+
+  it("04: the rule-only note says what is stored (never 'not configured'); query sums over query+page rows are lower bounds", () => {
+    const t = text(render(h(ElementsPanel, { rows: elementDisplay(seo.elements.filter((e) => e.role === "rule")), change: 1, judged: 1, skeletons: 0, fresh: NONE, reduced: false, projectId: "p1", runId: "run1", notReplayed: 0, jevMissing: true })));
+    expect(t).toContain("No Jev answers were stored in this run: rule findings only.");
+    expect(t).not.toContain("not configured");
+    const q = text(render(h(seoPanels.QueriesPanel, { groups: queryGroups([seo.queries[0]!].map((x) => ({ ...x, gsc: { ...x.gsc!, basis: "query_page_rows" as const } }))), relevant: 1, distinct: 1, buyer: [], fresh: NONE, reduced: false, finished: true })));
+    expect(q).toContain("≥ 40 · ≥ 1,200 · ≈ 7.1");
+  });
+
+  it("SEO board: live mode never claims 'no Jev answers'; mid-replay hides drafts not yet stored and withholds pipeline totals", () => {
+    const rulesOnly = { ...seo, elements: seo.elements.filter((e) => e.role === "rule") };
+    const live = seoBoard({ mode: "live", seo: rulesOnly, revealed: buildTimeline(activity().items, { elements: rulesOnly.elements }) });
+    expect(live).not.toContain("No Jev answers were stored");
+    const finished = seoBoard({ seo: rulesOnly, revealed: buildTimeline(activity().items, { elements: rulesOnly.elements }) });
+    expect(finished).toContain("No Jev answers were stored in this run: rule findings only.");
+    // Replay before the recommendation row: no "now → proposed" arrow; after it, the draft shows.
+    const noRec = seoBoard({ mode: "replay", replaying: true, atEnd: false, revealed: buildTimeline(activity().items, { elements: seo.elements, queries: seo.queries }) });
+    expect(noRec).not.toContain("proposed: Solid Oak Dining Table");
+    expect(noRec).toContain("Pipeline totals appear at the end of the replay.");
+    const withRec = seoBoard({ mode: "replay", replaying: true, atEnd: false });
+    expect(withRec).toContain("proposed: Solid Oak Dining Table");
+  });
+
+  it("GEO board: lane state at the end of a replay is the server's (never 'Asking'); answered prompts outside the plan keep their rows", () => {
+    const a = activity({
+      run: run({ agent: "geo" }),
+      lanes: [{ provider: "gemini", label: "Gemini API · google_search", state: "done", done: 3, planned: 3, lastLatencyMs: 377 }],
+      items: [step("e1", 0, "geo.batch", "started"), item({ id: "obs:1", at: at(20), kind: "engine_answer", agent: "geo", provider: "gemini", costUsd: 0.0012, costIsEstimate: true, outcome: "missing" })],
+    });
+    const answers = [...geo.answers.filter((x) => x.provider === "gemini"), answer({ id: "obs:9", observationId: "o9", at: at(40), promptId: "p9", promptText: "unplanned prompt answered in the run" })];
+    const props = (over: Record<string, unknown>) => ({
+      projectId: "p1",
+      ownHost: "shop.example",
+      demo: false,
+      activity: a,
+      revealed: buildTimeline(a.items, { answers }),
+      upcoming: [],
+      replaying: true,
+      atEnd: true,
+      mode: "replay",
+      fresh: NONE,
+      reduced: false,
+      geo: { answers, plannedPrompts: geo.plannedPrompts, recommendations: [], totals: geo.totals, labels: [] },
+      feedError: null,
+      data: {
+        board: st({ state: "ready", promptSetVersion: 1, generatedAt: at(0), lanes: [{ provider: "gemini", label: "Gemini API · google_search", model: "gemini-test-model", groundingMode: "google_search", state: "ready" }], labels: [] }),
+        competitors: st([]),
+        plans: st({ state: "ready", generatedAt: at(0), plans: [], labels: [] }),
+        coverage: st({ state: "ready", generatedAt: at(0), rows: [], completeness: null, labels: [] }),
+      },
+      ...over,
+    });
+    const end = text(render(h(GeoBoard, props({}))));
+    expect(end).toContain("· Done");
+    expect(end).not.toContain("Asking");
+    expect(end).toContain("unplanned prompt answered in the run");
+    const mid = text(render(h(GeoBoard, props({ atEnd: false }))));
+    expect(mid).toContain("Asking");
+    expect(mid).toContain("Pipeline totals appear at the end of the replay.");
+  });
+
+  it("rail: a step without a terminal event after the run ended reads 'ended without a result' (no pulse); info notes are neutral", () => {
+    const items = [step("s1", 0, "seo.recommend", "started"), step("s2", 5, "seo.recommend", "info", "Step seo.recommend already finished (completed) on an earlier attempt; not run again.")];
+    const over = render(h(RunRail, { agent: "seo", items, t0: Date.parse(at(0)), axisEnd: Date.parse(at(60)), playhead: null, pages: null, decisions: { act: 0, flag: 0, drop: 0 }, providerCalls: 0, laneLabels: new Map(), runOver: true }));
+    expect(text(over)).toContain("ended without a result");
+    expect(over).not.toContain("lv-pulse");
+    expect(over).toMatch(/text-zinc-400[^>]*>info</);
+    const running = render(h(RunRail, { agent: "seo", items: items.slice(0, 1), t0: Date.parse(at(0)), axisEnd: Date.parse(at(60)), playhead: null, pages: null, decisions: { act: 0, flag: 0, drop: 0 }, providerCalls: 0, laneLabels: new Map(), runOver: false }));
+    expect(running).toContain("lv-pulse");
+  });
+
+  it("header: honesty sentence and pinned chips on one line; other data notes behind a toggle; near-duplicate wordings dropped", () => {
+    const labels = [
+      "Demo data - simulated run",
+      "API-sampled answers; consumer apps may answer differently.",
+      "API-sampled answers; not consumer-app answers (another wording)",
+      "Outcome per stored answer: cited = your site was cited.",
+      "Our best page: a labelled heuristic.",
+    ];
+    const html = render(h(header.LiveHeader, { agent: "geo", domain: "shop.example", engines: [], pill: null, toggle: { seo: true, geo: true, onSelect: () => {} }, fullscreen: false, onFullscreen: () => {}, labels, replaying: false }));
+    const t = text(html);
+    expect(t).toContain("Demo data - simulated run");
+    expect(t).toContain("API-sampled answers; consumer apps may answer differently.");
+    expect(t).not.toContain("another wording");
+    expect(t).toContain("2 data notes");
+    expect(t).not.toContain("Outcome per stored answer");
+    expect(html).toContain('aria-expanded="false"');
+  });
+});
+
+function geoLaneProps() {
+  const feed = geoFeed();
+  return {
+    provider: "gemini",
+    lane: { provider: "gemini", label: "Gemini API · google_search", state: "done", done: 41, planned: 60, lastLatencyMs: 377 } as ActivityLane,
+    board: { provider: "gemini", label: "Gemini API · google_search", model: "gemini-test-model", groundingMode: "google_search", state: "ready", stateDetail: null },
+    laneState: "done",
+    totals: feed.totals!.lanes[0],
+    answered: 98,
+    runModel: { model: "gemini-test-model", groundingMode: "google_search" },
+    runActive: false,
+    strip: feed.answers.filter((a) => a.provider === "gemini"),
+    queued: null,
+    pending: null,
+    skipped: { row: feed.answers[0], total: 9, withPage: 6 },
+    skipFactors: undefined,
+    assessments: [assessment()],
+    assessment: assessment(),
+    approval: null,
+    plans: [plan()],
+    plan: plan(),
+    replaying: false,
+    fresh: NONE,
+    reduced: false,
+    projectId: "p1",
+    demo: false,
+  };
+}
 
 describe("source rules", () => {
   const dir = new URL("../src/web/pages/live/", import.meta.url).pathname;

@@ -23,7 +23,7 @@ import type {
   RunActivity,
 } from "@shared/types";
 import { api } from "@web/lib/api";
-import { useApi, usePolling } from "@web/lib/hooks";
+import { useCurrentRuns } from "@web/pages/live/current-store";
 import { agentLabel } from "@web/lib/format";
 import {
   EmptyState,
@@ -40,7 +40,6 @@ import {
   activityPath,
   announcement,
   catchUp,
-  currentPath,
   elapsedMs,
   finishedText,
   isFinalError,
@@ -484,16 +483,10 @@ export function ActivityLauncher({
   const [shown, setShown] = useState<string | null>(null);
   const [opener, setOpener] = useState<HTMLElement | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
-  const current = useApi<CurrentActivityResponse>(currentPath(projectId), [
-    projectId,
-  ]);
-  const runs = current.data?.runs ?? null;
-  const anyActive = (runs ?? []).some((r) => runIsActive(r.status));
-  usePolling(
-    current.reload,
-    true,
-    anyActive ? POLL.currentActive : POLL.currentIdle,
-  );
+  // The one shared poller of /activity/current per project (also read by the Live view and its nav dot).
+  const current = useCurrentRuns(projectId);
+  const runs = current.runs;
+  const anyActive = current.anyActive;
 
   const reloadCurrent = current.reload;
   useEffect(

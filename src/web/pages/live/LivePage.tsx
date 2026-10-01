@@ -8,7 +8,7 @@
  *   (1× / 10× / 30×), labelled "Replay of the run on <date> · real stored events · N× speed".
  * - Demo projects replay their seeded runs, labelled "Demo data - simulated run".
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent } from "react";
 import { useSearchParams } from "react-router";
 import type { EngineBoardResponse } from "@shared/types";
 import { useApi } from "@web/lib/hooks";
@@ -30,6 +30,7 @@ import {
   initClock,
   itemsOf,
   parseSpeed,
+  parseStep,
   pauseClock,
   pickLiveRun,
   replayBounds,
@@ -52,7 +53,7 @@ import { LIVE_CSS, useReducedMotion } from "./motion";
 import { ReplayControls } from "./ReplayControls";
 import { RunRail } from "./RunRail";
 import { SeoBoard } from "./SeoBoard";
-import { LIVE_TEXT, clockText, fmtInt, pillText, spendPhrase, spendSoFarText, urlHost, type LiveMode } from "./text";
+import { DEMO_LABEL, LIVE_TEXT, fmtInt, pillText, spendPhrase, spendSoFarText, urlHost, type LiveMode } from "./text";
 
 const SPEED_KEY = "okara.live.speed";
 const ANNOUNCE_EVERY_MS = 5_000;
@@ -214,7 +215,7 @@ export function LivePage() {
   useEffect(() => {
     if (mode === "finished" && activity && finishedSeen.current !== activity.run.id) {
       finishedSeen.current = activity.run.id;
-      setAnnounce("Run finished.");
+      setAnnounce(activity.run.status === "completed" ? "Run finished." : `Run ended: ${activity.run.status.replace(/_/g, " ")}.`);
     }
   }, [mode, activity]);
   useEffect(() => {
@@ -223,14 +224,19 @@ export function LivePage() {
 
   // ------------------------------------------------------------------ project-level data
   const items = useMemo(() => itemsOf(revealed), [revealed]);
+  // Refetch keys: the id of a step's latest terminal event (started and info notes never count).
+  const isTerminal = (st: string | undefined) => !!st && st !== "started" && st !== "info";
   const terminal = (step: string) => {
     for (let i = live.items.length - 1; i >= 0; i--) {
-      const d = live.items[i]!.detail ?? "";
-      if (live.items[i]!.kind === "step" && d.startsWith(`${step} · `) && !d.endsWith("· started")) return live.items[i]!.id;
+      const s = parseStep(live.items[i]!);
+      if (s?.step === step && isTerminal(s.status)) return live.items[i]!.id;
     }
     return "";
   };
-  const laneTerminalKey = live.items.filter((i) => i.kind === "step" && i.detail?.startsWith("geo_batch:") && !i.detail.endsWith("· started")).length;
+  const laneTerminalKey = live.items.filter((i) => {
+    const s = parseStep(i);
+    return !!s && s.step.startsWith("geo_batch:") && isTerminal(s.status);
+  }).length;
   const seoData = useSeoProjectData(projectId, agent === "seo" && !!activity, { gsc: terminal("seo.gsc_sync"), recommend: terminal("seo.recommend") });
   const geoData = useGeoProjectData(projectId, agent === "geo" && !!activity, { batch: terminal("geo.batch"), proposals: terminal("geo.proposals"), lanes: String(laneTerminalKey) });
   const seoBoard = useApi<EngineBoardResponse>(agent === "seo" && activity ? boardPaths.board(projectId) : null);
@@ -253,6 +259,12 @@ export function LivePage() {
     else if (document.fullscreenEnabled && el.requestFullscreen) el.requestFullscreen().catch(() => setFocusMode(true));
     else setFocusMode(true);
   }, [focusMode]);
+  // Entering full screen / focus mode moves focus into the view, so its shortcuts (and Escape) work at once.
+  useEffect(() => {
+    if (!(fs || focusMode)) return;
+    const el = rootRef.current;
+    if (el && !el.contains(document.activeElement)) el.focus({ preventScroll: true });
+  }, [fs, focusMode]);
 
   // ------------------------------------------------------------------ replay actions
   const act = useCallback((f: (c: ReplayClock) => ReplayClock) => setClock((c) => (c ? f(c) : c)), [setClock]);
@@ -264,16 +276,24 @@ export function LivePage() {
     [act],
   );
 
-  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
-    const t = e.target as HTMLElement;
-    const tag = t.tagName;
-    const isRange = tag === "INPUT" && (t as HTMLInputElement).type === "range";
-    if ((tag === "INPUT" && !isRange) || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable) return;
+  /**
+   * Shortcuts are handled at document level (the view's root is not where focus lands after navigating):
+   * keys typed in a form control, in the project sidebar or in a dialog are left alone; Escape always leaves
+   * focus mode.
+   */
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === "Escape" && focusMode) {
       setFocusMode(false);
       return;
     }
+    const t = (e.target instanceof HTMLElement ? e.target : document.body) as HTMLElement;
+    const tag = t.tagName;
+    const isRange = tag === "INPUT" && (t as HTMLInputElement).type === "range";
+    if ((tag === "INPUT" && !isRange) || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable) return;
+    const root = rootRef.current;
+    // Inside the view, or nowhere in particular (focus on the page body); never the sidebar or a dialog.
+    if (!root || (!root.contains(t) && t !== document.body && t !== document.documentElement)) return;
     if (e.key === "f" || e.key === "F") {
       e.preventDefault();
       toggleFullscreen();
@@ -299,6 +319,13 @@ export function LivePage() {
       act((c) => seekClock(c, c.p + step));
     }
   };
+  const keyHandler = useRef(onKeyDown);
+  keyHandler.current = onKeyDown;
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => keyHandler.current(e);
+    document.addEventListener("keydown", on);
+    return () => document.removeEventListener("keydown", on);
+  }, []);
   /** Screen-reader users are not chased by moving rows: focus entering a table pauses playback. */
   const onFocus = (e: FocusEvent<HTMLDivElement>) => {
     if (replaying && clock?.playing && (e.target as HTMLElement).closest?.("table")) act(pauseClock);
@@ -312,6 +339,7 @@ export function LivePage() {
   if (activity) {
     pill = pillText({
       mode,
+      status: activity.run.status,
       demo,
       elapsedMs: elapsedMs(activity.run, mode === "live", now),
       spend: activity.totals.spend,
@@ -321,9 +349,9 @@ export function LivePage() {
       gapsShortened: gaps,
     });
     if (replaying && clock) {
-      const total = clock.tEnd - clock.t0;
+      // Run time is on the scrubber ("04:44 / 07:00"); the sub line carries the spend at the playhead.
       const spendNow = clock.finished ? spendPhrase(activity.totals.spend, activity.totals.providerCalls) : spendSoFarText(spendSoFar(revealed));
-      pillSub = `Run time ${clockText(clock.p - clock.t0)} of ${clockText(total)} · ${spendNow}${live.capped ? ` · first ${fmtInt(MAX_EVENTS)} events` : ""}`;
+      pillSub = `${spendNow}${live.capped ? ` · first ${fmtInt(MAX_EVENTS)} events` : ""}`;
     }
   }
   const activeOther = (current.runs ?? []).find((r) => (r.status === "pending" || r.status === "running") && r.id !== runId) ?? null;
@@ -333,17 +361,29 @@ export function LivePage() {
     for (const l of activity?.lanes ?? []) if (!m.has(l.provider)) m.set(l.provider, l.label);
     return Array.from(m, ([provider, label]) => ({ provider, label }));
   }, [boardLanes, activity?.lanes]);
+  // The pill already starts with "Demo data - simulated run" whenever a run is shown: no second chip for it.
   const labels = [
     ...(agent === "seo" ? (live.seo?.labels ?? []) : (live.geo?.labels ?? [])),
     ...(agent === "geo" ? (geoData.board.data?.labels ?? []) : []),
-    ...(demo ? ["Demo data - simulated run"] : []),
-  ];
+    ...(demo ? [DEMO_LABEL] : []),
+  ].filter((l) => !(activity && demo && l.trim().toLowerCase() === DEMO_LABEL.toLowerCase()));
   const onSelectAgent = (a: "seo" | "geo") => {
     if (a === agent && !requested) return;
     setParams({ mode: a });
   };
 
   // ------------------------------------------------------------------ body
+  const replayControls =
+    replaying && clock ? (
+      <ReplayControls
+        clock={clock}
+        onToggle={() => act(togglePlay)}
+        onRestart={() => act(restartClock)}
+        onEnd={() => act(skipToEnd)}
+        onSpeed={onSpeed}
+        onSeek={(p) => act((c) => seekClock(c, p))}
+      />
+    ) : null;
   let body;
   if (!runId) {
     body =
@@ -382,7 +422,7 @@ export function LivePage() {
     const t0 = bounds?.t0 ?? Date.now();
     const axisEnd = mode === "live" ? Math.max(now, t0 + 1000) : (bounds?.tEnd ?? t0);
     body = (
-      <div className="min-w-0 space-y-4">
+      <div className="min-w-0 space-y-3">
         {live.loading ? (
           <LoadingState label={`Loading stored events… ${fmtInt(live.loaded)}${live.capped ? ` · first ${fmtInt(MAX_EVENTS)} events` : ""}`} />
         ) : (
@@ -397,6 +437,8 @@ export function LivePage() {
               decisions={atEnd ? activity.totals.decisions : decisionCounts(items)}
               providerCalls={providerCalls}
               laneLabels={new Map(engines.map((e) => [e.provider, e.label]))}
+              runOver={!activity.active && atEnd}
+              controls={replayControls}
             />
             {agent === "seo" ? (
               <SeoBoard
@@ -443,10 +485,10 @@ export function LivePage() {
   return (
     <div
       ref={rootRef}
-      onKeyDown={onKeyDown}
+      tabIndex={-1}
       onFocusCapture={onFocus}
       className={cx(
-        "lv-root min-w-0 space-y-4 bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100",
+        "lv-root min-w-0 space-y-3 bg-zinc-50 text-zinc-900 outline-none dark:bg-zinc-950 dark:text-zinc-100",
         (fs || focusMode) && "fixed inset-0 z-50 overflow-x-hidden overflow-y-auto p-4 sm:p-6",
       )}
     >
@@ -464,16 +506,6 @@ export function LivePage() {
         replaying={replaying}
         extra={
           <>
-            {replaying && clock && (
-              <ReplayControls
-                clock={clock}
-                onToggle={() => act(togglePlay)}
-                onRestart={() => act(restartClock)}
-                onEnd={() => act(skipToEnd)}
-                onSpeed={onSpeed}
-                onSeek={(p) => act((c) => seekClock(c, p))}
-              />
-            )}
             {mode === "finished" && (
               <div className="flex flex-wrap items-center gap-2 text-xs">
                 <span className="font-medium">Run finished. Panels keep the stored rows.</span>

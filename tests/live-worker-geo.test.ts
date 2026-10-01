@@ -173,7 +173,7 @@ describe("live GEO feed: answers", () => {
     const after = await seedObs(ctx.db, ctx.ws, ctx.pid, run, { at: ago(10), self: { mentioned: 1, cited: 1 } });
     const a = await build(ctx, run);
     expect(a.answers.map((x) => x.observationId)).toEqual([first]); // the held answer stops the source
-    expect(a.totals.lanes[0]).toMatchObject({ provider: "gemini", missing: 1, cited: 1, pending: 1 });
+    expect(a.totals!.lanes[0]).toMatchObject({ provider: "gemini", missing: 1, cited: 1, pending: 1 });
     expect(a.labels).toContain("1 stored answer(s) are awaiting analysis; their outcome is not counted yet.");
     await ctx.db.batch([selfRow(ctx.ws, ctx.pid, held, { mentioned: 1, cited: 0 })]);
     const b = await build(ctx, run, a.cursor);
@@ -198,6 +198,19 @@ describe("live GEO feed: answers", () => {
     expect(c.answers.map((x) => [x.id, x.outcome])).toEqual([[`obs:${slow}`, "cited"]]);
     expect(decodeLiveGeoCursor(c.cursor)!.p).toBeUndefined();
     expect((await build(ctx, run, c.cursor)).answers).toEqual([]);
+  });
+
+  it("a finished run's unanalysed answer is 'not analysed' (its analysis will never come), never 'awaiting analysis'", async () => {
+    const ctx = await setup();
+    const run = await seedRun(ctx.db, ctx.ws, ctx.pid, "geo", "partial");
+    const lost = await seedObs(ctx.db, ctx.ws, ctx.pid, run, { at: t(20) });
+    const r = await build(ctx, run);
+    expect(r.answers.map((x) => [x.observationId, x.outcome])).toEqual([[lost, null]]);
+    expect(r.labels).toContain("1 stored answer(s) were not analysed; their outcome is not counted.");
+    expect(r.labels.some((l) => l.includes("awaiting analysis"))).toBe(false);
+    // Each answer carries the model and grounding mode it was stored with.
+    expect(r.answers[0]).toHaveProperty("model");
+    expect(r.answers[0]).toHaveProperty("groundingMode");
   });
 
   it("never holds answers of a finished run", async () => {
@@ -232,7 +245,7 @@ describe("live GEO feed: answers", () => {
     }
     const r = await build(ctx, run);
     expect(r.recommendations.every((x) => x.agent === "geo" && x.targetLabel === "Site")).toBe(true);
-    expect(r.totals.pipeline).toMatchObject({ created: 10 });
+    expect(r.totals!.pipeline).toMatchObject({ created: 10 });
   });
 });
 
@@ -250,11 +263,11 @@ describe("live GEO feed: totals and matching", () => {
     await seedObs(ctx.db, ctx.ws, ctx.pid, run, { provider: "perplexity", at: t(6), cost: 0.004 });
     await seedObs(ctx.db, ctx.ws, ctx.pid, other, { provider: "openai_geo", at: t(7), self: { mentioned: 0, cited: 0 } }); // another run
     const r = await build(ctx, run);
-    expect(r.totals.lanes).toEqual([
+    expect(r.totals!.lanes).toEqual([
       { provider: "gemini", cited: 1, named: 1, missing: 1, failed: 1, pending: 0, cost: { value: 0.007, isEstimate: true }, citedInstead: { host: "b.example", sourceType: "other", answers: 2 } },
       { provider: "perplexity", cited: 0, named: 0, missing: 1, failed: 0, pending: 1, cost: { value: null, isEstimate: true }, citedInstead: { host: "c.example", sourceType: "other", answers: 1 } },
     ]);
-    expect(r.totals.truncated).toBe(false);
+    expect(r.totals!.truncated).toBe(false);
   });
 
   it("matches our best page from the answer's engine search queries and Search Console, else title/H1 overlap", async () => {
@@ -299,8 +312,10 @@ describe("live GEO feed: totals and matching", () => {
     }
     const ids = new Set<string>();
     let c: string | null = null;
+    const pages: LiveGeoBoardResponse[] = [];
     for (let i = 0; i < 10; i++) {
       const r: LiveGeoBoardResponse = await build(ctx, run, c, 200);
+      pages.push(r);
       if (r.answers.length === 0) break;
       r.answers.forEach((x) => {
         expect(ids.has(x.id)).toBe(false);
@@ -311,8 +326,13 @@ describe("live GEO feed: totals and matching", () => {
       c = r.cursor;
     }
     expect(ids.size).toBe(300);
-    const totals = (await build(ctx, run)).totals.lanes;
+    // Whole-run totals only on the last page of a read: the full first page has none, the short second has them.
+    expect(pages[0]!.answers).toHaveLength(200);
+    expect(pages[0]!.totals).toBeNull();
+    expect(pages[1]!.answers).toHaveLength(100);
+    const totals = pages[1]!.totals!.lanes;
     expect(totals.map((l) => [l.provider, l.missing])).toEqual([["openai_geo", 100], ["gemini", 100], ["perplexity", 100]]);
+    expect((await build(ctx, run, c, 200)).totals!.lanes).toEqual(totals);
   });
 });
 
@@ -332,7 +352,7 @@ describe("live GEO feed: labelled demo replay", () => {
     expect(new Set(r.answers.map((a) => a.outcome))).toEqual(new Set(["cited", "named", "missing", "failed"]));
     expect(r.answers.every((a) => a.cost.value === null && a.latencyMs === null)).toBe(true); // demo: unknown, never $0
     expect(r.recommendations).toHaveLength(2);
-    expect(r.totals.lanes.map((l) => l.provider)).toEqual(["gemini", "perplexity"]);
+    expect(r.totals!.lanes.map((l) => l.provider)).toEqual(["gemini", "perplexity"]);
     // The same answers, with the same ids, as the activity feed's engine_answer items.
     const act = (await call(`/projects/${demo.id}/runs/${geoRun}/activity?limit=200`)).json.data;
     const answerIds = act.items.filter((i: { kind: string }) => i.kind === "engine_answer").map((i: { id: string }) => i.id).sort();

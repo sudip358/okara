@@ -17,9 +17,11 @@ import { contextInsertStatement, createProject } from "../platform/projects";
 import {
   DEMO_ANSWERS,
   DEMO_BRAND,
+  DEMO_COMPETITOR_PAGES,
   DEMO_FINDINGS,
   DEMO_GSC_ROWS,
   DEMO_LABEL,
+  DEMO_LINK_SUGGESTIONS,
   DEMO_MODEL,
   DEMO_ORIGIN,
   DEMO_PAGES,
@@ -43,6 +45,17 @@ function lcg(seed: number) {
 }
 
 const GROUNDING: Record<"gemini" | "perplexity", string> = { gemini: "google_search", perplexity: "perplexity_web_search" };
+/** Same labels as geo/competitor-pages.ts CHECK_LABELS. */
+const COMPETITOR_CHECK_LABELS: Record<string, string> = {
+  answer_first: "Answer first",
+  depth: "Depth",
+  proof: "Sources cited",
+  schema: "Structured data",
+  freshness: "Freshness",
+  author: "Author byline",
+  entity: "Entity facts",
+  faq: "FAQ",
+};
 
 export async function seedDemoProject(env: Env, db: Db, userId: string, now: Date): Promise<ProjectRow> {
   // Defense in depth: the route already 404s, but the seed itself refuses outside demo mode.
@@ -95,29 +108,54 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
     policy_version: "demo-fixture", summary_json: JSON.stringify({ demo: true, label: DEMO_LABEL, observations: 10, failed: 1, recommendations: 2 }),
     created_by: userId, created_at: at(65), started_at: at(65), finished_at: at(58),
   });
-  // Step events are timed (minutes ago) to fall after the rows each step produced, so the run's activity
-  // replay (runs/activity.ts) reads in order: GSC sync -> page reads -> decisions -> proposals for SEO,
-  // engine answers -> analysis -> decisions -> proposals for GEO. All of it is labelled demo data.
+  // Step events use the runtime step names (runs/orchestrate.ts AGENT_STEPS; geo/batch.ts geo_batch:<engine>)
+  // with a 'started' and a terminal event each, timed (minutes ago) around the rows each step stores, so the
+  // run's activity and Live replays read in order: validate -> crawl (page reads, findings) -> Search Console
+  // sync -> recommend (query relevance, element judgments, link reuse, drafts) -> summary for SEO;
+  // validate -> batch (per-engine lanes, answers) -> proposals -> summary for GEO. The orchestrator's former
+  // sub-steps are kept as 'info' notes. All of it is labelled demo data.
   const seoSteps: Array<[string, string, string, number]> = [
-    ["validate_project", "completed", "Project validated.", 124.95],
-    ["reserve_budget", "completed", "Budget reserved (demo: no real spend).", 124.9],
-    ["fetch_gsc", "completed", `Imported ${DEMO_GSC_ROWS.length} query/page rows per 28-day window.`, 123.95],
-    ["crawl", "completed", "8 of 8 pages crawled; 0 skipped.", 121.05],
-    ["query_relevance", "completed", `Query relevance: ${DEMO_QUERY_RELEVANCE.length} of ${DEMO_QUERY_RELEVANCE.length} queries judged; 0 dropped as not about the business, 1 flagged for review.`, 120.96],
-    ["shortlist", "completed", "11 candidates shortlisted.", 120.95],
-    ["decisions", "completed", "11 candidates judged; 9 rejected (4 low_fit, 5 budget: daily recommendation cap).", 120.3],
-    ["generate_proposals", "completed", "2 recommendations drafted.", 119.2],
-    ["validate_evidence", "completed", "All evidence IDs resolved.", 118.5],
-    ["persist_summary", "completed", "Run summary saved.", 118.05],
+    ["seo.run", "started", "SEO run started (demo).", 125.0],
+    ["seo.validate", "started", "Step seo.validate started.", 124.97],
+    ["seo.validate", "completed", "Project validated.", 124.95],
+    ["reserve_budget", "info", "Budget reserved (demo: no real spend).", 124.9],
+    ["seo.crawl", "started", "Step seo.crawl started.", 123.0],
+    ["seo.crawl", "completed", "8 of 8 pages crawled; 0 skipped.", 121.05],
+    ["seo.gsc_sync", "started", "Step seo.gsc_sync started.", 121.04],
+    ["seo.gsc_sync", "completed", `Imported ${DEMO_GSC_ROWS.length} query/page rows per 28-day window.`, 121.02],
+    ["seo.recommend", "started", "Step seo.recommend started.", 121.0],
+    ["query_relevance", "info", `Query relevance: ${DEMO_QUERY_RELEVANCE.length} of ${DEMO_QUERY_RELEVANCE.length} queries judged; 0 dropped as not about the business, 1 flagged for review.`, 120.7],
+    ["shortlist", "info", `${11 + DEMO_LINK_SUGGESTIONS.filter((l) => l.reused).length} candidates shortlisted.`, 120.69],
+    [
+      "decisions",
+      "info",
+      `11 candidates judged by Jev; ${DEMO_LINK_SUGGESTIONS.filter((l) => l.reused).length} reused internal link suggestions (no Jev re-ask); ${9 + DEMO_LINK_SUGGESTIONS.filter((l) => l.reused).length} rejected (4 low_fit, ${5 + DEMO_LINK_SUGGESTIONS.filter((l) => l.reused).length} budget: daily recommendation cap).`,
+      120.15,
+    ],
+    ["generate_proposals", "info", "2 recommendations drafted.", 118.55],
+    ["validate_evidence", "info", "All evidence IDs resolved.", 118.4],
+    ["seo.recommend", "completed", "2 recommendations drafted.", 118.2],
+    ["seo.summary", "started", "Step seo.summary started.", 118.06],
+    ["seo.summary", "completed", "Run summary saved.", 118.05],
   ];
   const geoSteps: Array<[string, string, string, number]> = [
-    ["validate_project", "completed", "Project validated.", 64.95],
-    ["reserve_budget", "completed", "Budget reserved (demo: no real spend).", 64.9],
-    ["run_prompts", "partial", "10 prompt runs: 9 ok, 1 failed (simulated timeout).", 59.45],
-    ["analyze", "completed", "Brand mentions, citations, and displacements extracted.", 59.4],
-    ["decisions", "completed", "3 candidates judged; 1 rejected (insufficient_evidence).", 59.1],
-    ["generate_proposals", "completed", "2 proposals drafted.", 58.6],
-    ["persist_summary", "completed", "Run summary saved.", 58.1],
+    ["geo.run", "started", "GEO run started (demo).", 65.0],
+    ["geo.validate", "started", "Step geo.validate started.", 64.97],
+    ["geo.validate", "completed", "Project validated.", 64.95],
+    ["reserve_budget", "info", "Budget reserved (demo: no real spend).", 64.9],
+    ["geo.batch", "started", "Step geo.batch started.", 64.0],
+    ["geo_batch:gemini", "started", `Gemini API (${DEMO_MODEL}, ${GROUNDING.gemini}): ${DEMO_PROMPTS.length} prompt(s).`, 63.95],
+    ["geo_batch:perplexity", "started", `Perplexity API (${DEMO_MODEL}, ${GROUNDING.perplexity}): ${DEMO_PROMPTS.length} prompt(s).`, 63.95],
+    ["geo_batch:gemini", "completed", `${DEMO_PROMPTS.length} of ${DEMO_PROMPTS.length} prompt(s) sampled, 0 failed.`, 59.5],
+    ["geo_batch:perplexity", "partial", `${DEMO_PROMPTS.length - 1} of ${DEMO_PROMPTS.length} prompt(s) sampled, 1 failed.`, 59.38],
+    ["geo.batch", "partial", "10 prompt runs: 9 ok, 1 failed (simulated timeout).", 59.37],
+    ["analyze", "info", "Brand mentions, citations, and displacements extracted.", 59.36],
+    ["geo.proposals", "started", "Step geo.proposals started.", 59.34],
+    ["decisions", "info", "3 candidates judged; 1 rejected (insufficient_evidence).", 59.02],
+    ["generate_proposals", "info", "2 proposals drafted.", 58.5],
+    ["geo.proposals", "completed", "2 proposals drafted.", 58.4],
+    ["geo.summary", "started", "Step geo.summary started.", 58.12],
+    ["geo.summary", "completed", "Run summary saved.", 58.1],
   ];
   for (const [step, status, message, minutesAgo] of seoSteps) {
     ins("run_events", { id: newId("evt"), ...base, run_id: seoRun, step, status, message: `[${DEMO_LABEL}] ${message}`, created_at: at(minutesAgo) });
@@ -158,7 +196,7 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
       notes: [`${DEMO_LABEL}: fictional Search Console totals.`],
       provenance: { source: "demo", label: DEMO_LABEL },
     }),
-    status: "completed", synced_at: at(124),
+    status: "completed", synced_at: at(121.03),
   });
   for (const dRow of daily) ins("gsc_daily", { sync_id: syncId, ...base, date: dRow.date, clicks: dRow.clicks, impressions: dRow.impressions });
   for (const [query, path, cc, ci, cp, pc, pi, pp] of DEMO_GSC_ROWS) {
@@ -209,7 +247,7 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
     findingIds.push(id);
     ins("audit_findings", {
       id, ...base, crawl_run_id: crawlId, rule_id: f.ruleId, severity: f.severity, url: f.path ? `${DEMO_ORIGIN}${f.path}` : null,
-      template: f.template, detail: f.detail, evidence_json: JSON.stringify({ demo: true, snapshotId: f.path ? snapshotByPath.get(f.path) : null }), created_at: at(121),
+      template: f.template, detail: f.detail, evidence_json: JSON.stringify({ demo: true, snapshotId: f.path ? snapshotByPath.get(f.path) : null }), created_at: at(121.3),
     });
   }
 
@@ -231,8 +269,9 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
     perplexity: await cohortKey({ promptSetVersion: 1, provider: "perplexity", model: DEMO_MODEL, groundingMode: GROUNDING.perplexity, samplingOptions: null }),
   };
   const observationIds: string[][] = [];
-  // Answers 30 s apart from 64 to 59.5 minutes ago, inside the run window, before the run_prompts event.
-  let minute = 64.5;
+  // Answers 30 s apart from 63.9 to 59.4 minutes ago: after the geo_batch:<engine> started events and before
+  // each lane's terminal event.
+  let minute = 64.4;
   for (let pi = 0; pi < DEMO_ANSWERS.length; pi++) {
     observationIds.push([]);
     for (const a of DEMO_ANSWERS[pi]!) {
@@ -288,7 +327,7 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
   for (const run of [seoRun, geoRun]) {
     ins("provider_calls", {
       id: newId("call"), ...base, run_id: run, provider: "typesafe", model: DEMO_MODEL, purpose: "decisions (demo fixture)", status: "ok",
-      request_id: null, cost_usd: null, cost_is_estimate: 1, rate_version: null, latency_ms: null, error: null, created_at: at(run === seoRun ? 120.8 : 59.35),
+      request_id: null, cost_usd: null, cost_is_estimate: 1, rate_version: null, latency_ms: null, error: null, created_at: at(run === seoRun ? 120.8 : 59.3),
     });
   }
 
@@ -317,14 +356,14 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
   const eLamp = await ev(geoRun, "crawl", snapshotByPath.get("/products/brass-table-lamp")!, null, "/products/brass-table-lamp does not state bulb compatibility.");
 
   // ------------------------------------------------------------ decisions and recommendations
-  // Decisions of one run are 6 s apart (after that run's Jev call row) so the replay lists them in order.
+  // Action-choice decisions of one run are 6 s apart (inside seo.recommend / geo.proposals) so the replay lists them in order.
   const decisionCount: Record<string, number> = {};
   const decision = (runId: string, agent: "seo" | "geo", candidateKey: string, outcome: "selected" | "rejected", reason: string | null, answer: unknown, tier: string) => {
     const n = (decisionCount[runId] = (decisionCount[runId] ?? 0) + 1);
     ins("decision_records", {
       id: newId("dec"), ...base, run_id: runId, agent, candidate_key: candidateKey, question_id: `${agent}.action_choice`, question_version: "demo-fixture",
       policy_version: "demo-fixture", provider: DEMO_MODEL, model: DEMO_MODEL, state_hash: null, answer_json: JSON.stringify(answer), tier,
-      outcome, reason_code: reason, created_at: at((runId === seoRun ? 120.8 : 59.35) - n * 0.1),
+      outcome, reason_code: reason, created_at: at((runId === seoRun ? 120.75 : 59.35) - n * 0.1),
     });
   };
   decision(seoRun, "seo", `demo:${pid}:template:product:offer`, "selected", null, { type: "choice", choice: "add_offer_markup", confidence: 0.86, probabilities: { add_offer_markup: 0.86, insufficient_context: 0.14 } }, "act");
@@ -346,7 +385,7 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
       });
     }
   }
-  // Query relevance pre-filter answers (query-batch format), judged after the crawl and before the shortlist.
+  // Query relevance pre-filter answers (query-batch format), judged first in seo.recommend, 2.4 s apart.
   DEMO_QUERY_RELEVANCE.forEach(([query, n], i) => {
     const answer = { type: "noul" as const, noul: n };
     const tier = tierFor("seo.query_relevance", answer);
@@ -356,12 +395,94 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
       question_version: "demo-fixture", policy_version: "demo-fixture", provider: DEMO_MODEL, model: DEMO_MODEL, state_hash: null,
       answer_json: JSON.stringify({ answer, query, questionTier: tier }), tier,
       outcome: band === "no" ? "rejected" : "selected", reason_code: band === "no" ? "low_fit" : band === null ? "insufficient_evidence" : null,
-      created_at: at(121 - i * 0.005),
+      created_at: at(120.99 - i * 0.04),
     });
   });
   decision(geoRun, "geo", `demo:${pid}:geo:prompt0:comparison`, "selected", null, { type: "choice", choice: "add_comparison_content", confidence: 0.81, probabilities: { add_comparison_content: 0.81, insufficient_context: 0.19 } }, "act");
   decision(geoRun, "geo", `demo:${pid}:geo:prompt1:fact`, "selected", null, { type: "choice", choice: "clarify_product_fact", confidence: 0.77, probabilities: { clarify_product_fact: 0.77, none: 0.23 } }, "act");
   decision(geoRun, "geo", "prompt:4:none", "rejected", "insufficient_evidence", { type: "choice", choice: "insufficient_context", confidence: 0.9, probabilities: { insufficient_context: 0.9, none: 0.1 } }, "act");
+
+  // ------------------------------------------------------------ internal link run (before the SEO run) and its reuse
+  // A fictional link run over the demo pages (latest report of GET /seo/internal-links), created before the SEO
+  // run; the SEO run reuses its act-tier suggestions as candidates (question-less decision rows in the runtime
+  // format: answer_json {candidate, kind, linkSuggestionId, suggestionTier, shouldExist}). Inlinks follow the
+  // demo snapshots' stored internal links (each page links to the first 4 other demo pages).
+  const linksTo = (path: string) => DEMO_PAGES.filter((o) => o.path !== path).slice(0, 4).map((o) => o.path);
+  const inlinks = (path: string) => DEMO_PAGES.filter((o) => o.path !== path && linksTo(o.path).includes(path)).length;
+  const linkRunId = newId("lrun");
+  const orphanPages = DEMO_PAGES.filter((p) => inlinks(p.path) === 0).map((p) => ({ pageId: pageByPath.get(p.path)!, url: `${DEMO_ORIGIN}${p.path}` }));
+  ins("link_runs", {
+    id: linkRunId, ...base, crawl_run_id: null, status: "completed", is_demo: 1, pages_analysed: DEMO_PAGES.length, pages_eligible: DEMO_PAGES.length,
+    provider: DEMO_MODEL, model: DEMO_MODEL, method_version: "demo-fixture",
+    summary_json: JSON.stringify({ orphanPages, genericAnchors: [], completeness: null }),
+    notes_json: JSON.stringify([`${DEMO_LABEL}: fictional link suggestions over the demo pages; Jev answers are fixtures.`]),
+    created_by: userId, created_at: at(126), finished_at: at(125.5),
+  });
+  const linkIds: string[] = [];
+  for (const l of DEMO_LINK_SUGGESTIONS) {
+    const id = newId("lsug");
+    linkIds.push(id);
+    const tier = tierFor("links.should_exist", { type: "noul", noul: l.shouldExist });
+    const status = tier === "act" && l.shouldExist >= 0.5 ? "suggested" : tier === "drop" ? "rejected" : "review";
+    const src = pageByPath.get(l.source)!;
+    const tgt = pageByPath.get(l.target)!;
+    const sentences = [l.sentence];
+    ins("link_suggestions", {
+      id, ...base, link_run_id: linkRunId, source_page_id: src, target_page_id: tgt,
+      source_url: `${DEMO_ORIGIN}${l.source}`, source_title: DEMO_PAGES.find((p) => p.path === l.source)?.title ?? null,
+      target_url: `${DEMO_ORIGIN}${l.target}`, target_title: DEMO_PAGES.find((p) => p.path === l.target)?.title ?? null,
+      target_inlinks: inlinks(l.target), target_orphan: inlinks(l.target) === 0 ? 1 : 0,
+      suggestion_key: `${src}|${tgt}|${l.anchor.toLowerCase()}`, sentence_index: 0, sentence_text: sentences[0], anchor_text: l.anchor, role: l.role,
+      method: "jev", tier, should_exist: l.shouldExist, sentence_confidence: null, anchor_confidence: null, role_confidence: null,
+      provider: DEMO_MODEL, model: DEMO_MODEL, question_version: "demo-fixture", policy_version: "demo-fixture", decision_record_id: null,
+      status, score: Math.round(l.shouldExist * 70) / 100, reasons_json: JSON.stringify([`${DEMO_LABEL}: fictional suggestion`]), user_status: "open",
+      created_at: at(125.6), updated_at: at(125.6),
+    });
+  }
+  DEMO_LINK_SUGGESTIONS.forEach((l, i) => {
+    if (!l.reused) return;
+    const tier = tierFor("links.should_exist", { type: "noul", noul: l.shouldExist });
+    ins("decision_records", {
+      id: newId("dec"), ...base, run_id: seoRun, agent: "seo", candidate_key: `demo:${pid}:links:${i}`, question_id: null, question_version: null,
+      policy_version: "demo-fixture", provider: null, model: null, state_hash: null,
+      answer_json: JSON.stringify({
+        candidate: `internal_link_suggestion:${DEMO_ORIGIN}${l.source}|${DEMO_ORIGIN}${l.target}`, kind: "internal_link", rules: "demo-fixture",
+        linkSuggestionId: linkIds[i], suggestionTier: tier, shouldExist: l.shouldExist,
+      }),
+      tier: "n/a", outcome: "rejected", reason_code: "budget", created_at: at(120.28 - i * 0.02),
+    });
+  });
+
+  // ------------------------------------------------------------ approved competitor pages (after the GEO run)
+  // Fictional assessments of two cited pages, "approved" by the demo user after the GEO run; nothing was fetched.
+  for (const c of DEMO_COMPETITOR_PAGES) {
+    const host = new URL(c.url).hostname;
+    const checks = c.checks.map((k) => {
+      const jev = k.noul !== undefined;
+      const qid = k.key === "answer_first" ? "geo.competitor_answer_first" : "geo.competitor_entity";
+      return {
+        key: k.key,
+        label: COMPETITOR_CHECK_LABELS[k.key],
+        noul: jev ? k.noul! : null,
+        tier: jev ? tierFor(qid, { type: "noul", noul: k.noul! }) : null,
+        method: jev ? "jev" : "measured",
+        detail: k.detail ? `${k.detail} (demo)` : null,
+        status: k.status,
+      };
+    });
+    const presence = Object.fromEntries(c.checks.map((k) => [k.key, k.status]));
+    ins("competitor_pages", {
+      id: newId("cmp"), ...base, url: c.url, host, approved_by: userId, approved_at: at(57), fetched_at: at(56.8), status: "assessed",
+      status_detail: `${DEMO_LABEL}: fictional page; nothing was fetched.`, http_status: 200, final_url: c.url, partial: 0,
+      extraction_json: JSON.stringify({
+        title: `${host} (demo)`, wordCount: c.wordCount, opening: null, headings: [], jsonldTypes: c.jsonldTypes, author: null, lastUpdated: null,
+        outboundCitations: null, tableCount: null, questionHeadings: 0, numericFacts: 0, question: null, factors: {}, presence, ourPage: null, gaps: [],
+        injectionScreen: "not_run",
+      }),
+      checks_json: JSON.stringify(checks), reasons_json: JSON.stringify(c.reasons), verdict: c.verdict, verdict_version: "demo-fixture",
+      jev_provider: DEMO_MODEL, jev_model: DEMO_MODEL, created_at: at(57), updated_at: at(56.8),
+    });
+  }
 
   const rec = (runId: string, agent: "seo" | "geo", r: Record<string, unknown>, evidence: Array<[string, string, string]>, minutesAgo: number) => {
     const id = newId("rec");
@@ -399,7 +520,7 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
     effort: "low", uncertainty: "medium", priority: 0.55, decision_label: "flag",
     decision_score_json: JSON.stringify({ choice: "rewrite_snippet", confidence: 0.64 }),
     confirm_placeholders_json: JSON.stringify(["[confirm: machine washable]"]), dedup_key: `demo:${pid}:url:sofas:meta`,
-  }, [[eGsc, "gsc", `GSC ${gscWindow}: 4,120 impressions, 38 clicks, position 6.8`], [eMeta, "crawl", "No meta description on /collections/sofas"], [eCtx, "context_doc", "Product context v2 (unconfirmed): washable slipcovers"]], 118);
+  }, [[eGsc, "gsc", `GSC ${gscWindow}: 4,120 impressions, 38 clicks, position 6.8`], [eMeta, "crawl", "No meta description on /collections/sofas"], [eCtx, "context_doc", "Product context v2 (unconfirmed): washable slipcovers"]], 118.6);
   rec(geoRun, "geo", {
     scope: "page",
     target_json: JSON.stringify({ kind: "url", url: `${DEMO_ORIGIN}/blog/how-to-choose-a-washable-sofa` }),
@@ -423,7 +544,7 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
     effort: "low", uncertainty: "medium", priority: 0.48, decision_label: "act",
     decision_score_json: JSON.stringify({ choice: "clarify_product_fact", confidence: 0.77 }),
     confirm_placeholders_json: JSON.stringify(["[confirm: bulb base]", "[confirm: maximum wattage]"]), dedup_key: `demo:${pid}:geo:prompt1:fact`,
-  }, [[eGeo3, "geo_observation", "Perplexity: Example Lamp House cited; brand absent"], [eLamp, "crawl", "Bulb compatibility not stated on the lamp page"]], 58);
+  }, [[eGeo3, "geo_observation", "Perplexity: Example Lamp House cited; brand absent"], [eLamp, "crawl", "Bulb compatibility not stated on the lamp page"]], 58.6);
 
   try {
     await db.batch(S);

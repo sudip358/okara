@@ -32,9 +32,9 @@ import type {
 } from "@shared/types";
 import { api } from "@web/lib/api";
 import { useApi } from "@web/lib/hooks";
-import { POLL, activityPath, catchUp, isFinalError, mergeItems } from "@web/components/activity/lib";
+import { POLL, activityPath, catchUp, isFinalError, nextFeedDelay } from "@web/components/activity/lib";
 import { boardPaths, useCompetitorPages } from "@web/pages/geo/board/data";
-import { MAX_EVENTS, REPLAY_MAX_PAGES, REPLAY_PAGE_LIMIT, mergeById } from "./engine";
+import { MAX_EVENTS, REPLAY_MAX_PAGES, REPLAY_PAGE_LIMIT, mergeGeoFeed, mergeKeepingSteps, mergeSeoFeed, type GeoFeed, type SeoFeed } from "./engine";
 
 const p = (pid: string) => `/projects/${encodeURIComponent(pid)}`;
 const visible = () => typeof document === "undefined" || document.visibilityState === "visible";
@@ -71,43 +71,8 @@ export function isFeedSignal(agent: "seo" | "geo", it: ActivityItem): boolean {
   return it.kind === "engine_answer" || (it.kind === "step" && (!!it.detail?.startsWith("geo.proposals") || !!it.detail?.startsWith("geo_batch:")));
 }
 
-export interface SeoFeed {
-  elements: LiveSeoBoardResponse["elements"];
-  queries: LiveSeoBoardResponse["queries"];
-  recommendations: LiveSeoBoardResponse["recommendations"];
-  gscSync: LiveSeoBoardResponse["gscSync"];
-  totals: LiveSeoBoardResponse["totals"] | null;
-  labels: string[];
-}
-
-export interface GeoFeed {
-  answers: LiveGeoBoardResponse["answers"];
-  plannedPrompts: LiveGeoBoardResponse["plannedPrompts"];
-  recommendations: LiveGeoBoardResponse["recommendations"];
-  totals: LiveGeoBoardResponse["totals"] | null;
-  labels: string[];
-}
-
-export function mergeSeoFeed(prev: SeoFeed | null, res: LiveSeoBoardResponse): SeoFeed {
-  return {
-    elements: mergeById(prev?.elements ?? [], res.elements),
-    queries: mergeById(prev?.queries ?? [], res.queries),
-    recommendations: mergeById(prev?.recommendations ?? [], res.recommendations),
-    gscSync: res.gscSync ?? prev?.gscSync ?? null,
-    totals: res.totals ?? prev?.totals ?? null,
-    labels: Array.from(new Set([...(prev?.labels ?? []), ...res.labels])),
-  };
-}
-
-export function mergeGeoFeed(prev: GeoFeed | null, res: LiveGeoBoardResponse): GeoFeed {
-  return {
-    answers: mergeById(prev?.answers ?? [], res.answers),
-    plannedPrompts: prev?.plannedPrompts ?? res.plannedPrompts ?? null,
-    recommendations: mergeById(prev?.recommendations ?? [], res.recommendations),
-    totals: res.totals ?? prev?.totals ?? null,
-    labels: Array.from(new Set([...(prev?.labels ?? []), ...res.labels])),
-  };
-}
+export type { GeoFeed, SeoFeed } from "./engine";
+export { mergeGeoFeed, mergeSeoFeed } from "./engine";
 
 export interface LiveRunData {
   activity: RunActivity | null;
@@ -168,6 +133,8 @@ export function useLiveRun(projectId: string, runId: string | null): LiveRunData
     let initial = true;
     let wasActive: boolean | null = null;
     let lastFeed = 0;
+    /** The last feed read stopped at its page cap with more stored rows: read on at the next tick. */
+    let feedMore = false;
     let seq = 0;
     let count = 0;
 
@@ -232,7 +199,8 @@ export function useLiveRun(projectId: string, runId: string | null): LiveRunData
         const agent = res.run.agent;
         count += r.received;
         setActivity(res);
-        setItems((prev) => mergeItems(prev, r.items, MAX_EVENTS));
+        // Capped at MAX_EVENTS, but step items are never evicted (the rail and panels derive from them).
+        setItems((prev) => mergeKeepingSteps(prev, r.items, MAX_EVENTS));
         setError(null);
         if (initial && r.more) setCapped(true);
 
@@ -240,12 +208,14 @@ export function useLiveRun(projectId: string, runId: string | null): LiveRunData
         const signalled = r.items.some((it) => isFeedSignal(agent, it));
         const due = res.active && Date.now() - lastFeed >= FEED_EVERY_MS;
         let feedIds = new Set<string>();
-        if (initial || signalled || justFinished || due) {
+        if (initial || signalled || justFinished || due || feedMore) {
           try {
-            const f = await pullFeed(agent, initial ? REPLAY_MAX_PAGES : LATER_PAGES);
+            // The first read and the read right after the run finished page as far as a replay loads.
+            const f = await pullFeed(agent, initial || justFinished ? REPLAY_MAX_PAGES : LATER_PAGES);
             if (signal.aborted) return;
             feedIds = f.ids;
-            if (initial && f.capped) setCapped(true);
+            feedMore = f.capped && !initial && !justFinished;
+            if ((initial || justFinished) && f.capped) setCapped(true);
             setFeedError(null);
           } catch (e) {
             if (signal.aborted) return;
@@ -263,7 +233,9 @@ export function useLiveRun(projectId: string, runId: string | null): LiveRunData
         wasActive = res.active;
         initial = false;
         setLoading(false);
-        if (res.active) timer = setTimeout(tick, r.more ? 0 : POLL.feed);
+        // A backlog (heartbeat or feed) is read on at once, also on the tick that saw the run finish.
+        const delay = nextFeedDelay(r.more || feedMore, res.active);
+        if (delay !== null) timer = setTimeout(tick, delay);
       } catch (e) {
         if (signal.aborted) return;
         setError(e);

@@ -27,7 +27,7 @@ import {
   type TimelineEvent,
 } from "./engine";
 import type { SeoFeed, SeoProjectData } from "./data";
-import { useSkipFactorsBatch } from "./data";
+import { livePaths, useSkipFactorsBatch } from "./data";
 import { AiAnswersPanel, CompetitorsPanel, CoveragePanel, evidencePages } from "./ProjectPanels";
 import { RecsPanel } from "./RecsPanel";
 import { ElementsPanel } from "./seo/ElementsPanel";
@@ -55,23 +55,33 @@ export interface SeoBoardProps {
   data: SeoProjectData;
 }
 
-/** Pending (replay) rows shown per panel: within MAX_PENDING, small enough to keep resolved verdicts in view. */
-const PENDING_ELEMENTS = Math.min(4, MAX_PENDING);
-const PENDING_QUERIES = Math.min(3, MAX_PENDING);
+/** Pending (replay) rows shown per panel: the next stored rows after the playhead, within MAX_PENDING. */
+const PENDING_ELEMENTS = Math.min(8, MAX_PENDING);
+const PENDING_QUERIES = Math.min(5, MAX_PENDING);
+/** Panel 07 loads measured page attributes (skip factors) for this many pages only. */
+export const SKIP_FACTOR_PAGES = 8;
 
 const TABS = ["Crawl", "GSC", "Queries", "Elements", "Competitors", "Coverage", "AI answers", "Links", "Recs"] as const;
 
 export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
   const wide = useMinWidth(768);
-  const [tab, setTab] = useState<(typeof TABS)[number]>("Elements");
+  // Phone width: until the viewer picks a panel, the tab follows the step that is running (crawl, Search
+  // Console sync, judging), so the panel on screen is the one where stored rows are arriving.
+  const [picked, setTab] = useState<(typeof TABS)[number] | null>(null);
   const d = useMemo(() => {
     const items = itemsOf(p.revealed);
-    const els = elementsOf(p.revealed);
-    // Replay: rows not reached yet are pending only while the step that stores them is running at the playhead.
+    const recs = recsOf(p.revealed);
+    // Replay: "now → proposed" only once the recommendation that drafted the snippet has been revealed.
+    const drafted = new Set(recs.map((r) => r.recommendationId));
+    const els = p.replaying
+      ? elementsOf(p.revealed).map((e) => (e.proposed !== null && (!e.recommendationId || !drafted.has(e.recommendationId)) ? { ...e, proposed: null } : e))
+      : elementsOf(p.revealed);
+    // Replay: the next stored rows after the playhead are pending (design section 9). They read "Reading…"
+    // while the step that stores them is running at the playhead, and "Up next" (static) before it starts.
     const judging = p.replaying && stepStatus(items, "seo.recommend") === "running";
-    const pendingEls = judging ? elementsOf(p.upcoming).slice(0, PENDING_ELEMENTS) : [];
+    const pendingEls = p.replaying ? elementsOf(p.upcoming).slice(0, PENDING_ELEMENTS).map((e) => ({ ...e, proposed: null })) : [];
     const qs = queriesOf(p.revealed);
-    const pendingQs = judging ? queriesOf(p.upcoming).slice(0, PENDING_QUERIES) : [];
+    const pendingQs = p.replaying ? queriesOf(p.upcoming).slice(0, PENDING_QUERIES) : [];
     const segs = stepSegments(items, "seo").steps;
     const seg = (s: string) => segs.find((x) => x.step === s) ?? null;
     return {
@@ -90,8 +100,9 @@ export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
       gscMsg: seg("seo.gsc_sync")?.message ?? null,
       recommend: stepStatus(items, "seo.recommend"),
       links: els.filter((e) => e.element === "Links" && e.linkSuggestionId),
-      recs: recsOf(p.revealed),
+      recs,
       latestRead: items.filter((i) => i.kind === "page_read").pop() ?? null,
+      pendingLabel: (judging ? "Reading…" : "Up next") as "Reading…" | "Up next",
     };
   }, [p.revealed, p.upcoming, p.replaying]);
 
@@ -104,18 +115,21 @@ export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
   const pagesRead = p.atEnd ? Math.max(p.activity.totals.pagesRead, d.readCount) : d.readCount;
   const nowReading = p.replaying ? (d.crawl === "running" && d.latestRead?.url ? { url: d.latestRead.url, at: d.latestRead.at } : null) : p.activity.active ? p.activity.nowReading : null;
   const skeletons = p.mode === "live" && d.recommend === "running" ? MAX_LIVE_SKELETONS : 0;
-  const jevMissing = p.atEnd && d.els.length > 0 && d.els.every((e) => e.role === "rule");
   const finished = p.mode !== "live" && p.mode !== "pending" && (!p.replaying || p.atEnd);
+  // Only once the run (or its replay) is over: while live, Jev rows may still be stored.
+  const jevMissing = finished && d.els.length > 0 && d.els.every((e) => e.role === "rule");
 
   const projCaptions = [`From your latest GEO data, not part of this run`, p.replaying ? "Current state, not replayed" : null].filter((x): x is string => !!x);
   const coverageRows = p.data.coverage.data?.rows ?? null;
   const evidenceRows = useMemo(() => (p.data.evidence.data ? evidencePages(p.data.evidence.data.rows, coverageRows ?? []) : []), [p.data.evidence.data, coverageRows]);
-  const skipReqs = useMemo(() => evidenceRows.filter((r) => r.pageId).map((r) => ({ pageId: r.pageId!, promptId: null, engine: null })), [evidenceRows]);
-  const skip = useSkipFactorsBatch(p.projectId, skipReqs, 8);
-  const skipFor = (pageId: string) => {
-    for (const [path, v] of skip) if (path.includes(`/pages/${encodeURIComponent(pageId)}/`)) return v;
-    return undefined;
-  };
+  const skipReqs = useMemo(
+    () => evidenceRows.filter((r) => r.pageId).slice(0, SKIP_FACTOR_PAGES).map((r) => ({ pageId: r.pageId!, promptId: null, engine: null })),
+    [evidenceRows],
+  );
+  const skip = useSkipFactorsBatch(p.projectId, skipReqs, SKIP_FACTOR_PAGES);
+  const requested = useMemo(() => new Set(skipReqs.map((r) => r.pageId)), [skipReqs]);
+  // Exact page-level key; pages beyond the first SKIP_FACTOR_PAGES are never fetched ("not_loaded", no shimmer).
+  const skipFor = (pageId: string) => (requested.has(pageId) ? skip.get(livePaths.skip(p.projectId, pageId, null, null)) : ("not_loaded" as const));
 
   const panels: Record<(typeof TABS)[number], ReactElement> = {
     Crawl: (
@@ -146,7 +160,18 @@ export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
         replaying={p.replaying}
       />
     ),
-    Queries: <QueriesPanel groups={d.groups} relevant={qRelevant} distinct={qDistinct} buyer={p.data.buyer.data?.rows ?? null} fresh={p.fresh} reduced={p.reduced} finished={finished} />,
+    Queries: (
+      <QueriesPanel
+        groups={d.groups}
+        relevant={qRelevant}
+        distinct={qDistinct}
+        buyer={p.data.buyer.data?.rows ?? null}
+        fresh={p.fresh}
+        reduced={p.reduced}
+        finished={finished}
+        pendingLabel={d.pendingLabel}
+      />
+    ),
     Elements: (
       <ElementsPanel
         rows={d.rows}
@@ -159,16 +184,30 @@ export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
         runId={p.runId}
         notReplayed={notReplayed}
         jevMissing={jevMissing}
+        pendingLabel={d.pendingLabel}
       />
     ),
     Competitors: <CompetitorsPanel state={p.data.competitors} reduced={p.reduced} projectId={p.projectId} captions={projCaptions} />,
     Coverage: <CoveragePanel state={p.data.coverage} reduced={p.reduced} projectId={p.projectId} ownHost={p.ownHost} captions={projCaptions} />,
-    "AI answers": <AiAnswersPanel evidence={p.data.evidence} coverage={coverageRows} skipFor={skipFor} reduced={p.reduced} captions={projCaptions} />,
+    "AI answers": <AiAnswersPanel evidence={p.data.evidence} coverage={coverageRows} skipFor={skipFor} factorPages={SKIP_FACTOR_PAGES} reduced={p.reduced} captions={projCaptions} />,
     Links: <LinksPanel report={p.data.links} runRows={d.links} reduced={p.reduced} projectId={p.projectId} replaying={p.replaying} />,
     Recs: (
-      <RecsPanel num="09" title="Recommendations drafted and checked" recs={d.recs} pipeline={totals?.pipeline ?? null} fresh={p.fresh} reduced={p.reduced} projectId={p.projectId} finished={finished} />
+      <RecsPanel
+        num="09"
+        title="Recommendations drafted and checked"
+        recs={d.recs}
+        pipeline={p.replaying && !p.atEnd ? null : (totals?.pipeline ?? null)}
+        replaying={p.replaying && !p.atEnd}
+        fresh={p.fresh}
+        reduced={p.reduced}
+        projectId={p.projectId}
+        finished={finished}
+      />
     ),
   };
+
+  const following: (typeof TABS)[number] = d.crawl === "running" ? "Crawl" : d.gsc === "running" ? "GSC" : "Elements";
+  const tab = picked ?? following;
 
   const feedBanner =
     !p.seo && p.feedError ? (
@@ -206,16 +245,18 @@ export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
   return (
     <div className="min-w-0 space-y-4">
       {feedBanner}
+      {/* Rows (design section 4): 01 02 03 | 04 05 | 06 07 | 08 09. Panels fed by rows of this run keep a fixed
+          height so arriving rows never shift the page; the project-level rows size to their content (capped). */}
       <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-12">
-        <Cell cls="xl:col-span-3 xl:h-[380px]">{panels.Crawl}</Cell>
-        <Cell cls="xl:col-span-4 xl:h-[380px]">{panels.GSC}</Cell>
-        <Cell cls="md:col-span-2 xl:col-span-5 xl:h-[380px]">{panels.Queries}</Cell>
-        <Cell cls="md:col-span-2 xl:col-span-6 xl:h-[460px]">{panels.Elements}</Cell>
-        <Cell cls="xl:col-span-6 xl:h-[460px]">{panels.Competitors}</Cell>
-        <Cell cls="xl:col-span-6 xl:h-[460px]">{panels.Coverage}</Cell>
-        <Cell cls="xl:col-span-6 xl:h-[460px]">{panels["AI answers"]}</Cell>
-        <Cell cls="xl:col-span-6 xl:h-[380px]">{panels.Links}</Cell>
-        <Cell cls="xl:col-span-6 xl:h-[380px]">{panels.Recs}</Cell>
+        <Cell cls="xl:col-span-3 xl:h-[340px]">{panels.Crawl}</Cell>
+        <Cell cls="xl:col-span-4 xl:h-[340px]">{panels.GSC}</Cell>
+        <Cell cls="md:col-span-2 xl:col-span-5 xl:h-[340px]">{panels.Queries}</Cell>
+        <Cell cls="md:col-span-2 xl:col-span-6 xl:h-[480px]">{panels.Elements}</Cell>
+        <Cell cls="md:col-span-2 xl:col-span-6 xl:h-[480px]">{panels.Competitors}</Cell>
+        <Cell cls="xl:col-span-6 xl:max-h-[460px]">{panels.Coverage}</Cell>
+        <Cell cls="xl:col-span-6 xl:max-h-[460px]">{panels["AI answers"]}</Cell>
+        <Cell cls="xl:col-span-6 xl:h-[400px]">{panels.Links}</Cell>
+        <Cell cls="xl:col-span-6 xl:h-[400px]">{panels.Recs}</Cell>
       </div>
     </div>
   );

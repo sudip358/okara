@@ -87,7 +87,8 @@ export function ReplayControls({
         <span className="font-mono text-[11px] text-zinc-600 tabular-nums dark:text-zinc-400" aria-hidden="true">
           {clockText(at)} / {clockText(total)}
         </span>
-        <button type="button" className={btn} aria-expanded={help} onClick={() => setHelp((h) => !h)}>
+        {/* Shortcuts need a keyboard: the disclosure is hidden on phone-width screens. */}
+        <button type="button" className={cx(btn, "max-sm:hidden")} aria-expanded={help} onClick={() => setHelp((h) => !h)}>
           Keyboard
         </button>
       </div>
