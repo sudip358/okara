@@ -105,8 +105,9 @@ async function enginePresence(env: Env, db: Db, ws: string): Promise<Record<GeoE
 function setupDetail(env: Env, provider: GeoEngineProviderId, configured: boolean | undefined): string {
   if (configured === undefined) return "Not implemented yet";
   const modelVar = MODEL_ENV[provider];
-  if (!(env[modelVar] ?? "").trim()) return `Set ${modelVar} and a ${VENDOR[provider]} API key`;
-  return `Add a ${VENDOR[provider]} API key (or check that ${modelVar} is a valid model id)`;
+  const key = `${VENDOR[provider] === "OpenAI" || VENDOR[provider] === "Anthropic" ? "an" : "a"} ${VENDOR[provider]} API key`;
+  if (!(env[modelVar] ?? "").trim()) return `Set ${modelVar} and ${key}`;
+  return `Add ${key} (or check that ${modelVar} is a valid model id)`;
 }
 
 export function laneCost(rows: Array<{ cost_usd: number | null; cost_is_estimate: number }>): CostUsd {

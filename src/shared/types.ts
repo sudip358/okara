@@ -886,6 +886,11 @@ export interface CompetitorCheck {
   method: "jev" | "measured";
   /** Measured value or observable fact, e.g. "1,709 words", "FAQPage, Product". */
   detail: string | null;
+  /**
+   * Presence of the attribute on the cited page (what the board's radar plots). Optional so older stored
+   * assessments still parse; when absent the UI derives it from noul/tier for Jev checks, else "unknown".
+   */
+  status?: FactorStatus;
 }
 
 export type CompetitorAssessmentState = "queued" | "fetching" | "assessed" | "blocked" | "failed";

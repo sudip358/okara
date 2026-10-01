@@ -16,6 +16,7 @@ const NAV: Array<{ to: string; label: string; end?: boolean; group?: string }> =
   { to: "recommendations", label: "Recommendations" },
   { to: "geo/prompts", label: "GEO prompts", group: "GEO" },
   { to: "geo/results", label: "GEO results" },
+  { to: "geo/board", label: "AI engines" },
   { to: "competitors", label: "Competitors" },
   { to: "runs", label: "Runs", group: "Project" },
   { to: "integrations", label: "Integrations" },

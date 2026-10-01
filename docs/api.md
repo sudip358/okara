@@ -74,7 +74,7 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | POST | /projects/:pid/geo/import | geo-analysis | body `{promptText, surface, answer, citations[]}` manual import |
 | GET | /projects/:pid/geo/board | geo-analysis | `EngineBoardResponse` (AI engines board; read-only, never calls a provider) |
 | GET | /projects/:pid/geo/pages/:pageId/skip-factors?promptId=&engine= | geo-analysis | `PageSkipFactors` (measured from the latest crawl; never calls Jev) |
-| POST | /projects/:pid/geo/competitor-pages | geo-analysis | body `CompetitorPageApprovalRequest` `{url}`; 202 `CompetitorPageAssessment` (state `queued`) [A7] (CSRF; rate-limited; budgeted) |
+| POST | /projects/:pid/geo/competitor-pages | geo-analysis | body `CompetitorPageApprovalRequest` `{url}`; 202 `CompetitorPageAssessment` (read within the request: state `assessed`, `blocked` or `failed`; 200 when a recent assessment is reused) [A7] (CSRF; rate-limited; budgeted) |
 | GET | /projects/:pid/geo/competitor-pages | geo-analysis | `CompetitorPageAssessment[]` (newest first) |
 | GET | /projects/:pid/geo/rewrite-plans | geo-analysis | `RewritePlansResponse` (manual plans; no publishing) |
 | GET | /projects/:pid/checklists/:kind | checklists | `Checklist` for kind `seo` or `geo` [A21] |
@@ -142,17 +142,21 @@ probability [A11]; there is no aggregate "citability" score.
 - Read-only: never calls Jev or fetches a page. No budget.
 
 ### POST /projects/:pid/geo/competitor-pages → 202 `CompetitorPageAssessment`
-- Requires session, same-origin `Origin`, `X-CSRF-Token`. Body `{url}` (max 2,048 chars, https only).
+- Requires session, same-origin `Origin`, `X-CSRF-Token`. Body `{url}` (max 2,048 chars, http or https, no credentials, default port; IP-literal and local hosts refused).
 - 400 `bad_request` (details `{reason: "url_not_cited"}`) unless the canonicalized URL equals a `geo_citations.url` stored for this project
   (`workspace_id` + `project_id`); approval is per URL, never per domain [A7]. The host must not be the
   project's verified host (use the crawl for own pages).
 - Rate limit: `COMPETITOR_PAGE_RATE_LIMIT` 10 approvals per project per hour (`hitRateLimit` key
   `competitor_page:<projectId>`), 429 with `Retry-After` when exceeded. Re-approving a URL assessed in the
   last 7 days returns the existing assessment (200) without a new fetch.
-- Budget: reserves 1 `crawl_pages` unit and, when TypeSafe is configured, up to 3 `jev_calls`
-  (Noul: `answer_first`, `entity`, and the `evidence.injection_risk` screen that runs first) plus the matching `provider_calls`, before any external call;
+- Budget: reserves 1 `crawl_pages` unit before any external call (released when robots.txt blocks the page, so
+  the page itself was never requested) and, when TypeSafe is configured, at most 2 Jev calls, each reserving
+  `jev_calls` + `provider_calls` per attempt inside the TypeSafe provider: the `evidence.injection_risk`
+  screen first, then the `answer_first` and `entity` Noul questions asked together;
   429 `budget_exceeded` (same mapping as `routes/geo.ts`) when the reservation fails. Measured checks
   (`depth`, `proof`, `schema`, `freshness`, `author`, `faq`) never call Jev.
+- Demo projects: 400 `bad_request` (details `{reason: "demo_project"}`); they never fetch or call Jev. Body over
+  8 KiB: 413 `payload_too_large`. Other 400 reasons: `invalid_url`, `blocked_url`, `own_site`, `redirect_wrapper`.
 - Fetch: one GET through the SSRF guard with the allowlist set to that single host, robots.txt respected,
   same-origin redirects only, the crawler's size/time caps; only compact evidence is stored (no full text).
   Page text is untrusted evidence: it goes to Jev as `state`, never as instructions, and is screened with

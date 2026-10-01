@@ -45,6 +45,7 @@ const router = createBrowserRouter([
               { path: "geo", element: <Navigate to="results" replace /> },
               { path: "geo/prompts", lazy: page(() => import("./pages/geo/GeoPromptsPage"), "GeoPromptsPage") },
               { path: "geo/results", lazy: page(() => import("./pages/geo/GeoResultsPage"), "GeoResultsPage") },
+              { path: "geo/board", lazy: page(() => import("./pages/geo/EngineBoardPage"), "EngineBoardPage") },
               { path: "competitors", lazy: page(() => import("./pages/geo/CompetitorsPage"), "CompetitorsPage") },
               { path: "checklists", lazy: page(() => import("./pages/checklists/ChecklistsPage"), "ChecklistsPage") },
               { path: "pages/:pageId/checklist", lazy: page(() => import("./pages/checklists/PageChecklistPage"), "PageChecklistPage") },
