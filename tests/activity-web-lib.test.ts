@@ -106,7 +106,7 @@ describe("costs and counters", () => {
 
 describe("labels", () => {
   it("lane, outcome, kind, status chips", () => {
-    expect(laneStateLabel("asking")).toBe("Asking…");
+    expect(laneStateLabel("asking")).toBe("Asking & reading");
     expect(laneStateLabel("queued")).toBe("Queued");
     expect(LANE_STATE.done.label).toBe("Done");
     expect(outcomeChip("cited")).toEqual({ label: "Cited", tone: "success" });
@@ -137,7 +137,7 @@ describe("labels", () => {
 });
 
 describe("run selection and paths", () => {
-  it("requested run wins, else active, else first (last finished)", () => {
+  it("requested run wins, else active, else the most recent finished", () => {
     const runs = [
       { id: "a", status: "completed" },
       { id: "b", status: "running" },

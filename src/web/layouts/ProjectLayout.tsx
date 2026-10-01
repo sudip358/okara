@@ -1,5 +1,5 @@
 /** Layout for /projects/:projectId/*: loads the project, nav, persistent demo banner. OWNED BY: web-shell. */
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { Link, NavLink, Outlet, useParams } from "react-router";
 import { ApiError } from "@web/lib/api";
 import { ProjectProvider, projectPath, useProjectLoader } from "@web/lib/project-context";
@@ -29,6 +29,8 @@ export function ProjectLayout() {
   const { projectId } = useParams();
   const { project, error, loading, reload, setProject } = useProjectLoader(projectId);
   const { workspaceId, setWorkspaceId } = useSession();
+  /** Sits right below the app header and right before the sticky demo banner: the Activity panel's top edge. */
+  const activityTop = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (project && project.workspaceId !== workspaceId) setWorkspaceId(project.workspaceId);
@@ -53,6 +55,7 @@ export function ProjectLayout() {
 
   return (
     <ProjectProvider value={{ project, projectId, reload, setProject }}>
+      <div ref={activityTop} data-activity-top-anchor="" aria-hidden="true" />
       {project.isDemo && <DemoBanner />}
       <div className="mx-auto max-w-screen-2xl px-4 lg:flex lg:gap-6">
         <aside className="min-w-0 border-b border-zinc-200 py-3 lg:sticky lg:top-8 lg:w-52 lg:shrink-0 lg:self-start lg:border-b-0 lg:py-6 dark:border-zinc-800">
@@ -68,7 +71,7 @@ export function ProjectLayout() {
               {project.verifiedAt ? <Badge tone="success">Verified</Badge> : <Badge tone="warning">Unverified</Badge>}
             </div>
             <div className="mt-2">
-              <ActivityLauncher projectId={projectId} isDemo={project.isDemo} />
+              <ActivityLauncher projectId={projectId} isDemo={project.isDemo} topAnchor={activityTop} />
             </div>
           </div>
           <nav aria-label="Project">

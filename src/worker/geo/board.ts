@@ -34,6 +34,7 @@ import type { Db } from "../lib/db";
 import { parseJson } from "../lib/db";
 import type { ProjectRow } from "../platform/access";
 import { capabilityPresence } from "../runs/runtime";
+import { answerOutcome } from "../runs/activity";
 import { inChunks } from "../coverage/common";
 import { resolveCitation } from "../coverage/geo-data";
 import { selfDomains } from "./detect";
@@ -282,7 +283,7 @@ export async function buildEngineBoard(env: Env, db: Db, project: ProjectRow, no
         return { promptId: p.id, promptText: p.text, observationId: null, status: "not_run", position: null, sentiment: null, latencyMs: null, grounded: false, citedInstead: null, observedAt: null };
       }
       const self = selfOf(r.id);
-      const status: EngineFeedItem["status"] = self?.cited === 1 ? "cited" : self?.mentioned === 1 ? "named" : "missing";
+      const status = answerOutcome({ status: r.status, analysed: true, selfCited: self?.cited === 1, selfMentioned: self?.mentioned === 1 }) as EngineFeedItem["status"];
       const measuredSentiment = self && self.mentioned === 1 && self.sentiment !== "not_applicable" && self.sentiment !== "unknown";
       const other = status === "cited" ? null : (citationsByObs.get(r.id) ?? []).find((c) => !c.self && c.host);
       return {

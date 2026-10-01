@@ -27,11 +27,12 @@ export function RunNowButton({
         size={size}
         loading={m.loading}
         disabled={disabled}
-        onClick={async () => {
+        onClick={async (e) => {
+          const opener = e.currentTarget;
           const run = await m.run();
           if (run) {
             onStarted?.(run);
-            openActivity({ projectId, runId: run.id });
+            openActivity({ projectId, runId: run.id, opener });
           }
         }}
       >

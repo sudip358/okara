@@ -104,11 +104,18 @@ describe("answerOutcome", () => {
 
 describe("cursor", () => {
   it("round-trips and rejects garbage", () => {
-    const c = { at: "2026-09-30T12:00:00.000Z", id: "obs:obs_abc" };
+    const c = { e: 3, s: 0, o: 12, d: 7, c: 99 };
     expect(decodeCursor(encodeCursor(c))).toEqual(c);
     expect(decodeCursor(null)).toBeNull();
     expect(() => decodeCursor("!!!")).toThrow(HttpError);
     expect(() => decodeCursor(btoa("x|y"))).toThrow(HttpError);
+    const b64u = (v: unknown) => btoa(JSON.stringify(v)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    expect(() => decodeCursor(b64u({ e: 1, s: 0, o: 0, d: 0 }))).toThrow(HttpError);
+    expect(() => decodeCursor(b64u({ e: -1, s: 0, o: 0, d: 0, c: 0 }))).toThrow(HttpError);
+    expect(() => decodeCursor(b64u({ e: 1.5, s: 0, o: 0, d: 0, c: 0 }))).toThrow(HttpError);
+    expect(() => decodeCursor(b64u({ e: "1", s: 0, o: 0, d: 0, c: 0 }))).toThrow(HttpError);
+    expect(() => decodeCursor(b64u({ e: 1, s: 0, o: 0, d: 0, c: 0, x: 1 }))).toThrow(HttpError);
+    expect(() => decodeCursor(b64u([1, 2, 3, 4, 5]))).toThrow(HttpError);
   });
 });
 
@@ -132,7 +139,7 @@ describe("GET /projects/:pid/runs/:runId/activity", () => {
     expect((await call(`/projects/${pa}/runs/${runA2}/activity?after=bogus!`)).status).toBe(400);
   });
 
-  it("pages with the cursor, returning only newer items in (at, id) order", async () => {
+  it("pages with the cursor, returning only newer items, each page in (at, id) order", async () => {
     const env = createTestEnv();
     const u = await seedUser(env);
     const pid = await seedProject(env, u.workspaceId);

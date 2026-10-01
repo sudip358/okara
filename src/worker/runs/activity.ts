@@ -9,9 +9,15 @@
  *   provider_calls      -> kind "provider_call"  (id "call:<id>", at = created_at; geo_answer calls are folded
  *                                                 into their engine_answer item and not listed twice)
  *
- * Paging: items are ordered by (at, id). The cursor encodes the last (at, id) returned; each source selects
- * only rows with (at, prefixed id) > cursor, ordered and LIMITed, then the sources are merge-sorted and cut
- * to `limit`. Totals, lanes and queued pairs are always computed over the whole run.
+ * Paging: writers stamp rows with times taken before the insert (batched snapshots, Jev decisions stamped
+ * with a per-batch clock, concurrent GEO lanes), so timestamps are NOT insertion order and an (at, id)
+ * keyset would drop late rows. The cursor is therefore a per-source insertion high-water mark (SQLite
+ * rowid): {e: run_events, s: page_snapshots, o: geo_observations, d: decision_records, c: provider_calls}.
+ * Each source selects rows with rowid > its mark, in rowid order, LIMITed; the sources are merged by
+ * repeatedly taking the head with the smallest (at, id) (so each source contributes a rowid prefix and its
+ * mark advances exactly over what was returned), and the page is returned sorted by (at, id).
+ * While the run is active, an 'ok' answer not yet analysed stops the observation source (for at most
+ * OBS_HOLD_MS) so the answer arrives with its outcome. Totals, lanes and queued pairs always cover the run.
  *
  * Rules: every query filters workspace_id AND project_id (plus run_id); every source query has a LIMIT;
  * dynamic IN lists are chunked below D1's 100 bound parameters; unknown cost stays null (never $0);
@@ -31,6 +37,7 @@ import { clip, inChunks } from "../coverage/common";
 import { resolveCitation } from "../coverage/geo-data";
 import { selfDomains } from "../geo/detect";
 import { BOARD_LANES, LANE_LABELS } from "../geo/board";
+import { DEFAULT_PROMPTS_PER_RUN } from "../geo/batch";
 import { isGeoEngineId } from "../geo/engines";
 
 export const ACTIVITY_DEFAULT_LIMIT = 80;
@@ -38,11 +45,18 @@ export const ACTIVITY_MAX_LIMIT = 200;
 export const ACTIVITY_QUEUED_MAX = 12;
 /** Cap on the run's observations read for totals/lanes (a run samples at most prompts-per-run x engines). */
 export const ACTIVITY_OBSERVATION_CAP = 2000;
+/**
+ * How long, while the run is active, an 'ok' answer without analysis rows holds back the observation source
+ * (geo/batch.ts analyses right after storing; a failed analysis never writes rows, so the hold is bounded).
+ */
+export const OBS_HOLD_MS = 120_000;
 const TITLE_MAX = 160;
 const DETAIL_MAX = 200;
 
 const ENGINE_NAME: Record<string, string> = { gemini: "Gemini", perplexity: "Perplexity", openai_geo: "OpenAI", anthropic_geo: "Anthropic" };
 const TERMINAL_STEP = new Set(["completed", "failed", "partial", "skipped"]);
+/** Message prefix of geo/batch.ts's per-observation analysis failure event (not a lane end). */
+const ANALYSIS_FAILED_PREFIX = "Analysis failed for observation";
 
 // ------------------------------------------------------------------ outcome of one engine answer
 
@@ -64,34 +78,64 @@ export function answerOutcome(o: { status: string; analysed: boolean; selfCited:
 
 // ------------------------------------------------------------------ cursor
 
+/** Per-source insertion high-water marks (rowid); all 0 at the start of a run. */
 export interface ActivityCursor {
-  at: string;
-  id: string;
+  /** run_events */
+  e: number;
+  /** page_snapshots */
+  s: number;
+  /** geo_observations */
+  o: number;
+  /** decision_records */
+  d: number;
+  /** provider_calls */
+  c: number;
+  /**
+   * Crawl attempt the `s` mark refers to (Date.parse of crawl_runs.started_at; 0/absent = none). A retried
+   * crawl step deletes and rewrites its snapshots, and SQLite can reuse their rowids, so `s` restarts at 0
+   * when the attempt changes.
+   */
+  k?: number;
 }
 
-const CURSOR_ID = /^(evt|snap|obs|dec|call):[A-Za-z0-9_.-]{1,120}$/;
-const CURSOR_AT = /^\d{4}-\d{2}-\d{2}T[0-9:.]{5,18}Z$/;
+const CURSOR_KEYS = ["e", "s", "o", "d", "c"] as const;
+type SourceKey = (typeof CURSOR_KEYS)[number];
+
+export const START_CURSOR: Readonly<ActivityCursor> = Object.freeze({ e: 0, s: 0, o: 0, d: 0, c: 0 });
 
 export function encodeCursor(c: ActivityCursor): string {
-  return btoa(`${c.at}|${c.id}`).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const json = JSON.stringify(c.k ? { e: c.e, s: c.s, o: c.o, d: c.d, c: c.c, k: c.k } : { e: c.e, s: c.s, o: c.o, d: c.d, c: c.c });
+  return btoa(json).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-/** Decodes an opaque cursor; throws 400 on anything malformed. */
+/** Decodes an opaque cursor (base64url JSON of per-source rowid marks); throws 400 on anything malformed. */
 export function decodeCursor(raw: string | null | undefined): ActivityCursor | null {
   if (raw === null || raw === undefined || raw === "") return null;
-  let text: string;
+  let parsed: unknown;
   try {
     if (raw.length > 400 || !/^[A-Za-z0-9_-]+$/.test(raw)) throw new Error("bad");
     const b64 = raw.replace(/-/g, "+").replace(/_/g, "/");
-    text = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
+    parsed = JSON.parse(atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4)));
   } catch {
     throw badRequest("Invalid activity cursor.");
   }
-  const sep = text.indexOf("|");
-  const at = sep > 0 ? text.slice(0, sep) : "";
-  const id = sep > 0 ? text.slice(sep + 1) : "";
-  if (!CURSOR_AT.test(at) || !CURSOR_ID.test(id)) throw badRequest("Invalid activity cursor.");
-  return { at, id };
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw badRequest("Invalid activity cursor.");
+  const obj = parsed as Record<string, unknown>;
+  const keys = Object.keys(obj);
+  const hasK = keys.includes("k");
+  if (keys.length !== CURSOR_KEYS.length + (hasK ? 1 : 0) || !CURSOR_KEYS.every((k) => keys.includes(k))) throw badRequest("Invalid activity cursor.");
+  const out: ActivityCursor = { ...START_CURSOR };
+  if (hasK) {
+    const v = obj.k;
+    if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) throw badRequest("Invalid activity cursor.");
+    out.k = v;
+  }
+  for (const k of CURSOR_KEYS) {
+    const v = obj[k];
+    if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) throw badRequest("Invalid activity cursor.");
+    out[k] = v;
+  }
+  return out;
 }
 
 export function parseLimit(raw: string | null | undefined): number {
@@ -112,10 +156,6 @@ function compareItems(a: { at: string; id: string }, b: { at: string; id: string
   return ai < bi ? -1 : ai > bi ? 1 : 0;
 }
 
-function afterCursor(item: { at: string; id: string }, c: ActivityCursor | null): boolean {
-  return c === null || compareItems(item, c) > 0;
-}
-
 // ------------------------------------------------------------------ rows
 
 interface RunRowLite {
@@ -129,6 +169,7 @@ interface RunRowLite {
 }
 
 interface EventRow {
+  rid: number;
   id: string;
   step: string;
   status: string;
@@ -137,6 +178,7 @@ interface EventRow {
 }
 
 interface SnapRow {
+  rid: number;
   id: string;
   status_code: number | null;
   skipped_reason: string | null;
@@ -146,6 +188,7 @@ interface SnapRow {
 }
 
 interface ObsRow {
+  rid: number;
   id: string;
   provider: string;
   prompt_id: string | null;
@@ -164,6 +207,7 @@ interface ObsRow {
 }
 
 interface DecisionRow {
+  rid: number;
   id: string;
   agent: "seo" | "geo";
   candidate_key: string;
@@ -175,7 +219,14 @@ interface DecisionRow {
   created_at: string;
 }
 
+interface LaneEventRow {
+  step: string;
+  status: string;
+  message: string;
+}
+
 interface CallRow {
+  rid: number;
   id: string;
   provider: string;
   model: string | null;
@@ -188,11 +239,48 @@ interface CallRow {
   created_at: string;
 }
 
-const CURSOR_SQL = (col: string, prefix: string, idCol: string) => `(${col} > ? OR (${col} = ? AND ('${prefix}:' || ${idCol}) > ?))`;
+/** Columns of one observation row; analysis subqueries match workspace AND project. */
+const OBS_COLUMNS = `o.rowid AS rid, o.id, o.provider, o.prompt_id, o.prompt_set_id, o.prompt_text, o.status, o.grounded, o.request_id, o.cost_usd,
+              o.cost_is_estimate, o.error, o.created_at,
+              EXISTS (SELECT 1 FROM geo_brand_observations b WHERE b.observation_id = o.id AND b.workspace_id = o.workspace_id AND b.project_id = o.project_id) AS analysed,
+              (SELECT MAX(b.cited) FROM geo_brand_observations b
+                WHERE b.observation_id = o.id AND b.workspace_id = o.workspace_id AND b.project_id = o.project_id AND b.is_self = 1) AS self_cited,
+              (SELECT MAX(b.mentioned) FROM geo_brand_observations b
+                WHERE b.observation_id = o.id AND b.workspace_id = o.workspace_id AND b.project_id = o.project_id AND b.is_self = 1) AS self_mentioned`;
 
-function cursorParams(c: ActivityCursor | null): [string, string, string] {
-  // An empty cursor matches every stored row (ISO timestamps are non-empty).
-  return c ? [c.at, c.at, c.id] : ["", "", ""];
+interface StreamEntry {
+  rid: number;
+  item: ActivityItem;
+}
+
+/**
+ * Merges per-source streams (each in rowid order) into at most `limit` items, always taking the head with the
+ * smallest (at, id). Each source therefore contributes a rowid prefix, and its mark advances to the last rid
+ * taken (rows left over are sent on the next poll). Returns the items sorted by (at, id) and the new marks.
+ */
+export function mergeStreams(
+  streams: Partial<Record<SourceKey, StreamEntry[]>>,
+  from: ActivityCursor,
+  limit: number,
+): { items: ActivityItem[]; marks: ActivityCursor } {
+  const marks: ActivityCursor = { ...from };
+  const pos: Record<SourceKey, number> = { e: 0, s: 0, o: 0, d: 0, c: 0 };
+  const items: ActivityItem[] = [];
+  while (items.length < limit) {
+    let best: SourceKey | null = null;
+    for (const k of CURSOR_KEYS) {
+      const head = streams[k]?.[pos[k]];
+      if (!head) continue;
+      if (best === null || compareItems(head.item, streams[best]![pos[best]]!.item) < 0) best = k;
+    }
+    if (best === null) break;
+    const entry = streams[best]![pos[best]]!;
+    items.push(entry.item);
+    marks[best] = Math.max(marks[best], entry.rid);
+    pos[best]++;
+  }
+  items.sort(compareItems);
+  return { items, marks };
 }
 
 // ------------------------------------------------------------------ item mapping
@@ -292,7 +380,7 @@ function obsItem(r: ObsRow, cites: CitationInfo | undefined, latencyMs: number |
     provider: r.provider,
     latencyMs,
     costUsd: r.cost_usd,
-    costIsEstimate: r.cost_usd === null ? true : r.cost_is_estimate === 1,
+    costIsEstimate: r.cost_usd !== null && r.cost_is_estimate === 1,
     url: null,
     outcome,
   };
@@ -334,7 +422,7 @@ function callItem(r: CallRow, agent: "seo" | "geo"): ActivityItem {
     provider: r.provider,
     latencyMs: r.latency_ms,
     costUsd: r.cost_usd,
-    costIsEstimate: r.cost_usd === null ? true : r.cost_is_estimate === 1,
+    costIsEstimate: r.cost_usd !== null && r.cost_is_estimate === 1,
     url: null,
     outcome: null,
   };
@@ -363,41 +451,61 @@ export async function buildRunActivity(db: Db, project: ProjectRow, runId: strin
   if (!run) return null;
   const limit = Math.max(1, Math.min(opts.limit ?? ACTIVITY_DEFAULT_LIMIT, ACTIVITY_MAX_LIMIT));
   const cursor = opts.after ?? null;
-  const cp = cursorParams(cursor);
+  const from: ActivityCursor = cursor ?? { ...START_CURSOR };
   const active = run.status === "pending" || run.status === "running";
   const isGeo = run.agent === "geo";
 
-  const [events, snaps, obs, decisions, calls, answerCalls, spendRow, decisionCounts, crawl, pagesReadRow, laneEvents] = await Promise.all([
+  // The run's crawl attempt: a retry rewrites its snapshots (rowids can be reused), so the snapshot mark
+  // only applies to the attempt it was taken on.
+  const crawlAttempt = await db.first<{ id: string; started_at: string | null }>(
+    "SELECT id, started_at FROM crawl_runs WHERE workspace_id = ? AND project_id = ? AND run_id = ? ORDER BY started_at DESC, id DESC LIMIT 1",
+    ws,
+    pid,
+    run.id,
+  );
+  const crawlKey = crawlAttempt?.started_at ? Math.max(0, Date.parse(crawlAttempt.started_at) || 0) : 0;
+  const sFrom = (from.k ?? 0) === crawlKey ? from.s : 0;
+
+  const [events, snaps, pageObsRows, obs, decisions, calls, answerCalls, spendRow, decisionCounts, crawl, pagesReadRow, laneEventsDesc] = await Promise.all([
     db.all<EventRow>(
-      `SELECT id, step, status, message, created_at FROM run_events
-        WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND ${CURSOR_SQL("created_at", "evt", "id")}
-        ORDER BY created_at, id LIMIT ?`,
+      `SELECT rowid AS rid, id, step, status, message, created_at FROM run_events
+        WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND rowid > ?
+        ORDER BY rowid LIMIT ?`,
       ws,
       pid,
       run.id,
-      ...cp,
+      from.e,
       limit,
     ),
     db.all<SnapRow>(
-      `SELECT s.id, s.status_code, s.skipped_reason, s.word_count, s.fetched_at AS created_at, p.url
+      `SELECT s.rowid AS rid, s.id, s.status_code, s.skipped_reason, s.word_count, s.fetched_at AS created_at, p.url
          FROM page_snapshots s
          JOIN crawl_runs c ON c.id = s.crawl_run_id AND c.workspace_id = s.workspace_id AND c.project_id = s.project_id
          JOIN pages p ON p.id = s.page_id AND p.workspace_id = s.workspace_id AND p.project_id = s.project_id
-        WHERE s.workspace_id = ? AND s.project_id = ? AND c.run_id = ? AND ${CURSOR_SQL("s.fetched_at", "snap", "s.id")}
-        ORDER BY s.fetched_at, s.id LIMIT ?`,
+        WHERE s.workspace_id = ? AND s.project_id = ? AND c.run_id = ? AND s.crawl_run_id = ? AND s.rowid > ?
+        ORDER BY s.rowid LIMIT ?`,
       ws,
       pid,
       run.id,
-      ...cp,
+      crawlAttempt?.id ?? "",
+      sFrom,
       limit,
     ),
-    // Every observation of the run (bounded): items, answer totals, lanes and queued pairs share it.
+    // Observations after the cursor (items), in insertion order.
     db.all<ObsRow>(
-      `SELECT o.id, o.provider, o.prompt_id, o.prompt_set_id, o.prompt_text, o.status, o.grounded, o.request_id, o.cost_usd, o.cost_is_estimate,
-              o.error, o.created_at,
-              EXISTS (SELECT 1 FROM geo_brand_observations b WHERE b.observation_id = o.id AND b.workspace_id = o.workspace_id) AS analysed,
-              (SELECT MAX(b.cited) FROM geo_brand_observations b WHERE b.observation_id = o.id AND b.workspace_id = o.workspace_id AND b.is_self = 1) AS self_cited,
-              (SELECT MAX(b.mentioned) FROM geo_brand_observations b WHERE b.observation_id = o.id AND b.workspace_id = o.workspace_id AND b.is_self = 1) AS self_mentioned
+      `SELECT ${OBS_COLUMNS}
+         FROM geo_observations o
+        WHERE o.workspace_id = ? AND o.project_id = ? AND o.run_id = ? AND o.rowid > ?
+        ORDER BY o.rowid LIMIT ?`,
+      ws,
+      pid,
+      run.id,
+      from.o,
+      limit,
+    ),
+    // Every observation of the run (bounded): answer totals, lanes and queued pairs.
+    db.all<ObsRow>(
+      `SELECT ${OBS_COLUMNS}
          FROM geo_observations o
         WHERE o.workspace_id = ? AND o.project_id = ? AND o.run_id = ?
         ORDER BY o.created_at, o.id LIMIT ${ACTIVITY_OBSERVATION_CAP}`,
@@ -406,23 +514,23 @@ export async function buildRunActivity(db: Db, project: ProjectRow, runId: strin
       run.id,
     ),
     db.all<DecisionRow>(
-      `SELECT id, agent, candidate_key, question_id, provider, tier, outcome, reason_code, created_at FROM decision_records
-        WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND ${CURSOR_SQL("created_at", "dec", "id")}
-        ORDER BY created_at, id LIMIT ?`,
+      `SELECT rowid AS rid, id, agent, candidate_key, question_id, provider, tier, outcome, reason_code, created_at FROM decision_records
+        WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND rowid > ?
+        ORDER BY rowid LIMIT ?`,
       ws,
       pid,
       run.id,
-      ...cp,
+      from.d,
       limit,
     ),
     db.all<CallRow>(
-      `SELECT id, provider, model, purpose, status, cost_usd, cost_is_estimate, latency_ms, error, created_at FROM provider_calls
-        WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND purpose NOT LIKE 'geo_answer%' AND ${CURSOR_SQL("created_at", "call", "id")}
-        ORDER BY created_at, id LIMIT ?`,
+      `SELECT rowid AS rid, id, provider, model, purpose, status, cost_usd, cost_is_estimate, latency_ms, error, created_at FROM provider_calls
+        WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND purpose NOT LIKE 'geo_answer%' AND rowid > ?
+        ORDER BY rowid LIMIT ?`,
       ws,
       pid,
       run.id,
-      ...cp,
+      from.c,
       limit,
     ),
     // Engine-answer calls: latency per request id (folded into engine_answer items and lanes).
@@ -456,29 +564,40 @@ export async function buildRunActivity(db: Db, project: ProjectRow, runId: strin
       run.id,
     ),
     db.first<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM page_snapshots s JOIN crawl_runs c ON c.id = s.crawl_run_id AND c.workspace_id = s.workspace_id
+      `SELECT COUNT(*) AS n FROM page_snapshots s
+         JOIN crawl_runs c ON c.id = s.crawl_run_id AND c.workspace_id = s.workspace_id AND c.project_id = s.project_id
         WHERE s.workspace_id = ? AND s.project_id = ? AND c.run_id = ? AND s.skipped_reason IS NULL`,
       ws,
       pid,
       run.id,
     ),
     isGeo
-      ? db.all<{ step: string; status: string }>(
-          `SELECT step, status FROM run_events WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND (step LIKE 'geo_batch:%' OR step = 'geo.batch')
-            ORDER BY created_at, id LIMIT 200`,
+      ? db.all<LaneEventRow>(
+          // Newest 200 lane events, re-ordered ascending below so state is assigned in event order.
+          `SELECT step, status, message FROM run_events WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND (step LIKE 'geo_batch:%' OR step = 'geo.batch')
+            ORDER BY created_at DESC, rowid DESC LIMIT 200`,
           ws,
           pid,
           run.id,
         )
-      : Promise.resolve([] as Array<{ step: string; status: string }>),
+      : Promise.resolve([] as LaneEventRow[]),
   ]);
+  const laneEvents = laneEventsDesc.slice().reverse();
 
   const latencyByRequest = new Map<string, number | null>();
   for (const c of answerCalls) latencyByRequest.set(c.request_id, c.latency_ms);
   const latencyOf = (o: ObsRow) => (o.request_id ? (latencyByRequest.get(o.request_id) ?? null) : null);
 
   // ---------------------------------------------------------------- items (merge of all sources)
-  const pageObs = obs.filter((o) => afterCursor({ at: o.created_at, id: `obs:${o.id}` }, cursor)).slice(0, limit);
+  // While active, the observation source stops at the first 'ok' answer not yet analysed (bounded by
+  // OBS_HOLD_MS), so the item is sent once, with its outcome, instead of "awaiting analysis" forever.
+  const nowMs = opts.now.getTime();
+  const pageObs: ObsRow[] = [];
+  for (const o of pageObsRows) {
+    const age = nowMs - Date.parse(o.created_at);
+    if (active && o.status === "ok" && o.analysed !== 1 && !(age >= OBS_HOLD_MS)) break;
+    pageObs.push(o);
+  }
   const citeInfo = new Map<string, CitationInfo>();
   const okIds = pageObs.filter((o) => o.status === "ok").map((o) => o.id);
   if (okIds.length > 0) {
@@ -502,17 +621,22 @@ export async function buildRunActivity(db: Db, project: ProjectRow, runId: strin
     }
   }
 
-  const merged: ActivityItem[] = [
-    ...events.map((e) => stepItem(e, run.agent)),
-    ...snaps.map(snapItem),
-    ...pageObs.map((o) => obsItem(o, citeInfo.get(o.id), latencyOf(o))),
-    ...decisions.map(decisionItem),
-    ...calls.map((c) => callItem(c, run.agent)),
-  ].filter((i) => afterCursor(i, cursor));
-  merged.sort(compareItems);
-  const items = merged.slice(0, limit);
-  const last = items[items.length - 1];
-  const nextCursor = last ? encodeCursor({ at: last.at, id: last.id }) : cursor ? encodeCursor(cursor) : null;
+  const { items, marks } = mergeStreams(
+    {
+      e: events.map((r) => ({ rid: r.rid, item: stepItem(r, run.agent) })),
+      s: snaps.map((r) => ({ rid: r.rid, item: snapItem(r) })),
+      o: pageObs.map((r) => ({ rid: r.rid, item: obsItem(r, citeInfo.get(r.id), latencyOf(r)) })),
+      d: decisions.map((r) => ({ rid: r.rid, item: decisionItem(r) })),
+      c: calls.map((r) => ({ rid: r.rid, item: callItem(r, run.agent) })),
+    },
+    { ...from, s: sFrom },
+    limit,
+  );
+  const crawlChanged = (from.k ?? 0) !== crawlKey;
+  // With nothing new, the request's cursor is echoed (null when none was given); a new crawl attempt still
+  // returns a cursor so the snapshot reset is not repeated on every poll.
+  const nextCursor =
+    items.length > 0 || (cursor && crawlChanged) ? encodeCursor({ ...marks, k: crawlKey }) : cursor ? encodeCursor(cursor) : null;
 
   // ---------------------------------------------------------------- totals
   const answers = { cited: 0, named: 0, missing: 0, failed: 0 };
@@ -532,10 +656,13 @@ export async function buildRunActivity(db: Db, project: ProjectRow, runId: strin
   };
 
   // ---------------------------------------------------------------- now reading (crawl step active)
+  // The latest STORED page read: crawl/run.ts writes snapshots in batches of up to 10, so this can trail the
+  // crawler by up to that many pages; it is never extrapolated.
   let nowReading: RunActivity["nowReading"] = null;
   if (active && crawl && crawl.status === "running") {
     const latest = await db.first<{ url: string; at: string }>(
-      `SELECT p.url, s.fetched_at AS at FROM page_snapshots s JOIN pages p ON p.id = s.page_id AND p.workspace_id = s.workspace_id
+      `SELECT p.url, s.fetched_at AS at FROM page_snapshots s
+         JOIN pages p ON p.id = s.page_id AND p.workspace_id = s.workspace_id AND p.project_id = s.project_id
         WHERE s.workspace_id = ? AND s.project_id = ? AND s.crawl_run_id = ? ORDER BY s.fetched_at DESC, s.id DESC LIMIT 1`,
       ws,
       pid,
@@ -592,21 +719,30 @@ async function buildLanes(
   run: RunRowLite,
   active: boolean,
   obs: ObsRow[],
-  laneEvents: Array<{ step: string; status: string }>,
+  laneEvents: LaneEventRow[],
   latencyOf: (o: ObsRow) => number | null,
   configured: readonly GeoEngineProviderId[],
 ): Promise<{ lanes: ActivityLane[]; queued: ActivityQueuedItem[] }> {
+  // Events arrive in ascending order; state is ASSIGNED per event (not latched) so a retried step that
+  // logs 'started' again after an earlier failed/partial attempt reads as asking again.
   const started = new Set<string>();
   const finished = new Set<string>();
   let batchFinished = false;
   for (const e of laneEvents) {
     if (e.step === "geo.batch") {
-      if (TERMINAL_STEP.has(e.status)) batchFinished = true;
+      if (e.status === "started") batchFinished = false;
+      else if (TERMINAL_STEP.has(e.status)) batchFinished = true;
       continue;
     }
     const p = e.step.slice("geo_batch:".length);
-    if (e.status === "started") started.add(p);
-    else if (TERMINAL_STEP.has(e.status)) finished.add(p);
+    if (e.status === "started") {
+      started.add(p);
+      finished.delete(p);
+    } else if (TERMINAL_STEP.has(e.status) && !e.message.startsWith(ANALYSIS_FAILED_PREFIX)) {
+      // geo/batch.ts also logs a per-observation analysis failure as 'failed' on the lane step; that does
+      // not end the lane.
+      finished.add(p);
+    }
   }
   const seen = new Set<string>([...obs.map((o) => o.provider), ...started, ...finished].filter(isGeoEngineId));
   const include = new Set<string>([...seen, ...(active ? configured : [])]);
@@ -631,16 +767,31 @@ async function buildLanes(
       ws,
       pid,
     );
-    const cap = limits ? Math.max(0, limits.geo_prompts_per_run) : 200;
-    // Same selection as geo/batch.ts: approved prompts of the set by position, capped per run.
-    prompts = await db.all<{ id: string; text: string }>(
-      "SELECT id, text FROM geo_prompts WHERE workspace_id = ? AND project_id = ? AND prompt_set_id = ? AND approved = 1 ORDER BY position ASC, id ASC LIMIT ?",
-      ws,
-      pid,
-      setId,
-      Math.min(cap, 200),
-    );
-    planned = prompts.length;
+    // Same cap as geo/batch.ts: the limits row, else its schema default; 0 or less means nothing is sampled.
+    const cap = limits?.geo_prompts_per_run ?? DEFAULT_PROMPTS_PER_RUN;
+    if (cap <= 0) {
+      planned = 0;
+    } else {
+      // Same selection as geo/batch.ts: approved prompts of the set by position, capped per run.
+      const [countRow, rows] = await Promise.all([
+        db.first<{ n: number }>(
+          "SELECT COUNT(*) AS n FROM (SELECT 1 FROM geo_prompts WHERE workspace_id = ? AND project_id = ? AND prompt_set_id = ? AND approved = 1 LIMIT ?)",
+          ws,
+          pid,
+          setId,
+          cap,
+        ),
+        db.all<{ id: string; text: string }>(
+          "SELECT id, text FROM geo_prompts WHERE workspace_id = ? AND project_id = ? AND prompt_set_id = ? AND approved = 1 ORDER BY position ASC, id ASC LIMIT ?",
+          ws,
+          pid,
+          setId,
+          Math.min(cap, 200),
+        ),
+      ]);
+      planned = countRow?.n ?? 0;
+      prompts = rows;
+    }
   }
 
   const observedPairs = new Set(obs.filter((o) => o.prompt_id).map((o) => `${o.prompt_id}|${o.provider}`));
@@ -686,10 +837,12 @@ export async function currentActivityRuns(db: Db, ws: string, pid: string): Prom
     pid,
   );
   if (activeRuns.length > 0) return activeRuns;
-  const out: Array<{ id: string; agent: "seo" | "geo"; status: string }> = [];
+  // The latest finished run of each agent, most recent first across agents.
+  const out: Array<{ id: string; agent: "seo" | "geo"; status: string; ended: string }> = [];
   for (const agent of ["seo", "geo"] as const) {
-    const r = await db.first<{ id: string; agent: "seo" | "geo"; status: string }>(
-      `SELECT id, agent, status FROM agent_runs WHERE workspace_id = ? AND project_id = ? AND agent = ? AND status NOT IN ('pending', 'running')
+    const r = await db.first<{ id: string; agent: "seo" | "geo"; status: string; ended: string }>(
+      `SELECT id, agent, status, COALESCE(finished_at, created_at) AS ended FROM agent_runs
+        WHERE workspace_id = ? AND project_id = ? AND agent = ? AND status NOT IN ('pending', 'running')
         ORDER BY COALESCE(finished_at, created_at) DESC, id DESC LIMIT 1`,
       ws,
       pid,
@@ -697,5 +850,6 @@ export async function currentActivityRuns(db: Db, ws: string, pid: string): Prom
     );
     if (r) out.push(r);
   }
-  return out;
+  out.sort((a, b) => (a.ended === b.ended ? 0 : a.ended < b.ended ? 1 : -1));
+  return out.map(({ id, agent, status }) => ({ id, agent, status }));
 }

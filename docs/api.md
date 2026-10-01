@@ -219,7 +219,7 @@ dynamic `IN` lists under D1's 100 bound parameters. No provider call, no Jev, no
 ### GET /projects/:pid/runs/:runId/activity?after=<cursor>&limit=<n> → `RunActivity`
 - 404 unless the run belongs to this project and workspace. `limit` defaults to 80, max 200; a malformed
   `after` is 400.
-- `items` (ascending by `(at, id)`), one per stored row:
+- `items` (each page ascending by `(at, id)`; merge pages by `id`), one per stored row:
   | kind | source | id | at | notes |
   |---|---|---|---|---|
   | `step` | `run_events` | `evt:<id>` | `created_at` | title = stored message; `provider` set for `geo_batch:<engine>` steps |
@@ -230,12 +230,22 @@ dynamic `IN` lists under D1's 100 bound parameters. No provider call, no Jev, no
 - Answer outcome uses the AI engine board's definition (`answerOutcome`): `cited` = own-site citation
   (self brand row `cited`), `named` = brand mentioned without own-site citation, `missing` = neither; failed
   and incomplete answers are `failed` (never absences); an `ok` answer not yet analysed has outcome `null`
-  ("awaiting analysis") and is not counted. "Cited instead" is the first non-own-site citation host.
+  ("awaiting analysis") and is not counted. While the run is active, an `ok` answer that is not analysed yet
+  is held back (for at most 120 s after its `created_at`) and so is every later observation, so answers
+  normally arrive once, with their outcome; a held answer that is later sent with a changed outcome keeps
+  its `id`, so clients replace by `id`. "Cited instead" is the first non-own-site citation host.
 - Untrusted text (prompts, messages, errors, URLs) is plain text clipped to 160 characters; render as text.
-- Cursor: opaque encoding of the last item's `(at, id)`. Each source selects rows with
-  `(at, '<prefix>:' || id) > cursor`, ordered and limited; the sources are merge-sorted and cut to `limit`.
-  With no new items the request's cursor is echoed (null when none was given). Without `after`, items start
-  at the beginning of the run, so a client pages forward until `items` is empty and then polls.
+- `costUsd` is null when the cost is unknown; `costIsEstimate` is true only for a known, estimated cost.
+- Cursor: opaque (base64url JSON); clients must not parse it. Writers stamp rows with times taken before
+  the insert (snapshot batches, per-batch Jev clocks, concurrent GEO lanes), so timestamps are not insertion
+  order; the cursor therefore holds one insertion high-water mark (SQLite `rowid`) per source (run events,
+  snapshots, observations, decisions, provider calls). Each source selects rows with `rowid` above its mark,
+  in `rowid` order, limited; the sources are merged by repeatedly taking the head with the smallest
+  `(at, id)` until `limit`, so each mark advances exactly over the rows returned and the rest come on the
+  next poll. A row stamped earlier than one already returned is still delivered; an item can therefore be
+  older than items of a previous page. With no new items the request's cursor is echoed (null when none was
+  given). Without `after`, items start at the beginning of the run, so a client pages forward until `items`
+  is empty and then polls. A malformed cursor is 400.
 - `totals` always cover the whole run regardless of `after`:
   `spend.usd` = sum of `provider_calls.cost_usd` of the run; null when the run has calls but none is priced
   (unknown is never $0); 0 only when the run made no calls. `unknownCalls` = calls with null cost;
@@ -247,14 +257,19 @@ dynamic `IN` lists under D1's 100 bound parameters. No provider call, no Jev, no
   (lane step finished, or the run ended with answers), `asking` (lane started or has answers, run active),
   `queued` (run active, lane not started), `idle` (otherwise). `done` = answers stored; `planned` = approved
   prompts of the run's prompt set (the set its answers came from; the active set before any answer), capped
-  by `project_limits.geo_prompts_per_run` exactly like `geo/batch.ts`; null when unknown. `lastLatencyMs` from
-  the lane's latest linked call.
+  by `project_limits.geo_prompts_per_run` (or, without a limits row, `geo/batch.ts` `DEFAULT_PROMPTS_PER_RUN`)
+  like `geo/batch.ts`; 0 when the cap is 0 or less (nothing is sampled); null when unknown. Lane step events
+  are applied in order, so a retried step that logs `started` again reads as `asking`; the per-observation
+  "Analysis failed" event does not end a lane. `lastLatencyMs` from the lane's latest linked call.
 - `queued` (GEO runs, while active): up to 12 not-yet-observed (prompt, engine) pairs, asking lanes first.
-- `nowReading`: the latest page snapshot while the run is active and its crawl (`crawl_runs.status`) is
+- `nowReading`: latest stored page read; snapshots are written in batches of up to 10, so it can trail the
+  crawler by up to that many pages. Set while the run is active and its crawl (`crawl_runs.status`) is
   `running`; null otherwise.
+- Crawl retries: a retried crawl step deletes and rewrites its page reads (SQLite may reuse their rowids), so the cursor records the crawl attempt (`crawl_runs.started_at`) and restarts the page-read mark when it changes; page reads from the abandoned attempt can remain in the client's feed although they are no longer stored.
 - `run.elapsedMs` = `finished_at` (or now, while active) − `started_at`; null before start.
 
 ### GET /projects/:pid/activity/current → `{runs: Array<{id, agent, status}>}`
 Active runs (`pending`/`running`) of the project, newest first (max 10); when none, the most recent finished
-run of each agent so the window can replay it. Demo projects return their two demo runs (labelled simulated;
+run of each agent, ordered by `COALESCE(finished_at, created_at)` descending across agents, so the window can
+replay the latest one. Demo projects return their two demo runs (labelled simulated;
 demo rows carry the run id and a time spread so the replay reads in order, with costs and latencies null).

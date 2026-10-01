@@ -41,22 +41,35 @@ function body(a = activity(), over: Record<string, unknown> = {}) {
 describe("ActivityBody (active GEO run)", () => {
   const html = body();
   const t = text(html);
-  it("header: agent, status chip, trigger, ticking elapsed, spend with labels, call count", () => {
+  it("header: agent, status chip with live dot, trigger, big mm:ss elapsed, spend with labels, call count", () => {
     expect(t).toContain("GEO run");
     expect(t).toContain("Running");
+    expect(html).toContain("okara-activity-ping");
     expect(t).toContain("Manual");
     expect(t).toContain("Elapsed");
-    expect(t).toContain("7m 12s");
-    expect(t).toContain("$0.162");
+    expect(t).toContain("07:12");
+    expect(html).toContain("tabular-nums");
+    expect(t).toContain("Spend so far $0.162");
     expect(t).toContain("Estimate · 2 calls with unknown cost");
-    expect(t).toContain("Provider calls 14");
+    expect(t).toContain("Calls 14");
     expect(t).toContain("Live from this run's stored events");
   });
-  it("counters, lanes, queued", () => {
-    expect(t).toContain("3 cited · 1 named · 9 missing · 1 failed");
+  it("stat row: citing (green) / skipping (red) / cited instead from loaded answers", () => {
+    expect(t).toContain("Answers citing you 3");
+    expect(t).toContain("+1 named, not cited");
+    expect(t).toContain("Answers skipping you 9");
+    expect(t).toContain("1 failed");
+    expect(html).toContain("text-emerald-600");
+    expect(html).toContain("text-red-600");
+    expect(t).toContain("Cited instead forum.example");
+    expect(t).toContain("in 1 of 1 loaded answers");
     expect(t).toContain("2 act · 1 flag · 4 drop");
+  });
+  it("lane cards: initial badge, short name, server label, state chip, progress, latency; queued", () => {
     expect(t).toContain("Gemini");
-    expect(t).toContain("Asking…");
+    expect(t).toContain("Asking & reading");
+    expect(html).toContain('role="progressbar"');
+    expect(html).toContain('aria-valuenow="5"');
     expect(t).toContain("5 of 12");
     expect(t).toContain("last 190 ms");
     expect(t).toContain("Queued (1)");
@@ -66,10 +79,16 @@ describe("ActivityBody (active GEO run)", () => {
     expect(html).not.toContain("<b>linen</b>");
     expect(html).toContain("&lt;b&gt;linen&lt;/b&gt;");
   });
-  it("feed item: kind badge, latency, cost, outcome chip; feed is a polite log", () => {
-    expect(html).toContain('role="log"');
-    expect(html).toContain('aria-live="polite"');
-    expect(t).toContain("AI");
+  it("feed: titled Live feed; list is a non-live log, announcements go to a sibling sr-only status", () => {
+    expect(t).toContain("Live feed");
+    expect(html).toMatch(/<p role="status" aria-live="polite" class="sr-only">/);
+    expect(html).toContain('role="log" aria-live="off"');
+    // The status region is not inside the log.
+    const log = html.slice(html.indexOf('role="log"'));
+    expect(log).not.toContain('aria-live="polite"');
+  });
+  it("feed card: latency top-left, outcome chip, kind + cost meta", () => {
+    expect(t).toContain("Engine answer");
     expect(t).toContain("227 ms");
     expect(t).toContain("~$0.0012 est.");
     expect(t).toContain("Missing");
@@ -91,8 +110,10 @@ describe("ActivityBody (SEO crawl)", () => {
       items: [item({ id: "snap:1", kind: "page_read", provider: "crawler", title: "Read /blog/linen", detail: "200 · 1,240 words", url: "https://shop.example/blog/linen", outcome: null, status: "ok", costUsd: null, latencyMs: 340 })],
     });
     const t = text(body(a));
-    expect(t).toContain("Now reading https://shop.example/blog/linen");
-    expect(t).toContain("12 of 50 pages read");
+    expect(t).toContain("Last page read · shop.example");
+    expect(t).toContain("shop.example/blog/linen");
+    expect(t).toContain("Pages read 12 of 50 planned");
+    expect(t).toContain("Read");
     expect(t).toContain("200 · 1,240 words");
     expect(t).not.toContain("Answers");
     expect(t).not.toContain("API-sampled");
@@ -115,8 +136,10 @@ describe("ActivityBody (finished replay)", () => {
     expect(html).toContain('href="/projects/proj1/geo/board"');
     expect(html).toContain('href="/projects/proj1/runs/run1"');
     expect(t).not.toContain("Queued (");
-    expect(t).not.toContain("Now reading");
+    expect(t).not.toContain("Last page read");
     expect(t).not.toContain("Live from this run");
+    expect(t).toContain("Replay");
+    expect(t).toContain("07:12");
   });
 });
 
@@ -147,7 +170,9 @@ describe("Launcher + panel shell", () => {
     expect(html).toContain('aria-label="Close activity window"');
     expect(text(html)).toContain("Demo data");
     expect(text(html)).toContain("No runs yet");
-    expect(html).toContain("sm:w-[420px]");
+    expect(html).toContain("sm:w-[460px]");
+    expect(html).toContain("sm:top-[var(--okara-activity-top)]");
+    expect(html).toContain("Expand");
     expect(html).toContain("prefers-reduced-motion");
   });
   it("panel: run chooser when several runs are listed", () => {
@@ -172,9 +197,11 @@ describe("bus + wiring", () => {
   });
   it("RunNowButton opens the window for the started run; project shell mounts the launcher", () => {
     const btn = readFileSync(new URL("../src/web/components/RunNowButton.tsx", import.meta.url), "utf8");
-    expect(btn).toContain("openActivity({ projectId, runId: run.id })");
+    expect(btn).toContain("openActivity({ projectId, runId: run.id, opener })");
     const shell = readFileSync(new URL("../src/web/layouts/ProjectLayout.tsx", import.meta.url), "utf8");
     expect(shell).toContain("<ActivityLauncher");
+    expect(shell).toContain("topAnchor={activityTop}");
+    expect(shell).toMatch(/data-activity-top-anchor[^\n]*\n\s*\{project\.isDemo && <DemoBanner \/>\}/);
   });
   it("activity module never renders HTML from strings", () => {
     for (const f of ["ActivityView.tsx", "ActivityWindow.tsx"]) {

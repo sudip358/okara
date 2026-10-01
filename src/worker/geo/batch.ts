@@ -44,7 +44,7 @@ export interface GeoBatchSummary { observations: number; failed: number; grounde
 export const RAW_ANSWER_MAX_CHARS = 20_000;
 export const GEO_MAX_CONCURRENT_LANES = 2;
 /** Schema default of project_limits.geo_prompts_per_run, used only if the limits row is missing. */
-const DEFAULT_PROMPTS_PER_RUN = 5;
+export const DEFAULT_PROMPTS_PER_RUN = 5;
 
 interface PromptRow {
   id: string;

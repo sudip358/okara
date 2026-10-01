@@ -6,6 +6,8 @@ export interface OpenActivityRequest {
   projectId: string;
   /** Run to show; omitted = the window picks the active run or the last finished one. */
   runId?: string;
+  /** Element to return focus to when the window closes (e.g. the "Run … now" button that was pressed). */
+  opener?: HTMLElement | null;
 }
 
 type Listener = (req: OpenActivityRequest) => void;
