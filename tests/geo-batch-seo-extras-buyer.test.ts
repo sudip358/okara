@@ -202,3 +202,13 @@ describe("judgeQueries cache lookup", () => {
     expect(again.hitMaxCalls).toBe(false);
   });
 });
+
+describe("buyerProgress (web)", () => {
+  it("reports classified N of M and done state from completeness", async () => {
+    const { buyerProgress } = await import("@web/pages/seo/lib");
+    expect(buyerProgress(null)).toBeNull();
+    expect(buyerProgress({ completeness: { note: "", covered: null, total: null } })).toBeNull();
+    expect(buyerProgress({ completeness: { note: "", covered: 500, total: 1100 } })).toEqual({ covered: 500, total: 1100, done: false, label: "Classified 500 of 1,100 non-brand queries" });
+    expect(buyerProgress({ completeness: { note: "", covered: 1100, total: 1100 } })!.done).toBe(true);
+  });
+});

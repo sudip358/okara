@@ -15,6 +15,7 @@ import { useApi, useMutation } from "@web/lib/hooks";
 import { projectPath } from "@web/lib/project-context";
 import { Badge, TBody, TD, TH, THead, TR, Table, TierBadge, buttonClass } from "@web/components/ui";
 import { CoverageCard, Detail, UrlText, useOwnHosts } from "./PageAuditTable";
+import { buyerProgress } from "../lib";
 
 const INTENT_LABEL: Record<BuyerQueryRow["intent"], string> = {
   transactional: "Ready to buy (transactional)",
@@ -22,14 +23,6 @@ const INTENT_LABEL: Record<BuyerQueryRow["intent"], string> = {
 };
 
 const SEGMENT_LABEL: Record<DemandSegment, string> = { head: "Head", middle: "Middle", long_tail: "Long tail" };
-
-/** "Classified N of M" from completeness; null when the counts are unknown. Pure. */
-export function buyerProgress(d: Pick<CoverageResponse<BuyerQueryRow>, "completeness"> | null | undefined): { covered: number; total: number; done: boolean; label: string } | null {
-  const c = d?.completeness;
-  if (!c || c.covered === null || c.total === null) return null;
-  const covered = Math.min(c.covered, c.total);
-  return { covered, total: c.total, done: covered >= c.total, label: `Classified ${formatNumber(covered)} of ${formatNumber(c.total)} non-brand queries` };
-}
 
 export function BuyerQueriesTable({ projectId }: { projectId: string }) {
   const own = useOwnHosts();

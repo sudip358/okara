@@ -1,4 +1,4 @@
-import type { AuditFinding, PageType, Severity } from "@shared/types";
+import type { AuditFinding, BuyerQueryRow, CoverageResponse, PageType, Severity } from "@shared/types";
 
 export const SEVERITY_ORDER: Severity[] = ["critical", "major", "moderate", "minor", "advisory"];
 
@@ -44,4 +44,13 @@ export function countBySeverity(findings: AuditFinding[]): Record<Severity, numb
   const out: Record<Severity, number> = { critical: 0, major: 0, moderate: 0, minor: 0, advisory: 0 };
   for (const f of findings) out[f.severity] += 1;
   return out;
+}
+
+// ------------------------------------------------------------------ buyer queries
+/** "Classified N of M" from completeness; null when the counts are unknown. Pure. */
+export function buyerProgress(d: Pick<CoverageResponse<BuyerQueryRow>, "completeness"> | null | undefined): { covered: number; total: number; done: boolean; label: string } | null {
+  const c = d?.completeness;
+  if (!c || c.covered === null || c.total === null) return null;
+  const covered = Math.min(c.covered, c.total);
+  return { covered, total: c.total, done: covered >= c.total, label: `Classified ${covered.toLocaleString("en-US")} of ${c.total.toLocaleString("en-US")} non-brand queries` };
 }
