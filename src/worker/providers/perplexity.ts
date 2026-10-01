@@ -58,9 +58,10 @@ export function isValidPerplexityModelId(model: string | undefined | null): bool
 }
 
 /** True when an API key and a model id (from env.PERPLEXITY_MODEL only) are configured. */
-export function perplexityConfigured(env: Pick<Env, "PERPLEXITY_API_KEY" | "PERPLEXITY_MODEL">, apiKey?: string | null): boolean {
+export function perplexityConfigured(env: Pick<Env, "PERPLEXITY_API_KEY" | "PERPLEXITY_MODEL">, apiKey?: string | null, model?: string | null): boolean {
   const key = (apiKey ?? env.PERPLEXITY_API_KEY ?? "").trim();
-  return key.length > 0 && isValidPerplexityModelId(env.PERPLEXITY_MODEL);
+  // `model`: the resolved model (workspace selection > env, platform/provider-models.ts); omitted = env only.
+  return key.length > 0 && isValidPerplexityModelId(model === undefined ? env.PERPLEXITY_MODEL : model);
 }
 
 // ------------------------------------------------------------------ response parsing (pure)

@@ -139,8 +139,42 @@ export interface IntegrationsStatus {
     lastTestOk: boolean | null;
     lastTestDetail: string | null;
     model: string | null;
+    /**
+     * Where `model` comes from: "workspace" (picked on the Integrations page), "operator" (env var),
+     * "default" (TypeSafe's documented jev-latest alias), null (no model: setup_required "choose a model").
+     */
+    modelSource?: ModelSource | null;
+    /**
+     * Whether providers/rates.ts (or the TypeSafe price table) has a verified rate for `model`; false means
+     * cost is recorded as unknown (null), never guessed. null when not applicable (writer, no model).
+     */
+    rateKnown?: boolean | null;
     dataSent: string; // disclosure: what project data goes to this provider
   }>;
+}
+
+/** Built-in providers whose model a workspace can choose (the writer has its own custom provider flow). */
+export type ModelSelectableProviderId = "typesafe" | "gemini" | "perplexity" | "openai_geo" | "anthropic_geo";
+export type ModelSource = "workspace" | "operator" | "default";
+
+/** One entry of a provider's model list. `id` and `label` are untrusted provider text (plain text only). */
+export interface ProviderModelOption {
+  id: string;
+  label: string;
+}
+
+/** POST /workspaces/:wid/credentials/:provider/models. */
+export interface ProviderModelList {
+  /** true: list received; false: rejected/failed; null: not confirmed (rate limited) or no list endpoint. */
+  ok: boolean | null;
+  detail: string;
+  models: ProviderModelOption[];
+  total: number;
+  truncated: boolean;
+  /** Which key listed the models. */
+  keySource: "typed_key" | "workspace_key" | "operator_key" | null;
+  /** Feature the model must support for this lane (e.g. "web search"); not verifiable from a list. */
+  mustSupport: string | null;
 }
 
 // ------------------------------------------------------------------ custom (OpenAI-compatible) providers
@@ -151,8 +185,13 @@ export interface IntegrationsStatus {
 export type WriterSource = "default" | `custom:${string}`;
 
 /** A workspace custom provider as the API returns it. The API key is never included (only its last 4 characters). */
+/** writer: a custom writer (0010); geo: a custom GEO engine lane (0011; ungrounded, mention rate only). */
+export type CustomProviderRole = "writer" | "geo";
+
 export interface CustomProviderStatus {
   id: string;
+  /** Absent in responses from builds before migration 0011 (then "writer"). */
+  role?: CustomProviderRole;
   label: string;
   /** Normalised https base URL; `/models` and `/chat/completions` are appended to it. */
   baseUrl: string;
@@ -177,6 +216,10 @@ export interface CustomProvidersResponse {
   canManage: boolean;
   /** Disclosure: what data a custom writer receives. */
   dataSent: string;
+  /** Most custom GEO engine lanes per workspace (rows with role "geo"; counted separately from writers). */
+  maxGeoEngines?: number;
+  /** Disclosure: what data a custom GEO engine receives. */
+  geoDataSent?: string;
 }
 
 /** POST /workspaces/:wid/custom-providers/models. `models` are untrusted ids (plain text). */
@@ -193,8 +236,10 @@ export interface CustomProviderInput {
   baseUrl: string;
   model: string;
   apiKey: string;
-  /** Select it as the workspace writer (default true). */
+  /** Select it as the workspace writer (default true; ignored for role "geo"). */
   useAsWriter?: boolean;
+  /** "geo" adds a custom GEO engine lane instead of a writer (default "writer"). */
+  role?: CustomProviderRole;
 }
 
 // ------------------------------------------------------------------ metrics primitives
@@ -824,6 +869,13 @@ export interface DraftCheckResult {
 export type GeoEngineApiProviderId = "openai_geo" | "anthropic_geo";
 /** Every API-sampled GEO engine lane. Manual imports are not an engine lane. */
 export type GeoEngineProviderId = "gemini" | "perplexity" | GeoEngineApiProviderId;
+/**
+ * A workspace custom OpenAI-compatible GEO engine lane: "custom_geo:<workspace_custom_providers.id>".
+ * No web search: answers are stored ungrounded and count toward mention rate only, never citation rate.
+ */
+export type CustomGeoProviderId = `custom_geo:${string}`;
+/** Any lane of the AI engine board: a built-in engine or a custom GEO engine. */
+export type BoardLaneProviderId = GeoEngineProviderId | CustomGeoProviderId;
 /** ProviderId after the GEO engine additions; the builder replaces ProviderId with this union. */
 export type ProviderIdWithGeoEngines = ProviderId | GeoEngineApiProviderId;
 
@@ -858,7 +910,8 @@ export interface EngineFeedItem {
 
 /** One engine column of the board. Every rate carries its numerator and denominator. */
 export interface EngineLaneSummary {
-  provider: GeoEngineProviderId;
+  /** Built-in engine, or "custom_geo:<id>" for a custom GEO engine (ungrounded; citation rate unavailable). */
+  provider: BoardLaneProviderId;
   label: string; // e.g. "OpenAI Responses API · web_search (API-sampled)"
   model: string | null; // exact model id from configuration / the response; never a default
   groundingMode: string | null; // e.g. "web_search", "web_search_20250305", "google_search"
@@ -885,7 +938,7 @@ export interface EngineBoardResponse {
   state: CapabilityState;
   promptSetVersion: number | null;
   generatedAt: string;
-  lanes: EngineLaneSummary[]; // fixed order: openai_geo, anthropic_geo, gemini, perplexity
+  lanes: EngineLaneSummary[]; // fixed order: openai_geo, anthropic_geo, gemini, perplexity, then custom GEO engines (custom_geo:<id>)
   /** Mandatory disclosures, e.g. "API-sampled answers; not consumer-app answers". */
   labels: string[];
 }

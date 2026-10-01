@@ -55,9 +55,10 @@ export function isValidOpenAiModelId(model: string | undefined | null): boolean 
 }
 
 /** True when a key and a model id (env.OPENAI_GEO_MODEL only) are configured. */
-export function openaiGeoConfigured(env: Pick<Env, "OPENAI_GEO_API_KEY" | "OPENAI_GEO_MODEL">, apiKey?: string | null): boolean {
+export function openaiGeoConfigured(env: Pick<Env, "OPENAI_GEO_API_KEY" | "OPENAI_GEO_MODEL">, apiKey?: string | null, model?: string | null): boolean {
   const key = (apiKey ?? env.OPENAI_GEO_API_KEY ?? "").trim();
-  return key.length > 0 && isValidOpenAiModelId(env.OPENAI_GEO_MODEL);
+  // `model`: the resolved model (workspace selection > env, platform/provider-models.ts); omitted = env only.
+  return key.length > 0 && isValidOpenAiModelId(model === undefined ? env.OPENAI_GEO_MODEL : model);
 }
 
 // ------------------------------------------------------------------ response parsing (pure)

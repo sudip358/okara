@@ -120,9 +120,10 @@ export function isValidGeminiModelId(model: string | undefined | null): boolean 
  * (env.GEMINI_MODEL); with none set the runtime must show Gemini as setup_required.
  * BYO workspace keys are resolved by the runtime; pass `apiKey` to check that path.
  */
-export function geminiConfigured(env: Pick<Env, "GEMINI_API_KEY" | "GEMINI_MODEL">, apiKey?: string | null): boolean {
+export function geminiConfigured(env: Pick<Env, "GEMINI_API_KEY" | "GEMINI_MODEL">, apiKey?: string | null, model?: string | null): boolean {
   const key = (apiKey ?? env.GEMINI_API_KEY ?? "").trim();
-  return key.length > 0 && isValidGeminiModelId(env.GEMINI_MODEL);
+  // `model`: the resolved model (workspace selection > env, platform/provider-models.ts); omitted = env only.
+  return key.length > 0 && isValidGeminiModelId(model === undefined ? env.GEMINI_MODEL : model);
 }
 
 export function isRedirectWrapper(uri: string): boolean {

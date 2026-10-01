@@ -53,9 +53,10 @@ export function isValidAnthropicModelId(model: string | undefined | null): boole
 }
 
 /** True when a key and a model id (env.ANTHROPIC_GEO_MODEL only) are configured. */
-export function anthropicGeoConfigured(env: Pick<Env, "ANTHROPIC_GEO_API_KEY" | "ANTHROPIC_GEO_MODEL">, apiKey?: string | null): boolean {
+export function anthropicGeoConfigured(env: Pick<Env, "ANTHROPIC_GEO_API_KEY" | "ANTHROPIC_GEO_MODEL">, apiKey?: string | null, model?: string | null): boolean {
   const key = (apiKey ?? env.ANTHROPIC_GEO_API_KEY ?? "").trim();
-  return key.length > 0 && isValidAnthropicModelId(env.ANTHROPIC_GEO_MODEL);
+  // `model`: the resolved model (workspace selection > env, platform/provider-models.ts); omitted = env only.
+  return key.length > 0 && isValidAnthropicModelId(model === undefined ? env.ANTHROPIC_GEO_MODEL : model);
 }
 
 // ------------------------------------------------------------------ response parsing (pure)
