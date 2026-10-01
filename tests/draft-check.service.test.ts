@@ -22,7 +22,7 @@ import { projectRow } from "./checklists-seed";
  * Snapshot of the draft-check question versions for DRAFTCHECK_QUESTIONS_REVISION. Changing a question's
  * wording changes its hash: bump the revision and this snapshot together.
  */
-const REVISION_SNAPSHOT = "draftcheck-questions-2026-09-30.1";
+const REVISION_SNAPSHOT = "draftcheck-questions-2026-10-01.1";
 
 const GOOD = `# Brass vs bronze cabinet pulls: which should you choose?
 
@@ -94,7 +94,7 @@ describe("draft check: deterministic (no Jev)", () => {
     expect(r.flags).toEqual([]);
     expect(r.verdict).toBe("pass");
     expect(r.checklist.kind).toBe("page");
-    expect(r.checklist.items).toHaveLength(16);
+    expect(r.checklist.items).toHaveLength(25); // 16 on-page items + 9 draft-check items (items.ts)
     for (const id of [
       "page.before_write.search_intent",
       "page.before_write.topic_coverage",
@@ -170,7 +170,22 @@ describe("draft check: Jev answers mapped into items and flags", () => {
     expect(requests).toHaveLength(1);
     const req = requests[0]!;
     expect(req.purpose).toBe("seo.draft_check");
-    expect(Object.keys(req.questions).sort()).toEqual(["claim_0", "claim_1", "item_answer_early", "item_first_hand", "item_terms_entities", "item_topic_coverage", "item_unique_angle"]);
+    // No product fields and no JSON-LD in a markdown draft: product_facts and schema_fit are not asked.
+    expect(Object.keys(req.questions).sort()).toEqual([
+      "claim_0",
+      "claim_1",
+      "item_answer_early",
+      "item_author_credentials",
+      "item_clear_next_step",
+      "item_compare_table",
+      "item_faq_when_useful",
+      "item_first_hand",
+      "item_headings_match_questions",
+      "item_numbers_sourced",
+      "item_terms_entities",
+      "item_topic_coverage",
+      "item_unique_angle",
+    ]);
     for (const q of Object.values(req.questions)) {
       expect(q.type).toBe("noul");
       if (q.type === "noul") expect(q.criteria?.true && q.criteria?.false).toBeTruthy();
@@ -198,14 +213,14 @@ describe("draft check: Jev answers mapped into items and flags", () => {
     expect(r.flags).toEqual([{ kind: "unsupported_claim", text: "Brass lasts longer than zinc alloy in humid bathrooms.", method: "jev", noul: 0.9 }]);
     // topic_coverage is not a critical item; the flag and the flag-tier answer make it needs_review.
     expect(r.verdict).toBe("needs_review");
-    expect(r.labels.join(" ")).toMatch(/Jev \(typesafe, model jev-test\) answered 6 of 7 questions in one call/);
+    expect(r.labels.join(" ")).toMatch(/Jev \(typesafe, model jev-test\) answered 6 of 13 questions in one call/);
 
     const rows = await db.all<{ agent: string; candidate_key: string; question_id: string; question_version: string; policy_version: string; tier: string | null; outcome: string; reason_code: string | null; answer_json: string; run_id: string | null }>(
       "SELECT agent, candidate_key, question_id, question_version, policy_version, tier, outcome, reason_code, answer_json, run_id FROM decision_records WHERE workspace_id = ? AND project_id = ? ORDER BY question_id, rowid",
       workspaceId,
       pid,
     );
-    expect(rows).toHaveLength(7);
+    expect(rows).toHaveLength(13);
     const versions = await draftQuestionVersions();
     for (const row of rows) {
       expect(row.agent).toBe("seo");
@@ -273,7 +288,7 @@ describe("draft check: Jev answers mapped into items and flags", () => {
     expect(item(r, "page.before_write.unique_angle").status).toBe("manual");
     expect(r.labels.join(" ")).toMatch(/Jev budget reached: this project's daily Jev call limit is used up, so this check is deterministic only\./);
     const reasons = await db.all<{ reason_code: string; outcome: string; tier: string | null }>("SELECT reason_code, outcome, tier FROM decision_records WHERE workspace_id = ? AND project_id = ?", workspaceId, pid);
-    expect(reasons.length).toBe(5);
+    expect(reasons.length).toBe(10); // item questions with inputs (no numbers, product fields, or JSON-LD in GOOD)
     expect(reasons.every((x) => x.reason_code === "budget" && x.outcome === "rejected" && x.tier === null)).toBe(true);
   });
 

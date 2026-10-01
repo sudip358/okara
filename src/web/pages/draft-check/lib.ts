@@ -74,6 +74,45 @@ export function buildDraftCheckRequest(f: DraftForm): { ok: true; body: DraftChe
   return { ok: true, body };
 }
 
+// ------------------------------------------------------------------ what the check covers
+export type CheckMethodLabel = "Measured" | "Heuristic" | "Jev judgment" | "Heuristic + Jev";
+
+/**
+ * The checks a draft check runs (25: the 16 on-page checklist items plus 9 draft-check items). Shown on
+ * the page so users know what is measured and what is a Jev (model) yes/no judgment. Jev items stay manual
+ * ("Check this yourself") without a TypeSafe key; items whose inputs are absent are shown as not applicable.
+ */
+export const DRAFT_CHECKS: ReadonlyArray<{ id: string; label: string; method: CheckMethodLabel; note?: string }> = [
+  { id: "page.before_write.search_intent", label: "Match the search intent", method: "Heuristic" },
+  { id: "page.before_write.topic_coverage", label: "Cover the topic fully", method: "Heuristic + Jev" },
+  { id: "page.before_write.unique_angle", label: "Unique angle or original information", method: "Jev judgment" },
+  { id: "page.before_write.first_hand", label: "First-hand experience or evidence", method: "Jev judgment" },
+  { id: "page.before_write.author_credentials", label: "Author named with relevant credentials", method: "Jev judgment" },
+  { id: "page.while_write.answer_early", label: "Answer the main question early", method: "Heuristic + Jev" },
+  { id: "page.while_write.answer_first_40_words", label: "Answer in the first 40 words", method: "Measured", note: "Word overlap with the target query, not answer quality." },
+  { id: "page.while_write.headings", label: "Clear main heading + descriptive subheadings", method: "Measured" },
+  { id: "page.while_write.headings_match_questions", label: "Subheadings match the reader's questions", method: "Jev judgment", note: "Needs at least two subheadings." },
+  { id: "page.while_write.terms_entities", label: "Relevant terms and entities naturally", method: "Heuristic + Jev" },
+  { id: "page.while_write.faq_when_useful", label: "FAQ section where readers have follow-up questions", method: "Jev judgment" },
+  { id: "page.while_write.compare_table", label: "Comparison table when comparing options", method: "Jev judgment" },
+  { id: "page.while_write.clear_next_step", label: "Clear next step for the reader", method: "Jev judgment", note: "Pasted drafts only; a crawled page's stored excerpt stops at 2,000 characters." },
+  { id: "page.while_write.crawlable_text", label: "Important information in crawlable text", method: "Measured" },
+  { id: "page.details.title", label: "Clear descriptive title", method: "Measured" },
+  { id: "page.details.meta_description", label: "Meta description that earns the click", method: "Measured" },
+  { id: "page.details.url", label: "Short descriptive URL", method: "Measured", note: "After publishing." },
+  { id: "page.details.alt_text", label: "Descriptive alt text on informative images", method: "Measured" },
+  { id: "page.publish_check.internal_links", label: "Internal links with descriptive anchor text", method: "Measured" },
+  { id: "page.publish_check.sources", label: "Credible sources where claims need support", method: "Measured" },
+  { id: "page.publish_check.numbers_sourced", label: "Specific numbers are sourced", method: "Jev judgment", note: "Only when the text contains numbers." },
+  { id: "page.publish_check.product_facts", label: "Product facts match the provided fields", method: "Jev judgment", note: "Only when product fields are provided." },
+  { id: "page.publish_check.schema_fit", label: "Structured data type fits the page type", method: "Jev judgment", note: "Only when JSON-LD is present." },
+  { id: "page.publish_check.indexability", label: "Crawlability, indexability + canonical", method: "Measured", note: "After publishing." },
+  { id: "page.publish_check.structured_data_ux", label: "Structured data, mobile UX + Core Web Vitals", method: "Measured", note: "After publishing." },
+];
+
+const countBy = (m: CheckMethodLabel) => DRAFT_CHECKS.filter((c) => c.method === m).length;
+export const DRAFT_CHECKS_SUMMARY = `${DRAFT_CHECKS.length} checks: ${countBy("Measured")} measured, ${countBy("Heuristic")} word heuristic, ${countBy("Jev judgment")} answered by Jev as yes/no questions, and ${countBy("Heuristic + Jev")} word heuristics replaced by a Jev yes/no judgment when TypeSafe is configured. Jev answers are judgments, not measurements; uncertain ones say "Check this yourself".`;
+
 // ------------------------------------------------------------------ verdict
 export type VerdictTone = "success" | "warning" | "danger";
 

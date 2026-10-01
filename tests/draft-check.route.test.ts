@@ -57,7 +57,7 @@ describe("POST /projects/:pid/seo/draft-check", () => {
     expect(Object.keys(body.data).sort()).toEqual(["checklist", "flags", "jevUsed", "labels", "state", "verdict"]);
     expect(body.data.state).toBe("ready");
     expect(["pass", "needs_review", "fail"]).toContain(body.data.verdict);
-    expect(body.data.checklist.items).toHaveLength(16);
+    expect(body.data.checklist.items).toHaveLength(25);
     expect(body.data.jevUsed).toBe(false);
     expect(body.data.labels[0]).toBe("A quality gate before human review — not an AI detector and not a ranking prediction.");
   });

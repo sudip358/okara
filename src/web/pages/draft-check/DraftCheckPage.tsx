@@ -2,7 +2,8 @@
  * [A23] Draft / page quality check. Route: /projects/:projectId/draft-check
  * The user names a target query and either pastes a draft or picks a crawled page; the server returns a
  * verdict (pass / needs review / fail), flagged excerpts (rule or Jev), and the on-page checklist evaluated
- * against the draft. A quality gate before human review: not an AI detector and not a ranking prediction.
+ * against the draft (25 checks; "What the check covers" lists which are measured and which are Jev yes/no
+ * judgments). A quality gate before human review: not an AI detector and not a ranking prediction.
  * All server text (excerpts, labels, checklist text, URLs) renders as plain text.
  */
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type RefObject } from "react";
@@ -15,6 +16,8 @@ import { projectPath, useProject } from "@web/lib/project-context";
 import { Badge, Button, Card, ErrorState, LoadingState, PageHeader, SelectField, StateBadge, StateBanner, TextArea, TextField, buttonClass, cx } from "@web/components/ui";
 import { ChecklistView, Disclaimer } from "@web/pages/checklists/components/ChecklistView";
 import {
+  DRAFT_CHECKS,
+  DRAFT_CHECKS_SUMMARY,
   EMPTY_FORM,
   FLAG_METHOD_HINT,
   FLAG_METHOD_LABEL,
@@ -139,6 +142,22 @@ export function DraftCheckPage() {
         <p className="font-semibold">{GATE_LABEL}</p>
         <p className="mt-1 text-xs">Flags point at exact excerpts for a person to judge. A pass does not mean the page will rank or be cited.</p>
       </div>
+
+      <details className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200">
+        <summary className="cursor-pointer font-medium">What the check covers</summary>
+        <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-400">{DRAFT_CHECKS_SUMMARY}</p>
+        <ul className="mt-2 grid gap-1 sm:grid-cols-2">
+          {DRAFT_CHECKS.map((c) => (
+            <li key={c.id} className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-xs">
+              <span className="font-medium text-zinc-900 dark:text-zinc-100">{c.label}</span>
+              <span className="text-zinc-600 dark:text-zinc-400">
+                {c.method}
+                {c.note ? ` · ${c.note}` : ""}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </details>
 
       <Card title="What to check">
         <form onSubmit={onSubmit} className="space-y-4" noValidate aria-describedby={`${base}-form-note`}>
