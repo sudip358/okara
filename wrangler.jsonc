@@ -37,7 +37,7 @@
     // Changing it starts a new GEO cohort for Gemini.
     "GEMINI_THINKING_LEVEL": "",
     // Sign-in allowlist, comma-separated and case-insensitive. In production nobody can sign in until one is set.
-    "ALLOWED_EMAILS": "",
+    "ALLOWED_EMAILS": "sudip@residencesupply.com,sudipkumar211@gmail.com",
     "ALLOWED_EMAIL_DOMAINS": "",
     // Daily caps across all projects, applied only to spend on the operator keys (not workspaces' own keys).
     // These values are the code defaults (src/worker/runs/budget.ts); set them from your real budget.
