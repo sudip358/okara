@@ -7,6 +7,10 @@
  *     Grounding billing semantics: https://ai.google.dev/gemini-api/docs/google-search#pricing
  *   - Perplexity Agent API pricing: https://docs.perplexity.ai/docs/getting-started/pricing
  *     and https://docs.perplexity.ai/docs/agent-api/tools/web-search#pricing
+ *   - OpenAI API pricing (Standard tier text tokens; "Tools" table for web search):
+ *     https://developers.openai.com/api/docs/pricing#built-in-tools
+ *   - Claude API pricing (model tokens; "Web search tool" section):
+ *     https://platform.claude.com/docs/en/about-claude/pricing
  *
  * Rules:
  *   - Unknown provider/model -> costUsd null (never 0) and costIsEstimate true.
@@ -16,7 +20,12 @@
  *     5,000 free search requests per month shared across models; Gemini 2.5: 1,500 free grounded
  *     prompts per day). Estimates are therefore conservative upper bounds of list price, not invoices.
  *   - Gemini 3.x bills grounding per executed (non-empty, unique) search query; Gemini 2.5 bills per
- *     grounded prompt. Perplexity bills `web_search` per invocation.
+ *     grounded prompt. Perplexity bills `web_search` per invocation. OpenAI bills the `web_search` tool
+ *     per search call ($10 / 1k) plus search content tokens at model rates (already inside
+ *     `usage.input_tokens`; gpt-4.1-mini instead bills a fixed 8,000-token block per call, added here on top,
+ *     so the estimate is an upper bound). Anthropic bills $10 per 1,000 web searches
+ *     (`usage.server_tool_use.web_search_requests`; errored searches are not billed) plus tokens.
+ *   - Cached-input discounts are ignored (every input token is priced at the full input rate): upper bound.
  *   - Rates that change on a documented date carry validFrom/validUntil; outside every window the
  *     model is treated as unknown (null) until this table is re-verified and RATE_VERSION bumped.
  */
@@ -24,19 +33,24 @@
 import type { GeoAnswer, GeoProvider } from "./types";
 
 /** Bump whenever a value below changes. Stored on provider_calls.rate_version. */
-export const RATE_VERSION = "geo-rates-2026-09-30.1";
+export const RATE_VERSION = "geo-rates-2026-09-30.2";
 
 export interface CostUsage {
   inputTokens: number | null;
   outputTokens: number | null;
-  /** Billable search units: Gemini 3.x = executed queries; Gemini 2.5 = grounded prompts; Perplexity = web_search invocations. */
+  /**
+   * Billable search units: Gemini 3.x = executed queries; Gemini 2.5 = grounded prompts; Perplexity = web_search
+   * invocations; OpenAI = web_search_call items with action.type "search"; Anthropic = web_search_requests.
+   */
   searchRequests: number | null;
 }
 
 type SearchBilling = "per_search_query" | "per_grounded_prompt" | "per_invocation" | "none";
 
+export type RatedProvider = "gemini" | "perplexity" | "openai_geo" | "anthropic_geo";
+
 interface RateEntry {
-  provider: "gemini" | "perplexity";
+  provider: RatedProvider;
   /** Exact model id as sent to the provider. */
   model: string;
   inputPerMTok: number;
@@ -45,6 +59,10 @@ interface RateEntry {
   longPrompt?: { thresholdTokens: number; inputPerMTok: number; outputPerMTok: number };
   searchBilling: SearchBilling;
   searchUsd: number;
+  /** Extra input tokens billed per search unit (OpenAI gpt-4.1-mini: fixed 8,000-token search content block). */
+  fixedSearchInputTokens?: number;
+  /** The listed price applies only up to this many input tokens; above it the cost is unknown (null). */
+  maxPricedInputTokens?: number;
   /** Inclusive UTC days (YYYY-MM-DD). */
   validFrom?: string;
   validUntil?: string;
@@ -59,6 +77,21 @@ const GEMINI3_SEARCH_USD = 14 / 1000;
 const GEMINI25_GROUNDED_PROMPT_USD = 35 / 1000;
 /** Perplexity `web_search`: "$2.50 per 1,000 invocations" (standard `search_type: "web"`). */
 const PPLX_WEB_SEARCH_USD = 2.5 / 1000;
+const OPENAI_PRICING = "https://developers.openai.com/api/docs/pricing";
+const ANTHROPIC_PRICING = "https://platform.claude.com/docs/en/about-claude/pricing";
+/** OpenAI Responses `web_search` (all models, non-preview): "$10.00 / 1k calls + search content tokens billed at model rates". */
+const OPENAI_WEB_SEARCH_USD = 10 / 1000;
+/** OpenAI: "For gpt-4o-mini and gpt-4.1-mini ... search content tokens are billed as a fixed block of 8,000 input tokens per call." */
+const OPENAI_MINI_FIXED_SEARCH_TOKENS = 8_000;
+/** Anthropic web search: "$10 per 1,000 searches plus standard token costs". */
+const ANTHROPIC_WEB_SEARCH_USD = 10 / 1000;
+
+function openai(model: string, inputPerMTok: number, outputPerMTok: number, extra: Partial<RateEntry> = {}): RateEntry {
+  return { provider: "openai_geo", model, inputPerMTok, outputPerMTok, searchBilling: "per_invocation", searchUsd: OPENAI_WEB_SEARCH_USD, source: OPENAI_PRICING, ...extra };
+}
+function anthropic(model: string, inputPerMTok: number, outputPerMTok: number): RateEntry {
+  return { provider: "anthropic_geo", model, inputPerMTok, outputPerMTok, searchBilling: "per_invocation", searchUsd: ANTHROPIC_WEB_SEARCH_USD, source: ANTHROPIC_PRICING };
+}
 
 function gemini3(model: string, inputPerMTok: number, outputPerMTok: number, extra: Partial<RateEntry> = {}): RateEntry {
   return { provider: "gemini", model, inputPerMTok, outputPerMTok, searchBilling: "per_search_query", searchUsd: GEMINI3_SEARCH_USD, source: GEMINI_PRICING, ...extra };
@@ -84,6 +117,21 @@ export const RATES: readonly RateEntry[] = [
   gemini25("gemini-2.5-flash-lite", 0.1, 0.4),
   // Perplexity Agent API model "perplexity/sonar": $0.25 input / $2.50 output per 1M tokens.
   { provider: "perplexity", model: "perplexity/sonar", inputPerMTok: 0.25, outputPerMTok: 2.5, searchBilling: "per_invocation", searchUsd: PPLX_WEB_SEARCH_USD, source: PPLX_PRICING },
+  // OpenAI Standard tier, models the web_search guide lists as supported (read 2026-09-30).
+  // gpt-5.5: the listed price is for prompts < 272K tokens; the long-context price was not verified -> unknown above it.
+  openai("gpt-5.5", 5.0, 30.0, { maxPricedInputTokens: 272_000 }),
+  openai("gpt-5", 1.25, 10.0),
+  openai("gpt-5-mini", 0.25, 2.0),
+  openai("gpt-4.1", 2.0, 8.0),
+  openai("gpt-4.1-mini", 0.4, 1.6, { fixedSearchInputTokens: OPENAI_MINI_FIXED_SEARCH_TOKENS }),
+  // Claude API first-party rates (read 2026-09-30).
+  anthropic("claude-opus-5-5", 4.0, 20.0),
+  anthropic("claude-opus-5", 5.0, 25.0),
+  anthropic("claude-opus-4-8", 5.0, 25.0),
+  anthropic("claude-sonnet-5-5", 2.0, 10.0),
+  anthropic("claude-sonnet-5", 2.0, 10.0),
+  anthropic("claude-sonnet-4-6", 3.0, 15.0),
+  anthropic("claude-haiku-4-5", 1.0, 5.0),
 ];
 
 function normalizeModel(provider: string, model: string): string {
@@ -121,6 +169,7 @@ export function estimateCost(provider: string, model: string, usage: CostUsage, 
   const { inputTokens, outputTokens, searchRequests } = usage;
   if (inputTokens === null || outputTokens === null) return { costUsd: null, costIsEstimate: true, rateVersion: RATE_VERSION };
 
+  if (rate.maxPricedInputTokens !== undefined && inputTokens > rate.maxPricedInputTokens) return { costUsd: null, costIsEstimate: true, rateVersion: RATE_VERSION };
   const long = rate.longPrompt && inputTokens > rate.longPrompt.thresholdTokens ? rate.longPrompt : null;
   const inPer = long ? long.inputPerMTok : rate.inputPerMTok;
   const outPer = long ? long.outputPerMTok : rate.outputPerMTok;
@@ -131,6 +180,7 @@ export function estimateCost(provider: string, model: string, usage: CostUsage, 
     case "per_invocation":
       if (searchRequests === null) return { costUsd: null, costIsEstimate: true, rateVersion: RATE_VERSION };
       usd += searchRequests * rate.searchUsd;
+      if (rate.fixedSearchInputTokens) usd += (searchRequests * rate.fixedSearchInputTokens * inPer) / 1_000_000;
       break;
     case "per_grounded_prompt": {
       const grounded = opts.grounded ?? (searchRequests === null ? null : searchRequests > 0);
@@ -170,6 +220,10 @@ export const RESERVATION_ENVELOPE = {
   geminiSearchQueries: 5,
   /** Perplexity web_search invocations per call used for the bound (direct model, max_steps default 1). */
   perplexitySearchInvocations: 2,
+  /** OpenAI web_search calls per response used for the bound (tool_choice auto; reasoning models may search repeatedly). */
+  openaiSearchCalls: 5,
+  /** Anthropic searches per answer: max_uses (3) for the request plus one bounded pause_turn continuation. */
+  anthropicSearches: 6,
 } as const;
 
 /** Reserved when no verified rate exists; a guard amount, not a price. Settled in full if cost stays unknown. */
@@ -180,7 +234,10 @@ export function reservationMicros(provider: string, model: string, at: Date = ne
   if (!rate) return UNKNOWN_RATE_RESERVE_USD_MICROS;
   const searches =
     rate.searchBilling === "per_search_query" ? RESERVATION_ENVELOPE.geminiSearchQueries
-    : rate.searchBilling === "per_invocation" ? RESERVATION_ENVELOPE.perplexitySearchInvocations
+    : rate.searchBilling === "per_invocation"
+      ? rate.provider === "openai_geo" ? RESERVATION_ENVELOPE.openaiSearchCalls
+      : rate.provider === "anthropic_geo" ? RESERVATION_ENVELOPE.anthropicSearches
+      : RESERVATION_ENVELOPE.perplexitySearchInvocations
     : rate.searchBilling === "per_grounded_prompt" ? 1
     : 0;
   const est = estimateCost(provider, model, { inputTokens: RESERVATION_ENVELOPE.inputTokens, outputTokens: RESERVATION_ENVELOPE.outputTokens, searchRequests: searches }, { grounded: true, at });

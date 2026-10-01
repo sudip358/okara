@@ -12,7 +12,7 @@
  *      by the project limits only, so one tenant's usage never exhausts another's BYO-key runs.
  *      Which key a reservation spends: the provider named via budgetFor(budget, provider), else the
  *      providers that can spend that resource (jev_calls -> typesafe, writer_tokens -> writer,
- *      usd_micros -> gemini/perplexity, provider_calls -> any). Conservative: the global cap applies
+ *      usd_micros -> the GEO engines gemini/perplexity/openai_geo/anthropic_geo, provider_calls -> any). Conservative: the global cap applies
  *      when any candidate provider uses the operator key (with no key at all, only usd_micros).
  *   4. Insert reservation rows (status 'reserved').
  * settle(actual): counters adjusted by (actual - amount), never below zero; status 'settled'.
@@ -20,10 +20,9 @@
  * markUnknown():  counters untouched (conservatively counted); status 'unknown'.
  * Status transitions are claimed with a conditional UPDATE so a reservation is settled at most once.
  */
-import type { ProviderId } from "@shared/types";
 import type { Env } from "../env";
 import type { Db } from "../lib/db";
-import { credentialSources, type CredentialSource } from "../platform/credentials";
+import { credentialSources, type CredentialProviderId, type CredentialSource } from "../platform/credentials";
 import { BudgetExceededError } from "../lib/errors";
 import { newId } from "../lib/ids";
 import { iso, systemClock, utcDay, type Clock } from "../lib/time";
@@ -44,8 +43,8 @@ export const DEFAULT_GLOBAL_WRITER_TOKENS_PER_DAY = 1_000_000;
  * ceiling allows the scheduled run plus the manual-run quota for each agent.
  */
 export const RUNS_PER_AGENT_PER_DAY = 1 + 3;
-/** GEO prompt executions count once per prompt per enabled provider (up to two providers). */
-export const MAX_GEO_PROVIDERS = 2;
+/** GEO prompt executions count once per prompt per enabled provider (up to four engine lanes). */
+export const MAX_GEO_PROVIDERS = 4;
 /** Engineering default: writer tokens (input + output) per project per day. No DB column yet. */
 export const DEFAULT_WRITER_TOKENS_PER_DAY = 200_000;
 
@@ -94,14 +93,17 @@ const GLOBAL_CAPS: Partial<Record<BudgetResource, { env: GlobalEnvKey; fallback:
 };
 
 /** Providers whose key can spend each globally capped resource (when the caller names none). */
-const RESOURCE_PROVIDERS: Partial<Record<BudgetResource, readonly ProviderId[]>> = {
-  usd_micros: ["gemini", "perplexity"],
+const RESOURCE_PROVIDERS: Partial<Record<BudgetResource, readonly CredentialProviderId[]>> = {
+  usd_micros: ["gemini", "perplexity", "openai_geo", "anthropic_geo"],
   jev_calls: ["typesafe"],
-  provider_calls: ["typesafe", "writer", "gemini", "perplexity"],
+  provider_calls: ["typesafe", "writer", "gemini", "perplexity", "openai_geo", "anthropic_geo"],
   writer_tokens: ["writer"],
 };
 
-const PROVIDER_IDS: readonly ProviderId[] = ["typesafe", "writer", "gemini", "perplexity"];
+const PROVIDER_IDS: readonly CredentialProviderId[] = ["typesafe", "writer", "gemini", "perplexity", "openai_geo", "anthropic_geo"];
+
+/** Credential source per provider; a missing entry means no key (null). */
+export type CredentialSources = Partial<Record<CredentialProviderId, CredentialSource | null>>;
 
 function parseCap(raw: string | undefined, fallback: number): number {
   const t = raw?.trim();
@@ -123,10 +125,10 @@ export function globalDailyLimit(resource: BudgetResource, env: Partial<Pick<Env
  * Whether a reservation counts against the global cap, given the credential source of each provider.
  * Applies when any candidate provider uses the operator key.
  */
-export function spendsOperatorKey(resource: BudgetResource, provider: ProviderId | null, sources: Record<ProviderId, CredentialSource | null>): boolean {
+export function spendsOperatorKey(resource: BudgetResource, provider: CredentialProviderId | null, sources: CredentialSources): boolean {
   if (!GLOBAL_CAPS[resource]) return false;
   const candidates = provider ? [provider] : (RESOURCE_PROVIDERS[resource] ?? PROVIDER_IDS);
-  const keyed = candidates.filter((p) => sources[p] !== null);
+  const keyed = candidates.filter((p) => (sources[p] ?? null) !== null);
   // No key at all: the runtime builds no provider, so nothing real is spent; usd_micros keeps its
   // pre-existing global accounting (conservative for injected providers).
   if (keyed.length === 0) return resource === "usd_micros";
@@ -153,7 +155,7 @@ export const projectScopeKey = (projectId: string) => `project:${projectId}`;
 export const GLOBAL_SCOPE_KEY = "global";
 
 const PROVIDER_VIEW = Symbol("budget.forProvider");
-type ProviderAwareBudget = Budget & { [PROVIDER_VIEW]: (provider: ProviderId) => Budget };
+type ProviderAwareBudget = Budget & { [PROVIDER_VIEW]: (provider: CredentialProviderId) => Budget };
 
 /**
  * A view of `budget` whose reservations are attributed to `provider`'s credential, so the global
@@ -162,7 +164,7 @@ type ProviderAwareBudget = Budget & { [PROVIDER_VIEW]: (provider: ProviderId) =>
  */
 export function budgetFor(budget: Budget, provider: string): Budget {
   const view = (budget as Partial<ProviderAwareBudget>)[PROVIDER_VIEW];
-  return view && (PROVIDER_IDS as readonly string[]).includes(provider) ? view(provider as ProviderId) : budget;
+  return view && (PROVIDER_IDS as readonly string[]).includes(provider) ? view(provider as CredentialProviderId) : budget;
 }
 
 export function createBudget(
@@ -172,11 +174,11 @@ export function createBudget(
   clock: Clock = systemClock,
   opts: {
     /** Sources from the same resolution that picked the keys (runtime), so attribution cannot drift if a key is saved mid-step. */
-    sources?: Record<ProviderId, CredentialSource | null>;
+    sources?: CredentialSources;
   } = {},
 ): Budget {
   // Resolved once per budget (i.e. per run step / request), like the keys the runtime resolves.
-  let sources: Promise<Record<ProviderId, CredentialSource | null>> | null = opts.sources ? Promise.resolve(opts.sources) : null;
+  let sources: Promise<CredentialSources> | null = opts.sources ? Promise.resolve(opts.sources) : null;
   // A rejected lookup (e.g. a transient D1 error) is not cached, so the next reserve() retries it.
   const loadSources = () =>
     (sources ??= credentialSources(env, db, scope.workspaceId).catch((e: unknown) => {
@@ -250,7 +252,7 @@ export function createBudget(
     return claimed;
   }
 
-  async function reserve(resource: BudgetResource, amount: number, provider: ProviderId | null): Promise<string> {
+  async function reserve(resource: BudgetResource, amount: number, provider: CredentialProviderId | null): Promise<string> {
     if (!Number.isFinite(amount) || amount < 0) throw new Error(`Invalid reservation amount: ${amount}`);
     const amt = Math.ceil(amount);
     const day = utcDay(clock());
@@ -316,7 +318,7 @@ export function createBudget(
       await claim(reservationId, "unknown", ["reserved"], null);
     },
 
-    [PROVIDER_VIEW]: (provider: ProviderId): Budget => ({
+    [PROVIDER_VIEW]: (provider: CredentialProviderId): Budget => ({
       reserve: (resource, amount) => reserve(resource, amount, provider),
       settle: (id, actual) => budget.settle(id, actual),
       release: (id) => budget.release(id),

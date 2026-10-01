@@ -6,15 +6,17 @@
  * - `apiFetch` is an allowlisted fetch for provider APIs only; `crawlFetch` is the platform fetch,
  *   which the crawler wraps in its SSRF guard (src/worker/seo/ssrf.ts).
  */
-import type { AgentKind, ProviderId } from "@shared/types";
+import type { AgentKind } from "@shared/types";
 import type { Env } from "../env";
 import { Db } from "../lib/db";
 import { newId } from "../lib/ids";
 import { iso, systemClock, type Clock } from "../lib/time";
 import type { ProjectRow } from "../platform/access";
-import { resolveProviderKey, type ResolvedKey } from "../platform/credentials";
+import { resolveProviderKey, type CredentialProviderId, type ResolvedKey } from "../platform/credentials";
 import { createGscProvider } from "../platform/gsc-client";
+import { anthropicGeoConfigured, createAnthropicGeoProvider } from "../providers/anthropic-geo";
 import { createGeminiProvider, geminiConfigured } from "../providers/gemini";
+import { createOpenAiGeoProvider, openaiGeoConfigured } from "../providers/openai-geo";
 import { createPerplexityProvider, perplexityConfigured } from "../providers/perplexity";
 import { createTypeSafeProvider } from "../providers/typesafe";
 import type { GeoProvider, WritingProvider } from "../providers/types";
@@ -34,6 +36,7 @@ export const API_HOST_ALLOWLIST: readonly string[] = [
   "generativelanguage.googleapis.com",
   "api.perplexity.ai",
   "api.anthropic.com",
+  "api.openai.com",
   "oauth2.googleapis.com",
   "www.googleapis.com",
   "searchconsole.googleapis.com",
@@ -120,7 +123,7 @@ export function createRunLogger(db: Db, run: { id: string; workspaceId: string; 
   };
 }
 
-async function safeKey(env: Env, db: Db, workspaceId: string, provider: ProviderId, log?: RunLogger): Promise<ResolvedKey | null> {
+async function safeKey(env: Env, db: Db, workspaceId: string, provider: CredentialProviderId, log?: RunLogger): Promise<ResolvedKey | null> {
   try {
     return await resolveProviderKey(env, db, workspaceId, provider);
   } catch {
@@ -155,19 +158,30 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
   const baseCrawlFetch = opts.crawlFetchImpl ?? fetch;
   const crawlFetch = ((input: RequestInfo | URL, init?: RequestInit) => baseCrawlFetch(input, init)) as typeof fetch;
 
-  const [typesafe, writerResolved, gemini, perplexity] = await Promise.all([
+  const [typesafe, writerResolved, gemini, perplexity, openaiGeo, anthropicGeo] = await Promise.all([
     safeKey(env, db, ref.workspaceId, "typesafe", log),
     safeKey(env, db, ref.workspaceId, "writer", log),
     safeKey(env, db, ref.workspaceId, "gemini", log),
     safeKey(env, db, ref.workspaceId, "perplexity", log),
+    safeKey(env, db, ref.workspaceId, "openai_geo", log),
+    safeKey(env, db, ref.workspaceId, "anthropic_geo", log),
   ]);
   const typesafeKey = typesafe?.key ?? null;
   const writerKey = writerResolved?.key ?? null;
   const geminiKey = gemini?.key ?? null;
   const perplexityKey = perplexity?.key ?? null;
+  const openaiGeoKey = openaiGeo?.key ?? null;
+  const anthropicGeoKey = anthropicGeo?.key ?? null;
   // Budget attribution uses the same resolution that picked the keys (global operator-key caps).
   const budget = createBudget(db, env, { workspaceId: ref.workspaceId, projectId: ref.id, runId: run.id }, clock, {
-    sources: { typesafe: typesafe?.source ?? null, writer: writerResolved?.source ?? null, gemini: gemini?.source ?? null, perplexity: perplexity?.source ?? null },
+    sources: {
+      typesafe: typesafe?.source ?? null,
+      writer: writerResolved?.source ?? null,
+      gemini: gemini?.source ?? null,
+      perplexity: perplexity?.source ?? null,
+      openai_geo: openaiGeo?.source ?? null,
+      anthropic_geo: anthropicGeo?.source ?? null,
+    },
   });
 
   const decisions = typesafeKey ? createTypeSafeProvider({ apiKey: typesafeKey, model: env.TYPESAFE_MODEL, fetchImpl: apiFetch, calls, budget: budgetFor(budget, "typesafe") }) : null;
@@ -181,6 +195,12 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
   }
   if (perplexityKey && env.PERPLEXITY_MODEL && perplexityConfigured(env, perplexityKey)) {
     geoProviders.push(createPerplexityProvider({ apiKey: perplexityKey, model: env.PERPLEXITY_MODEL.trim(), fetchImpl: apiFetch, now: clock }));
+  }
+  if (openaiGeoKey && env.OPENAI_GEO_MODEL && openaiGeoConfigured(env, openaiGeoKey)) {
+    geoProviders.push(createOpenAiGeoProvider({ apiKey: openaiGeoKey, model: env.OPENAI_GEO_MODEL.trim(), fetchImpl: apiFetch, now: clock }));
+  }
+  if (anthropicGeoKey && env.ANTHROPIC_GEO_MODEL && anthropicGeoConfigured(env, anthropicGeoKey)) {
+    geoProviders.push(createAnthropicGeoProvider({ apiKey: anthropicGeoKey, model: env.ANTHROPIC_GEO_MODEL.trim(), fetchImpl: apiFetch, now: clock }));
   }
 
   let gsc: RunContext["gsc"] = null;
@@ -228,14 +248,14 @@ export async function buildWriterForWorkspace(
   const projectId = opts.projectId ?? null;
   const calls = createCallRecorder(db, { workspaceId, projectId, runId: null }, clock);
   const budget = projectId
-    ? budgetFor(createBudget(db, env, { workspaceId, projectId, runId: null }, clock, { sources: { writer: resolved.source, typesafe: null, gemini: null, perplexity: null } }), "writer")
+    ? budgetFor(createBudget(db, env, { workspaceId, projectId, runId: null }, clock, { sources: { writer: resolved.source } }), "writer")
     : null;
   return createWriter(env, resolved.key, createApiFetch(env, opts.fetchImpl ?? fetch), { calls, budget });
 }
 
 /** Which capabilities are configured for a workspace, without decrypting any key. */
-export async function capabilityPresence(env: Env, db: Db, workspaceId: string): Promise<Record<ProviderId, boolean>> {
-  const rows = await db.all<{ provider: ProviderId }>("SELECT provider FROM provider_credentials WHERE workspace_id = ?", workspaceId);
+export async function capabilityPresence(env: Env, db: Db, workspaceId: string): Promise<Record<CredentialProviderId, boolean>> {
+  const rows = await db.all<{ provider: CredentialProviderId }>("SELECT provider FROM provider_credentials WHERE workspace_id = ?", workspaceId);
   const saved = new Set(rows.map((r) => r.provider));
   const op = (v: string | undefined) => typeof v === "string" && v.trim().length > 0;
   return {
@@ -244,5 +264,7 @@ export async function capabilityPresence(env: Env, db: Db, workspaceId: string):
     // Presence only (no decryption): a saved BYO key stands in as "some key".
     gemini: geminiConfigured(env, saved.has("gemini") ? "saved" : null),
     perplexity: perplexityConfigured(env, saved.has("perplexity") ? "saved" : null),
+    openai_geo: openaiGeoConfigured(env, saved.has("openai_geo") ? "saved" : null),
+    anthropic_geo: anthropicGeoConfigured(env, saved.has("anthropic_geo") ? "saved" : null),
   };
 }

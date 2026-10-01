@@ -16,6 +16,13 @@ GEMINI_MODEL=
 PERPLEXITY_API_KEY=
 # Agent API model in provider/model form, e.g. perplexity/sonar (see https://docs.perplexity.ai)
 PERPLEXITY_MODEL=
+# OpenAI GEO lane (Responses API + web_search). Separate from the writer key. Exact model id required, e.g. one
+# the web search guide lists (https://developers.openai.com/api/docs/guides/tools-web-search); no default.
+OPENAI_GEO_API_KEY=
+OPENAI_GEO_MODEL=
+# Anthropic GEO lane (Messages API + web_search_20250305). Separate from WRITER_API_KEY. Exact model id required.
+ANTHROPIC_GEO_API_KEY=
+ANTHROPIC_GEO_MODEL=
 # Writer: WRITER_PROVIDER=anthropic|openai_compatible, exact model id required
 WRITER_PROVIDER=
 WRITER_MODEL=

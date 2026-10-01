@@ -129,7 +129,8 @@ export interface IntegrationsStatus {
     lastError: string | null;
   };
   providers: Array<{
-    provider: ProviderId;
+    /** Includes the API GEO engine lanes (openai_geo, anthropic_geo). */
+    provider: ProviderIdWithGeoEngines;
     label: string;
     source: "workspace_key" | "operator_key" | "none";
     keyHint: string | null;
@@ -750,5 +751,209 @@ export interface DraftCheckResult {
   checklist: Checklist; // kind "page" items evaluated against the draft
   flags: DraftCheckFlag[];
   jevUsed: boolean;
+  labels: string[];
+}
+
+// ------------------------------------------------------------------ AI engine board [A6-A8, A11] (docs/geo-board-design.md)
+/**
+ * Provider ids of the two additional API-sampled GEO engines. Contracts: docs/provider-contracts.md
+ * ("OpenAI Responses API web search — GEO", "Anthropic Messages web search — GEO"). They are kept out of
+ * `ProviderId` until the credential store, budget, runtime, and migration change land together (see the
+ * switch-site list in docs/api.md "AI engine board"): `ProviderId` is the key type of several exhaustive
+ * Record maps and the `provider_credentials.provider` CHECK constraint. "writer" stays a separate id even
+ * when the writer and a GEO engine use the same vendor.
+ */
+export type GeoEngineApiProviderId = "openai_geo" | "anthropic_geo";
+/** Every API-sampled GEO engine lane. Manual imports are not an engine lane. */
+export type GeoEngineProviderId = "gemini" | "perplexity" | GeoEngineApiProviderId;
+/** ProviderId after the GEO engine additions; the builder replaces ProviderId with this union. */
+export type ProviderIdWithGeoEngines = ProviderId | GeoEngineApiProviderId;
+
+/** A value with an explicit money basis: actual as returned by the provider, or an estimate from versioned rates. */
+export interface CostUsd {
+  /** null = unknown (no usage or no configured rate); never rendered as $0. */
+  value: number | null;
+  isEstimate: boolean;
+}
+
+export type EngineFeedStatus = "missing" | "named" | "cited" | "not_run";
+
+/** One prompt card in an engine lane's feed (latest observation for that prompt and engine). */
+export interface EngineFeedItem {
+  promptId: string;
+  promptText: string; // plain text
+  observationId: string | null; // null when status is not_run
+  /**
+   * missing: brand neither mentioned nor cited; named: mentioned but no own-site citation;
+   * cited: an own-site URL was cited; not_run: no valid observation for this prompt in the cohort.
+   */
+  status: EngineFeedStatus;
+  /** Rank in a real ordered list in the answer (geo_brand_observations.list_rank); null when there was no list. */
+  position: number | null;
+  sentiment: { value: Sentiment; method: string } | null; // method as stored, e.g. "deterministic+jev"
+  /** Provider-call latency when the call is linked by request id; null when not recorded. */
+  latencyMs: number | null;
+  grounded: boolean;
+  citedInstead: { host: string; url: string | null; sourceType: SourceType } | null;
+  observedAt: string | null;
+}
+
+/** One engine column of the board. Every rate carries its numerator and denominator. */
+export interface EngineLaneSummary {
+  provider: GeoEngineProviderId;
+  label: string; // e.g. "OpenAI Responses API · web_search (API-sampled)"
+  model: string | null; // exact model id from configuration / the response; never a default
+  groundingMode: string | null; // e.g. "web_search", "web_search_20250305", "google_search"
+  state: CapabilityState;
+  /** Why the lane is not ready (e.g. "Set OPENAI_GEO_MODEL and an OpenAI key"); null when ready. */
+  stateDetail: string | null;
+  cohortKey: string | null;
+  promptsRun: number;
+  counts: { valid: number; grounded: number; failed: number; incomplete: number };
+  citationRate: Ratio; // valid answers citing an own-site URL / valid answers
+  mentionRate: Ratio; // valid answers mentioning the brand / valid answers
+  answersCitingUs: number; // = citationRate.numerator
+  answersSkippingUs: number; // valid answers with neither mention nor own-site citation
+  /** Host cited most often in answers that skip us; share = answers citing that host / answersSkippingUs. */
+  citedInstead: { host: string; share: Ratio } | null;
+  searchQueries: { state: "captured" | "not_exposed"; count: number };
+  costUsd: CostUsd;
+  lastRunAt: string | null;
+  smallSampleWarning: boolean;
+  feed: EngineFeedItem[]; // newest first, capped (see docs/api.md)
+}
+
+export interface EngineBoardResponse {
+  state: CapabilityState;
+  promptSetVersion: number | null;
+  generatedAt: string;
+  lanes: EngineLaneSummary[]; // fixed order: openai_geo, anthropic_geo, gemini, perplexity
+  /** Mandatory disclosures, e.g. "API-sampled answers; not consumer-app answers". */
+  labels: string[];
+}
+
+// ------------------------------------------------------------------ why an engine skips our page [A7]
+export type SkipFactorKey =
+  | "answer_first"
+  | "faq_schema"
+  | "author"
+  | "freshness"
+  | "sources_cited"
+  | "entity_facts"
+  | "compare_table"
+  | "internal_links";
+export type FactorStatus = "present" | "partial" | "missing" | "unknown";
+
+export interface SkipFactor {
+  key: SkipFactorKey;
+  label: string;
+  status: FactorStatus;
+  /** Observable fact, e.g. "answer at word 180", "FAQPage JSON-LD absent", "3 outbound source links". */
+  measured: string;
+  value: number | null; // the raw measured number behind `measured` when there is one
+  method: "measured" | "heuristic";
+  /** Same attribute on the cited page when the user approved it [A7]; null otherwise. */
+  citedPage: { status: FactorStatus; measured: string; value: number | null } | null;
+}
+
+/** Observable attributes of one of our pages, optionally for one prompt and engine. No aggregate score. */
+export interface PageSkipFactors {
+  state: CapabilityState;
+  page: { pageId: string; url: string; snapshotAt: string | null; wordCount: number | null };
+  promptId: string | null;
+  promptText: string | null;
+  engine: GeoEngineProviderId | null;
+  /** Host cited in place of us for this prompt/engine (latest cohort), null when none or not asked. */
+  citedInsteadHost: string | null;
+  /** Approved competitor assessment used for the citedPage column, when one exists. */
+  competitorAssessmentId: string | null;
+  factors: SkipFactor[];
+  /** How the page and cited source were chosen, e.g. "best page by engine search query match". */
+  basis: string;
+  labels: string[]; // e.g. "Measured from crawl", "Correlational, not causal"
+}
+
+// ------------------------------------------------------------------ competitor pages read for why an engine cites them [A7]
+export type CompetitorCheckKey = "answer_first" | "depth" | "proof" | "schema" | "freshness" | "author" | "entity" | "faq";
+
+export interface CompetitorCheck {
+  key: CompetitorCheckKey;
+  label: string;
+  /** Jev Noul yes-probability for method "jev"; null for measured checks. Noul has no confidence field. */
+  noul: number | null;
+  /** Tier from runs/policy.ts for jev checks; null for measured checks. */
+  tier: "act" | "flag" | "drop" | null;
+  method: "jev" | "measured";
+  /** Measured value or observable fact, e.g. "1,709 words", "FAQPage, Product". */
+  detail: string | null;
+}
+
+export type CompetitorAssessmentState = "queued" | "fetching" | "assessed" | "blocked" | "failed";
+
+export interface CompetitorPageAssessment {
+  id: string;
+  url: string;
+  host: string;
+  approvedAt: string;
+  approvedBy: string; // users.id
+  fetchedAt: string | null;
+  sourceType: SourceType; // from geo_citations for that URL
+  /** Prompts and engines whose stored answers cited this URL. */
+  citedIn: Array<{ promptId: string | null; promptText: string; provider: string; observationId: string }>;
+  checks: CompetitorCheck[];
+  /** Short observable facts only (plain text), e.g. "Answer in first 40 words", "Updated 20 days ago". */
+  reasons: string[];
+  /** adapt = worth adapting the structure (never copying text); skip = nothing to adapt; review = human check. */
+  verdict: "adapt" | "skip" | "review" | null;
+  state: CompetitorAssessmentState;
+  /** e.g. "robots.txt disallows", "401 login wall", "non-HTML". */
+  stateDetail: string | null;
+}
+
+export interface CompetitorPageApprovalRequest {
+  url: string; // must equal a URL stored in geo_citations for this project
+}
+
+// ------------------------------------------------------------------ rewrite plans (manual; never auto-published)
+export type RewritePlanItemKey =
+  | "read_winning_page"
+  | "map_question"
+  | "faq"
+  | "compare_table"
+  | "internal_links"
+  | "answer_first"
+  | "author"
+  | "schema"
+  | "indexnow";
+
+export interface RewritePlanItem {
+  key: RewritePlanItemKey;
+  label: string; // indexnow: "Submit to IndexNow (Bing and participating engines, not Google) · optional"
+  status: "done" | "todo" | "not_applicable" | "unknown";
+  evidence: string | null; // plain text, e.g. "FAQPage JSON-LD present in crawl of 2026-09-29"
+  method: "measured" | "manual";
+  optional: boolean; // true for indexnow
+}
+
+export interface RewritePlan {
+  pageId: string;
+  url: string;
+  question: string; // the prompt text this page should answer
+  promptId: string | null;
+  engine: GeoEngineProviderId | null;
+  competitorAssessmentId: string | null;
+  items: RewritePlanItem[];
+  /** Measured GSC for the page (never projected); null when GSC is not connected. */
+  gsc: { clicks: number; impressions: number; window: DateWindow } | null;
+  /** Answers citing this page in stored observations within the window; null when no GEO data. */
+  aiCitations: { count: number; window: DateWindow } | null;
+  recommendationId: string | null;
+  publishing: "manual";
+}
+
+export interface RewritePlansResponse {
+  state: CapabilityState;
+  generatedAt: string;
+  plans: RewritePlan[];
   labels: string[];
 }

@@ -11,32 +11,31 @@ import { Hono, type Context } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../app";
 import type { Env } from "../env";
-import type { CapabilityState, IntegrationsStatus, ProviderId } from "@shared/types";
+import type { CapabilityState, IntegrationsStatus } from "@shared/types";
 import type { Db } from "../lib/db";
 import { decryptSecret, encryptionConfigured, encryptSecret } from "../lib/crypto";
 import { badRequest, notFound, setupRequired, unauthorized } from "../lib/errors";
 import { newId } from "../lib/ids";
 import { iso } from "../lib/time";
 import { requireWorkspaceMember, requireWorkspaceOwner, type SessionUser } from "../platform/access";
-import { credentialAad } from "../platform/credentials";
+import { credentialAad, OPERATOR_KEY_ENV, type CredentialProviderId } from "../platform/credentials";
+import { isValidAnthropicModelId } from "../providers/anthropic-geo";
+import { isValidOpenAiModelId } from "../providers/openai-geo";
 import { rateLimit } from "../platform/rate-limit";
 
 export type ProviderStatus = IntegrationsStatus["providers"][number];
 
-export const PROVIDERS: readonly ProviderId[] = ["typesafe", "gemini", "perplexity", "writer"];
+type ProviderId = CredentialProviderId;
 
-const OPERATOR_KEY_ENV: Record<ProviderId, keyof Env> = {
-  typesafe: "TYPESAFE_API_KEY",
-  gemini: "GEMINI_API_KEY",
-  perplexity: "PERPLEXITY_API_KEY",
-  writer: "WRITER_API_KEY",
-};
+export const PROVIDERS: readonly ProviderId[] = ["typesafe", "gemini", "perplexity", "openai_geo", "anthropic_geo", "writer"];
 
 const MODEL_ENV: Record<ProviderId, keyof Env> = {
   typesafe: "TYPESAFE_MODEL",
   gemini: "GEMINI_MODEL",
   perplexity: "PERPLEXITY_MODEL",
   writer: "WRITER_MODEL",
+  openai_geo: "OPENAI_GEO_MODEL",
+  anthropic_geo: "ANTHROPIC_GEO_MODEL",
 };
 
 /** Disclosure shown next to each provider: what project data is sent to it. */
@@ -47,6 +46,10 @@ export const DATA_SENT: Record<ProviderId, string> = {
     "Your approved GEO prompt text and locale/language. No site content, Search Console data, context documents, or credentials.",
   perplexity:
     "Your approved GEO prompt text and locale/language. No site content, Search Console data, context documents, or credentials.",
+  openai_geo:
+    "Your approved GEO prompt text and locale/language (OpenAI Responses API with web search). No site content, Search Console data, context documents, or credentials.",
+  anthropic_geo:
+    "Your approved GEO prompt text and locale/language (Anthropic Messages API with web search). No site content, Search Console data, context documents, or credentials.",
   writer:
     "Stored evidence for the recommendation being drafted (page excerpts, metrics, AI-answer spans), your confirmed context documents (product, positioning, competitors, voice), and brand and competitor names. No credentials, Google tokens, or raw Search Console exports.",
 };
@@ -69,6 +72,10 @@ function providerLabel(env: Env, provider: ProviderId): string {
       return "Google Gemini";
     case "perplexity":
       return "Perplexity";
+    case "openai_geo":
+      return "OpenAI (AI engine, web search)";
+    case "anthropic_geo":
+      return "Anthropic Claude (AI engine, web search)";
     case "writer": {
       const wp = writerProvider(env);
       return wp === "anthropic" ? "Writer (Anthropic)" : wp === "openai_compatible" ? "Writer (OpenAI-compatible)" : "Writer";
@@ -99,7 +106,11 @@ function statusFor(env: Env, provider: ProviderId, row: CredentialRow | null): P
   const source: ProviderStatus["source"] = row ? "workspace_key" : operatorKey ? "operator_key" : "none";
   // TypeSafe falls back to the documented `jev-latest` alias (same rule as the runtime's resolveTypeSafeModel).
   const model = envStr(env, MODEL_ENV[provider]) ?? (provider === "typesafe" ? TYPESAFE_DEFAULT_MODEL_ALIAS : null);
-  const configured = model !== null && (provider !== "writer" || writerProvider(env) !== null);
+  const configured =
+    model !== null &&
+    (provider !== "writer" || writerProvider(env) !== null) &&
+    (provider !== "openai_geo" || isValidOpenAiModelId(model)) &&
+    (provider !== "anthropic_geo" || isValidAnthropicModelId(model));
   let state: CapabilityState;
   if (source === "none" || !configured) state = "setup_required";
   else if (row && row.last_test_ok === 0) state = "error";
@@ -149,6 +160,14 @@ export async function testProviderKey(env: Env, provider: ProviderId, apiKey: st
       break;
     case "perplexity":
       return { ok: null, detail: NO_FREE_ENDPOINT };
+    case "openai_geo":
+      url = "https://api.openai.com/v1/models";
+      headers = { Authorization: `Bearer ${apiKey}` };
+      break;
+    case "anthropic_geo":
+      url = "https://api.anthropic.com/v1/models";
+      headers = { "x-api-key": apiKey, "anthropic-version": "2023-06-01" };
+      break;
     case "writer": {
       const wp = writerProvider(env);
       if (wp === "anthropic") {
@@ -274,20 +293,31 @@ credentialRoutes.put(
     const now = iso(c.get("now"));
     const keyEnc = await encryptSecret(c.env, apiKey, credentialAad(wid, provider));
     const hint = apiKey.slice(-4);
-    await db.run(
-      `INSERT INTO provider_credentials (id, workspace_id, provider, key_enc, key_hint, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
-       ON CONFLICT (workspace_id, provider) DO UPDATE SET
-         key_enc = excluded.key_enc, key_hint = excluded.key_hint,
-         last_tested_at = NULL, last_test_ok = NULL, last_test_detail = NULL, updated_at = excluded.updated_at`,
-      newId("cred"),
-      wid,
-      provider,
-      keyEnc,
-      hint,
-      now,
-      now,
-    );
+    try {
+      await db.run(
+        `INSERT INTO provider_credentials (id, workspace_id, provider, key_enc, key_hint, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
+         ON CONFLICT (workspace_id, provider) DO UPDATE SET
+           key_enc = excluded.key_enc, key_hint = excluded.key_hint,
+           last_tested_at = NULL, last_test_ok = NULL, last_test_detail = NULL, updated_at = excluded.updated_at`,
+        newId("cred"),
+        wid,
+        provider,
+        keyEnc,
+        hint,
+        now,
+        now,
+      );
+    } catch (e) {
+      // The provider_credentials CHECK constraint predates the openai_geo / anthropic_geo lanes; until the
+      // migration that widens it is applied, those keys can only come from the operator environment.
+      if (/CHECK constraint failed/i.test(String((e as Error)?.message ?? e))) {
+        throw setupRequired(
+          `Workspace keys for ${providerLabel(c.env, provider)} cannot be stored until the database migration that adds this provider is applied. Use the operator key ${String(OPERATOR_KEY_ENV[provider])} meanwhile.`,
+        );
+      }
+      throw e;
+    }
     const row = await rowFor(db, wid, provider);
     return c.json({ data: statusFor(c.env, provider, row) });
   },

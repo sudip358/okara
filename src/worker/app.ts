@@ -16,6 +16,7 @@ import { projectRoutes } from "./routes/projects";
 import { integrationRoutes } from "./routes/integrations";
 import { seoRoutes } from "./routes/seo";
 import { geoRoutes } from "./routes/geo";
+import { geoBoardRoutes } from "./routes/geo-board";
 import { checklistRoutes } from "./routes/checklists";
 import { robotsRoutes } from "./routes/robots";
 import { coverageRoutes } from "./routes/coverage";
@@ -57,6 +58,7 @@ export function createApp() {
   app.route("/", integrationRoutes);
   app.route("/", seoRoutes);
   app.route("/", geoRoutes);
+  app.route("/", geoBoardRoutes);
   app.route("/", checklistRoutes);
   app.route("/", robotsRoutes);
   app.route("/", coverageRoutes);

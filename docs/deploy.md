@@ -84,7 +84,11 @@ need more than 10 ms of CPU per step, so agent runs will fail on the free plan. 
      (`node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`). Add
      `TOKEN_ENCRYPTION_KEY_V2` later to rotate.
    - Optional operator keys (workspaces can instead add their own in the app): `TYPESAFE_API_KEY`,
-     `GEMINI_API_KEY`, `PERPLEXITY_API_KEY`, `WRITER_API_KEY`. Spend on these keys is shared by every
+     `GEMINI_API_KEY`, `PERPLEXITY_API_KEY`, `OPENAI_GEO_API_KEY`, `ANTHROPIC_GEO_API_KEY`, `WRITER_API_KEY`.
+     The two `*_GEO_API_KEY` keys are separate from `WRITER_API_KEY` even when the writer uses the same vendor.
+     Workspace-saved keys for the OpenAI/Anthropic GEO lanes need the migration that widens the
+     `provider_credentials` CHECK constraint; until it is applied, saving one returns `setup_required` and only
+     the operator key works. Spend on these keys is shared by every
      workspace and bounded by the `GLOBAL_*` caps below. Review those caps before setting these keys.
 
    Plain vars live in `wrangler.jsonc` → `vars` (not secrets; a name cannot be both a var and a secret):
@@ -93,6 +97,8 @@ need more than 10 ms of CPU per step, so agent runs will fail on the free plan. 
    |---|---|
    | `APP_ORIGIN` | The one https origin users reach (step 1) |
    | `GEMINI_MODEL`, `PERPLEXITY_MODEL` | Exact model ids (e.g. `perplexity/sonar`); no defaults |
+   | `OPENAI_GEO_MODEL` | Exact OpenAI model id for the OpenAI web_search lane (a model the web search guide supports, e.g. `gpt-5.5`, `gpt-4.1`); no default. Unset: the lane is `setup_required`. Cost estimates exist for the ids in `src/worker/providers/rates.ts`; any other id records cost as unknown |
+   | `ANTHROPIC_GEO_MODEL` | Exact Claude model id for the Anthropic web_search lane (e.g. `claude-sonnet-5-5`); no default. Web search must be enabled for the organization in the Claude Console, otherwise every call fails with HTTP 400 |
    | `TYPESAFE_MODEL` | Jev model alias, default `jev-latest` |
    | `WRITER_PROVIDER`, `WRITER_MODEL` | `anthropic` or `openai_compatible`, plus an exact model id |
    | `WRITER_BASE_URL` | Required for `openai_compatible` (https only), e.g. `https://api.openai.com/v1` |
@@ -100,7 +106,7 @@ need more than 10 ms of CPU per step, so agent runs will fail on the free plan. 
    | `WRITER_REASONING_HEADROOM_TOKENS` | Optional, `openai_compatible` only: extra `max_completion_tokens` added to each answer budget for reasoning tokens, and reserved in `writer_tokens`. Default 0 when `WRITER_REASONING_EFFORT` is unset, 4000 when it is set. Whole number 0-100000. |
    | `GEMINI_THINKING_LEVEL` | Optional override for Gemini `thinkingLevel`: `MINIMAL`, `LOW`, `MEDIUM`, `HIGH` (sent for any model id) or `OFF` (never sent). Unset: `LOW` for Gemini 3+ ids and the `gemini-flash-latest` / `gemini-pro-latest` aliases, nothing for older models (where the parameter is an API error). Unrecognised values fall back to the default. |
    | `ALLOWED_EMAILS`, `ALLOWED_EMAIL_DOMAINS` | Sign-in allowlist, comma-separated, case-insensitive, verified Google emails only. **In production nobody can sign in until at least one is set** (`?authError=signup_closed`); other emails get `not_allowed`. Example: `ALLOWED_EMAIL_DOMAINS=example.com` |
-   | `GLOBAL_USD_MICROS_PER_DAY` | Priced GEO spend per UTC day across all projects on the operator Gemini/Perplexity keys (default 2,000,000 = $2.00) |
+   | `GLOBAL_USD_MICROS_PER_DAY` | Priced GEO spend per UTC day across all projects on the operator Gemini/Perplexity/OpenAI-GEO/Anthropic-GEO keys (default 2,000,000 = $2.00) |
    | `GLOBAL_JEV_CALLS_PER_DAY` | Jev calls per UTC day across all projects on the operator TypeSafe key (default 2,000) |
    | `GLOBAL_PROVIDER_CALLS_PER_DAY` | Provider calls per UTC day across all projects on any operator key (default 3,000) |
    | `GLOBAL_WRITER_TOKENS_PER_DAY` | Writer tokens per UTC day across all projects on the operator writer key (default 1,000,000) |
@@ -156,6 +162,11 @@ supervised run, with a small crawl (50 pages or fewer) and the sign-in allowlist
    appears), latency against the 30 s timeout, and the thinking-token count in `usageMetadata`.
 7. **Perplexity.** Check that `usage.cost` and `tool_calls_details.search_web` parse from a live response and
    that the recorded cost matches the invoice.
+7a. **OpenAI and Anthropic GEO lanes.** With the chosen `OPENAI_GEO_MODEL`, confirm a live response has
+   `web_search_call` items with `action.queries` and `url_citation` annotations, and how often the model answers
+   without searching (`tool_choice: "auto"`; those answers are stored ungrounded). With `ANTHROPIC_GEO_MODEL`,
+   confirm `usage.server_tool_use.web_search_requests`, `web_search_result_location` citations, and how often
+   `pause_turn` appears. Compare the estimated costs (both lanes are estimates) with the invoices.
 8. **Jev (TypeSafe SDK) and the Anthropic writer in workerd.** Confirm the TypeSafe SDK constructs and calls
    work in workerd, that the Anthropic SDK's lazily imported `node:` chunks load at runtime, and that
    structured-output (`json_schema`) responses from the real writer parse.

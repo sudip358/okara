@@ -1,6 +1,8 @@
 /**
- * runGeoBatch: run the project's active, approved buyer prompts once per enabled GEO provider and
- * persist every result (including failures) as an API-sampled observation.
+ * runGeoBatch: run the project's active, approved buyer prompts once per enabled GEO provider (Gemini,
+ * Perplexity, OpenAI web_search, Anthropic web_search; each only when its key and model are configured) and
+ * persist every result (including failures) as an API-sampled observation. Every lane uses the same
+ * reservations, attributed to its own credential via budgetFor(ctx.budget, provider.id).
  *
  * Budget accounting per call (reserve BEFORE sending):
  *   geo_prompts 1, provider_calls 1, usd_micros = versioned upper bound (rates.reservationMicros)
@@ -82,8 +84,8 @@ export async function runGeoBatch(ctx: RunContext): Promise<GeoBatchSummary> {
   const providerIds = providers.map((p) => p.id);
 
   if (providers.length === 0) {
-    await ctx.log.event("geo_batch", "skipped", "No GEO provider is configured; add a Gemini or Perplexity key and model.");
-    return summary([], "setup_required", "No GEO provider is configured. Add a Gemini or Perplexity API key and model id.");
+    await ctx.log.event("geo_batch", "skipped", "No GEO provider is configured; add a Gemini, Perplexity, OpenAI or Anthropic key and model.");
+    return summary([], "setup_required", "No GEO provider is configured. Add a Gemini, Perplexity, OpenAI (OPENAI_GEO_MODEL) or Anthropic (ANTHROPIC_GEO_MODEL) API key and model id.");
   }
 
   const set = await db.first<{ id: string; version: number }>(

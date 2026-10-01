@@ -72,6 +72,11 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | GET | /projects/:pid/geo/displacements | geo-analysis | `DisplacementSummary[]` |
 | GET | /projects/:pid/geo/search-queries | geo-analysis | `SearchQuerySummary[]` |
 | POST | /projects/:pid/geo/import | geo-analysis | body `{promptText, surface, answer, citations[]}` manual import |
+| GET | /projects/:pid/geo/board | geo-analysis | `EngineBoardResponse` (AI engines board; read-only, never calls a provider) |
+| GET | /projects/:pid/geo/pages/:pageId/skip-factors?promptId=&engine= | geo-analysis | `PageSkipFactors` (measured from the latest crawl; never calls Jev) |
+| POST | /projects/:pid/geo/competitor-pages | geo-analysis | body `CompetitorPageApprovalRequest` `{url}`; 202 `CompetitorPageAssessment` (state `queued`) [A7] (CSRF; rate-limited; budgeted) |
+| GET | /projects/:pid/geo/competitor-pages | geo-analysis | `CompetitorPageAssessment[]` (newest first) |
+| GET | /projects/:pid/geo/rewrite-plans | geo-analysis | `RewritePlansResponse` (manual plans; no publishing) |
 | GET | /projects/:pid/checklists/:kind | checklists | `Checklist` for kind `seo` or `geo` [A21] |
 | GET | /projects/:pid/pages/:pageId/checklist | checklists | `Checklist` kind `page` (on-page checklist for one URL) [A21] |
 | PUT | /projects/:pid/pages/:pageId/checklist/:itemId | checklists | body `{checked, note?}` for manual items on that page |
@@ -98,3 +103,97 @@ They do not call Google's revoke endpoint: a revoke ends the grant for the whole
 disconnect every other project connected with that account. `gscRevoked` and `revoked` stay in the responses for
 compatibility and are always `false`. To revoke access at Google, the user removes the app at
 myaccount.google.com.
+
+## AI engine board (reference: Ryze "Jev for SEO/GEO" board; UI spec docs/geo-board-design.md)
+
+All five routes resolve the project with `requireProject()` and filter every query by `workspace_id` and
+`project_id`. Nothing on these routes projects traffic, conversions, revenue, rankings, or citation
+probability [A11]; there is no aggregate "citability" score.
+
+### GET /projects/:pid/geo/board → `EngineBoardResponse`
+- One `EngineLaneSummary` per engine, fixed order `openai_geo`, `anthropic_geo`, `gemini`, `perplexity`.
+  A lane is always present: `setup_required` (no key or no model env: `OPENAI_GEO_MODEL`,
+  `ANTHROPIC_GEO_MODEL`, `GEMINI_MODEL`, `PERPLEXITY_MODEL`), `disabled`, `error` (e.g. Anthropic org
+  setting "web search is not enabled"), `ready`, or `demo`. Until the openai/anthropic adapters ship, their
+  lanes return `setup_required` with `stateDetail` "Not implemented yet" and zero counts, never sample data.
+- Computed from the latest cohort per engine (`geo_observations` with `measurement_type = 'api'`, same
+  `cohort_key`), exactly like `GeoResults.lanes`: `citationRate` = valid answers with an own-site
+  citation / valid answers; `mentionRate` likewise; `answersCitingUs` = `citationRate.numerator`;
+  `answersSkippingUs` = valid answers with neither mention nor own-site citation; `citedInstead.host` = the
+  host most often cited in skipping answers, `share` = those answers / `answersSkippingUs`.
+- `costUsd` sums `geo_observations.cost_usd` for the cohort; `value` is null if any observation's cost is
+  unknown and `isEstimate` is true if any is an estimate. `searchQueries` counts `geo_search_queries`.
+- `feed`: latest observation per approved prompt, newest first, at most 50 per lane. `latencyMs` comes from
+  `provider_calls.latency_ms` joined on `request_id` (null when not linked). Manual imports never appear.
+- Queries that fan out over prompts or observations are chunked to stay under D1's 100 bound parameters.
+
+### GET /projects/:pid/geo/pages/:pageId/skip-factors?promptId=&engine= → `PageSkipFactors`
+- `pageId` must belong to the project (404 otherwise). `promptId` optional (must be an approved prompt of the
+  project); `engine` optional (`GeoEngineProviderId`).
+- Factors come from the latest `page_snapshots` row: `answer_first` (heuristic: word index of the first
+  sentence sharing the prompt's content tokens, "answer at word N"; without a prompt, first paragraph
+  length), `faq_schema` (FAQPage JSON-LD types; measured), `author` (byline/author markup; measured),
+  `freshness` (visible last-updated date and age in days; measured), `sources_cited` (outbound citation
+  count; measured), `entity_facts` (heuristic: count of numeric/spec facts and Product/Organization
+  JSON-LD properties), `compare_table` (table count; measured), `internal_links` (internal links in from
+  the latest crawl; measured). No crawl → `state: "ready"` with every factor `unknown` and `basis`
+  "No crawl yet"; a page skipped by the crawler carries its `skipped_reason` in `basis`. `citedPage` is filled only from an `assessed` competitor assessment for the
+  `citedInsteadHost` URL.
+- Read-only: never calls Jev or fetches a page. No budget.
+
+### POST /projects/:pid/geo/competitor-pages → 202 `CompetitorPageAssessment`
+- Requires session, same-origin `Origin`, `X-CSRF-Token`. Body `{url}` (max 2,048 chars, https only).
+- 400 `bad_request` (details `{reason: "url_not_cited"}`) unless the canonicalized URL equals a `geo_citations.url` stored for this project
+  (`workspace_id` + `project_id`); approval is per URL, never per domain [A7]. The host must not be the
+  project's verified host (use the crawl for own pages).
+- Rate limit: `COMPETITOR_PAGE_RATE_LIMIT` 10 approvals per project per hour (`hitRateLimit` key
+  `competitor_page:<projectId>`), 429 with `Retry-After` when exceeded. Re-approving a URL assessed in the
+  last 7 days returns the existing assessment (200) without a new fetch.
+- Budget: reserves 1 `crawl_pages` unit and, when TypeSafe is configured, up to 3 `jev_calls`
+  (Noul: `answer_first`, `entity`, and the `evidence.injection_risk` screen that runs first) plus the matching `provider_calls`, before any external call;
+  429 `budget_exceeded` (same mapping as `routes/geo.ts`) when the reservation fails. Measured checks
+  (`depth`, `proof`, `schema`, `freshness`, `author`, `faq`) never call Jev.
+- Fetch: one GET through the SSRF guard with the allowlist set to that single host, robots.txt respected,
+  same-origin redirects only, the crawler's size/time caps; only compact evidence is stored (no full text).
+  Page text is untrusted evidence: it goes to Jev as `state`, never as instructions, and is screened with
+  `evidence.injection_risk`.
+- States: `queued` → `fetching` → `assessed` | `blocked` (robots, 401/403, login redirect, non-HTML) |
+  `failed`. Without TypeSafe the measured checks still run, the Jev checks return `noul: null, tier: null`,
+  the state is `assessed`, and `stateDetail` says "Jev not configured: 2 checks not run"; the injection screen is skipped and the reasons list uses measured facts only.
+- `verdict` is computed by code (versioned rule `competitor-verdict.v1`): `review` if any Jev check is tier
+  `flag` or the fetch was partial; `adapt` if 2+ checks are present on their page and missing on our
+  matched page; else `skip`. "Adapt" means adapting structure; the UI never offers to copy their text.
+
+### GET /projects/:pid/geo/competitor-pages → `CompetitorPageAssessment[]`
+Newest first, at most 100.
+
+### GET /projects/:pid/geo/rewrite-plans → `RewritePlansResponse`
+- One plan per page that has an open or approved GEO recommendation or an `adapt` competitor assessment.
+  Items are measured from the latest crawl where possible (`faq`, `compare_table`, `internal_links`,
+  `answer_first`, `author`, `schema`) and manual otherwise (`read_winning_page`, `map_question`,
+  `indexnow`; status `unknown` with evidence "Check this yourself" until a write endpoint is specified). `indexnow` is always `optional: true`,
+  labelled "Bing and participating engines, not Google".
+- `gsc` is the measured last finalized 28-day window for that page (null without GSC); `aiCitations` counts
+  stored answers citing the page in the same window. No projected values. `publishing` is always `"manual"`.
+- Read-only; no Jev, no budget.
+
+### ProviderId switch sites (for the builder adding `openai_geo` / `anthropic_geo`)
+`ProviderId` stays `"typesafe" | "gemini" | "perplexity" | "writer"` until these change together
+(`ProviderIdWithGeoEngines` is the target union):
+- `migrations/0001_init.sql:124` `provider_credentials.provider` CHECK constraint (needs a new migration that
+  rebuilds the table; D1/SQLite cannot alter a CHECK).
+- `src/worker/platform/credentials.ts:16` `OPERATOR_ENV: Record<ProviderId, keyof Env>` (+ `credentialSources`, line 46).
+- `src/worker/routes/credentials.ts:26` `PROVIDERS`, `:28` `OPERATOR_KEY_ENV`, `:35` `MODEL_ENV`, `:43`
+  `DATA_SENT`, `:64` `providerLabel` switch, `:138` `testProviderKey` switch, `:218` `providerParam`.
+- `src/worker/runs/runtime.ts:17` `API_HOST_ALLOWLIST` (add `api.openai.com`), `:158` key resolution,
+  `:170` and `:231` budget `sources` object literals, `:176` `geoProviders` construction, `:237`
+  `capabilityPresence`.
+- `src/worker/runs/budget.ts:48` `MAX_GEO_PROVIDERS = 2` (→ 4), `:97` `RESOURCE_PROVIDERS`, `:104` `PROVIDER_IDS`.
+- `src/worker/env.ts` (new `OPENAI_GEO_API_KEY`, `OPENAI_GEO_MODEL`, `ANTHROPIC_GEO_API_KEY`,
+  `ANTHROPIC_GEO_MODEL`), `wrangler.jsonc` vars, `.dev.vars.example`.
+- `src/worker/providers/rates.ts:39` `RateEntry.provider` union and rate table; `src/worker/providers/types.ts:93` comment.
+- `src/worker/geo/results.ts:45` `API_PROVIDERS`, `:46` `PROVIDER_LABELS`.
+- `src/worker/checklists/data.ts:421` providers-enabled filter (`gemini || perplexity`).
+- `src/worker/seo/recommend/decide.ts:224` `SELF_ACCOUNTING_PROVIDERS` (adapter names; only if the new adapters record their own calls).
+- `src/worker/demo/seed.ts:41` `GROUNDING`, `:220` cohort keys; `src/worker/demo/fixtures.ts:204` provider union.
+- Web: no `ProviderId` switch; `src/web/pages/Integrations.tsx` renders the provider list from the API.

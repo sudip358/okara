@@ -22,6 +22,14 @@ export interface Env {
   GEMINI_MODEL?: string;
   PERPLEXITY_API_KEY?: string;
   PERPLEXITY_MODEL?: string;
+  /** OpenAI GEO lane (Responses API + web_search). Separate from the writer key even when the writer is OpenAI. */
+  OPENAI_GEO_API_KEY?: string;
+  /** Exact OpenAI model id for the GEO lane (e.g. one the web_search guide lists); no default. */
+  OPENAI_GEO_MODEL?: string;
+  /** Anthropic GEO lane (Messages API + web_search_20250305). Separate from WRITER_API_KEY. */
+  ANTHROPIC_GEO_API_KEY?: string;
+  /** Exact Claude model id for the GEO lane; no default. */
+  ANTHROPIC_GEO_MODEL?: string;
   WRITER_PROVIDER?: string; // 'anthropic' | 'openai_compatible'
   WRITER_MODEL?: string;
   WRITER_API_KEY?: string;

@@ -402,3 +402,148 @@ async function readCapped(
     }
   }
 }
+
+// ---------------------------------------------------------------------------------------------- approved external URLs [A7]
+
+/**
+ * Host variants treated as "the same registrable host" for an approved external URL: the approved host
+ * itself and its `www.` twin (example.com <-> www.example.com). Deliberately narrower than a public-suffix
+ * registrable domain: other subdomains are refused, so an approval never widens to a whole domain.
+ */
+export function sameApprovedHost(host: string, approvedHost: string): boolean {
+  const strip = (h: string) => (h.startsWith("www.") ? h.slice(4) : h);
+  const a = normalizeHost(host);
+  const b = normalizeHost(approvedHost);
+  return a === b || strip(a) === strip(b);
+}
+
+/**
+ * Validate a user-approved third-party URL (a page an AI engine cited). Same protections as the crawl
+ * guard, with the allowlist set to the single approved host:
+ *  - http or https only; no userinfo; default port only;
+ *  - public hostnames only: every IP literal is refused (not only private ranges), as are local names
+ *    (localhost, single-label, .local/.internal/...);
+ *  - the host must be the approved host or its www. twin (sameApprovedHost).
+ * Returns the parsed URL (hash stripped, host lowercased) or throws CrawlFetchError('blocked_url').
+ */
+export function assertApprovedExternalUrl(input: string | URL, approvedHost: string): URL {
+  let url: URL;
+  try {
+    url = new URL(String(input));
+  } catch {
+    throw new CrawlFetchError("blocked_url", "Invalid URL.");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new CrawlFetchError("blocked_url", "Only http(s) URLs are fetched.");
+  if (url.username || url.password) throw new CrawlFetchError("blocked_url", "URLs with credentials are refused.");
+  if (url.port !== "") throw new CrawlFetchError("blocked_url", "Non-default ports are refused.");
+  const host = normalizeHost(url.hostname);
+  if (!host || classifyHost(host).kind !== "name") throw new CrawlFetchError("blocked_url", "IP-address hosts are refused.");
+  if (isLocalName(host)) throw new CrawlFetchError("blocked_url", "Local hostnames are refused.");
+  const allowed = normalizeHost(approvedHost);
+  if (!allowed || classifyHost(allowed).kind !== "name" || isLocalName(allowed)) {
+    throw new CrawlFetchError("blocked_url", "Approved host is not a public hostname.");
+  }
+  if (!sameApprovedHost(host, allowed)) throw new CrawlFetchError("blocked_url", "Host is not the approved host.");
+  url.hostname = host;
+  url.hash = "";
+  return url;
+}
+
+export interface ApprovedFetchOptions extends Omit<GuardedFetchOptions, "verifiedHost"> {
+  /** The single approved host (the cited URL's host). Redirects may only stay on it or its www. twin. */
+  approvedHost: string;
+}
+
+/**
+ * Fetch ONE user-approved external URL (a cited third-party page, or its robots.txt) with the same guard
+ * as the crawler: manual redirects re-validated per hop against the approved host (assertApprovedExternalUrl),
+ * hop cap, one timeout over connect + headers + body, streamed byte cap, content-type allowlist. Used only
+ * for the competitor-page approval flow (docs/api.md "POST /projects/:pid/geo/competitor-pages");
+ * robots.txt is checked by the caller before the page fetch.
+ */
+export async function approvedExternalFetch(fetchImpl: typeof fetch, url: string, opts: ApprovedFetchOptions): Promise<GuardedResponse> {
+  const maxRedirects = opts.maxRedirects ?? 5;
+  const kind = opts.kind ?? "html";
+  const controller = new AbortController();
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const abortPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      reject(new CrawlFetchError("timeout", `Timed out after ${opts.timeoutMs} ms.`));
+    }, opts.timeoutMs);
+  });
+  abortPromise.catch(() => undefined);
+
+  try {
+    let current = assertApprovedExternalUrl(url, opts.approvedHost);
+    const redirects: Array<{ status: number; to: string }> = [];
+    for (let hop = 0; ; hop++) {
+      let res: Response;
+      try {
+        res = await Promise.race([
+          fetchImpl(current.toString(), {
+            method: "GET",
+            redirect: "manual",
+            signal: controller.signal,
+            headers: {
+              ...(opts.userAgent ? { "User-Agent": opts.userAgent } : {}),
+              Accept: CONTENT_TYPES[kind].join(", ") + ";q=1.0, */*;q=0.1",
+            },
+          }),
+          abortPromise,
+        ]);
+      } catch (e) {
+        if (e instanceof CrawlFetchError) throw e;
+        if (timedOut) throw new CrawlFetchError("timeout", `Timed out after ${opts.timeoutMs} ms.`);
+        throw new CrawlFetchError("error", "Network error.");
+      }
+
+      if (REDIRECTS.has(res.status)) {
+        const loc = res.headers.get("location");
+        await cancelBody(res);
+        if (!loc) throw new CrawlFetchError("error", `Redirect ${res.status} without Location.`);
+        if (hop + 1 > maxRedirects) throw new CrawlFetchError("too_many_redirects", `More than ${maxRedirects} redirects.`);
+        let next: URL;
+        try {
+          next = assertApprovedExternalUrl(new URL(loc, current), opts.approvedHost);
+        } catch (e) {
+          throw new CrawlFetchError("redirect_offsite", `Redirect hop ${hop + 1} refused: ${(e as Error).message}`);
+        }
+        redirects.push({ status: res.status, to: next.toString() });
+        current = next;
+        continue;
+      }
+
+      const contentType = res.headers.get("content-type");
+      const base: Omit<GuardedResponse, "body" | "bytes" | "truncated"> = {
+        url,
+        finalUrl: current.toString(),
+        status: res.status,
+        contentType,
+        headers: res.headers,
+        redirects,
+      };
+      if (res.status < 200 || res.status >= 300) {
+        await cancelBody(res);
+        return { ...base, body: "", bytes: 0, truncated: false };
+      }
+      const mt = mediaType(contentType);
+      const typeOk = CONTENT_TYPES[kind].includes(mt) || (opts.lenientContentType && (mt === "" || mt.startsWith("text/")));
+      if (!typeOk) {
+        await cancelBody(res);
+        throw new CrawlFetchError("non_html", `Content type ${mt || "(none)"} is not fetched.`);
+      }
+      const declared = Number(res.headers.get("content-length"));
+      if (Number.isFinite(declared) && declared > opts.maxBytes && !opts.truncateAtCap) {
+        await cancelBody(res);
+        throw new CrawlFetchError("too_large", `Declared size ${declared} exceeds ${opts.maxBytes} bytes.`);
+      }
+      const { text, bytes, truncated } = await readCapped(res, opts.maxBytes, abortPromise, opts.truncateAtCap ?? false);
+      return { ...base, body: text, bytes, truncated };
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}

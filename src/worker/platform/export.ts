@@ -39,6 +39,7 @@ export const EXPORT_TABLES = [
   "checklist_manual",
   "link_runs",
   "link_suggestions",
+  "competitor_pages",
 ] as const;
 
 /** Column names that must never appear in an export, whichever table they are in. */
