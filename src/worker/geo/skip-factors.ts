@@ -120,7 +120,7 @@ export function answerPosition(text: string | null, questionTokens: Set<string>)
 
 /** Currency amounts, percentages, dimensions, and numbers with a unit (attached, or spaced for unambiguous units). */
 const NUMERIC_FACT =
-  /(?:[$€£¥]\s?\d[\d,.]*|\b\d[\d,.]*(?:%|mm|cm|m|km|in|ft|lbs?|kg|g|mg|mcg|ml|l|oz|w|kw|v|mah|gb|tb|mb|hz|ghz|mph)\b|\b\d[\d,.]*\s(?:percent|mm|cm|km|inch(?:es)?|feet|ft|lbs?|kg|mg|mcg|ml|oz|kw|mah|gb|tb|mb|hz|ghz|mph|watts?|volts?|years?|months?|days?|hours?|minutes?)\b|\b\d+\s?[x×]\s?\d+\b)/giu;
+  /(?:[$€£¥]\s?\d[\d,.]*|\b\d[\d,.]*%|\b\d[\d,.]*(?:mm|cm|m|km|in|ft|lbs?|kg|g|mg|mcg|ml|l|oz|w|kw|v|mah|gb|tb|mb|hz|ghz|mph)\b|\b\d[\d,.]*\s(?:percent|mm|cm|km|inch(?:es)?|feet|ft|lbs?|kg|mg|mcg|ml|oz|kw|mah|gb|tb|mb|hz|ghz|mph|watts?|volts?|years?|months?|days?|hours?|minutes?)\b|\b\d+\s?[x×]\s?\d+\b)/giu;
 /** Model / part numbers such as "CJC-1295" or "XR500" (case-sensitive: capital letters then digits). */
 const MODEL_NUMBER = /\b[A-Z]{1,5}-?\d{2,6}[A-Z]?\b/gu;
 

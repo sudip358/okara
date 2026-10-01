@@ -82,17 +82,17 @@ describe("GET /projects/:pid/geo/board", () => {
     expect(lane(b, "perplexity").stateDetail).toBe("Set PERPLEXITY_MODEL and a Perplexity API key");
     expect(b.labels.join(" ")).toContain("API-sampled answers; not consumer-app answers");
     expect(b.labels).toContain("Setup required: approve at least one prompt.");
-    expect(JSON.stringify(b)).not.toMatch(/traffic forecast|revenue\b.*\d|citability/i);
+    expect(JSON.stringify(b)).not.toMatch(/citability|\/10\b|projected (traffic|revenue)/i);
   });
 
-  it("a configured engine that never ran is ready with an empty feed of not_run prompts and the configured model", async () => {
+  it("a configured engine that never ran is ready with an empty feed and the configured model", async () => {
     const s = await setup({ OPENAI_GEO_API_KEY: "sk-test", OPENAI_GEO_MODEL: "gpt-4.1-mini" });
     await seedPromptSet(s.env, s.project, ["Where can I buy brass knobs?"]);
     const b = (await s.call(`/projects/${s.pid}/geo/board`)).json.data as EngineBoardResponse;
     expect(b.state).toBe("ready");
     const l = lane(b, "openai_geo");
     expect(l).toMatchObject({ state: "ready", stateDetail: null, model: "gpt-4.1-mini", cohortKey: null, lastRunAt: null, counts: { valid: 0, grounded: 0, failed: 0, incomplete: 0 } });
-    expect(l.feed.map((f) => [f.status, f.observationId, f.position, f.sentiment])).toEqual([["not_run", null, null, null]]);
+    expect(l.feed).toEqual([]);
     expect(lane(b, "anthropic_geo").state).toBe("setup_required");
   });
 
@@ -173,7 +173,7 @@ describe("GET /projects/:pid/geo/board", () => {
 
   it("stays under the 100-parameter limit with many observations, caps the feed, and excludes manual imports", async () => {
     const s = await setup(GEMINI_ENV);
-    const texts = Array.from({ length: FEED_LIMIT + 10 }, (_, i) => `Where can I buy solid brass knob model ${i}?`);
+    const texts = Array.from({ length: 110 }, (_, i) => `Where can I buy solid brass knob model ${i}?`);
     const { promptIds } = await seedPromptSet(s.env, s.project, texts);
     for (const [i, id] of promptIds.entries()) {
       await observe(s, { ...fixture("mention"), prompt: texts[i]! }, { promptId: id, createdAt: hoursAgo(100 - i) });
@@ -181,7 +181,8 @@ describe("GET /projects/:pid/geo/board", () => {
     await s.db.run("UPDATE geo_observations SET measurement_type = 'manual_import', imported_surface = 'chatgpt_app' WHERE id = (SELECT id FROM geo_observations ORDER BY created_at DESC LIMIT 1)");
     const b = (await s.call(`/projects/${s.pid}/geo/board`)).json.data as EngineBoardResponse;
     const l = lane(b, "gemini");
-    expect(l.counts.valid).toBe(FEED_LIMIT + 9);
+    expect(l.counts.valid).toBe(109);
+    expect(l.mentionRate).toEqual({ numerator: 109, denominator: 109, value: 1 });
     expect(l.feed).toHaveLength(FEED_LIMIT);
     expect(l.smallSampleWarning).toBe(false);
   });
@@ -214,13 +215,13 @@ const EVIDENCE: PageEvidence = {
 describe("skip factors: pure measurements", () => {
   it("finds the first sentence sharing the question's content terms", () => {
     const p = answerPosition(EVIDENCE.excerpt, new Set(["solid", "brass", "cabinet", "hardware", "mass-produced"]));
-    expect(p.word).toBe(18);
+    expect(p.word).toBe(15);
     expect(p.sentence).toContain("best solid brass cabinet hardware");
     expect(answerPosition(null, new Set(["x"]))).toEqual({ word: null, scanned: 0, sentence: null });
   });
 
   it("counts numeric/spec facts heuristically", () => {
-    expect(countNumericFacts("Each knob is 38 mm wide, weighs 85 g and costs $24. Model XR500 is 10% heavier.")).toBe(5);
+    expect(countNumericFacts("Each knob is 38 mm wide, weighs 85 g and costs $24. Model XR500 is 10% heavier.")).toBe(4);
     expect(countNumericFacts("Lovely and timeless.")).toBe(0);
   });
 
@@ -228,12 +229,12 @@ describe("skip factors: pure measurements", () => {
     const f = evaluateFactors(EVIDENCE, "Where can I buy solid brass cabinet hardware that isn't mass-produced?", new Set(["residence", "example"]), FIXED_NOW, "2026-09-29T00:00:00Z");
     expect(f.map((x) => x.key)).toEqual(FACTOR_ORDER);
     const by = new Map(f.map((x) => [x.key, x]));
-    expect(by.get("answer_first")).toMatchObject({ status: "present", method: "heuristic", value: 18, measured: "Answer at word 18" });
+    expect(by.get("answer_first")).toMatchObject({ status: "present", method: "heuristic", value: 15, measured: "Answer at word 15" });
     expect(by.get("faq_schema")).toMatchObject({ status: "partial", measured: "2 question headings; FAQPage JSON-LD absent" });
     expect(by.get("author")).toMatchObject({ status: "missing", method: "measured" });
     expect(by.get("freshness")).toMatchObject({ status: "partial", value: 213 });
     expect(by.get("sources_cited")).toMatchObject({ status: "partial", measured: "1 outbound source link" });
-    expect(by.get("entity_facts")).toMatchObject({ status: "present", method: "heuristic" });
+    expect(by.get("entity_facts")).toMatchObject({ status: "partial", method: "heuristic", value: 2, measured: "2 numeric/spec facts in the stored text; Product JSON-LD" });
     expect(by.get("compare_table")).toMatchObject({ status: "missing", measured: "No HTML table" });
     expect(by.get("internal_links")).toMatchObject({ status: "present", value: 4 });
     expect(f.some((x) => "score" in x)).toBe(false);

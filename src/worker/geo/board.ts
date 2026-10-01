@@ -12,7 +12,8 @@
  *   - costUsd sums geo_observations.cost_usd of the cohort: null when any is unknown, isEstimate when any
  *     is an estimate (never $0 for unknown); searchQueries counts geo_search_queries of the cohort;
  *   - feed: latest valid (ok + analysed) observation per approved prompt of the active set within the
- *     cohort, newest first, max FEED_LIMIT; prompts without one are 'not_run'. position = the stored
+ *     cohort, newest first, max FEED_LIMIT; prompts without one are 'not_run' (no cards at all
+ *     while the lane has never run). position = the stored
  *     list_rank of a real ordered list; sentiment only when the brand was mentioned and a sentiment was
  *     measured; latencyMs from provider_calls joined on request_id (null when not linked).
  * Lane state: demo (demo project) > setup_required (engine not configured; "Not implemented yet" for an
@@ -44,7 +45,8 @@ import { isSourceType } from "./source-type";
 
 export const BOARD_LANES: readonly GeoEngineProviderId[] = ["openai_geo", "anthropic_geo", "gemini", "perplexity"];
 export const FEED_LIMIT = 50;
-export const BOARD_OBSERVATION_LIMIT = 2000;
+/** Rows read per lane (latest cohort). */
+export const BOARD_OBSERVATION_LIMIT = 1000;
 
 export const LANE_LABELS: Record<GeoEngineProviderId, string> = {
   openai_geo: "OpenAI Responses API · web_search (API-sampled)",
@@ -129,26 +131,36 @@ export async function buildEngineBoard(env: Env, db: Db, project: ProjectRow, no
   const ws = project.workspace_id;
   const pid = project.id;
   const isDemo = project.is_demo === 1;
-  const [presence, promptSet, rows] = await Promise.all([
+  const [presence, promptSet, laneEntries] = await Promise.all([
     enginePresence(env, db, ws),
     getActivePromptSet(db, ws, pid),
-    db.all<ObsRow>(
-      `SELECT id, run_id, prompt_id, prompt_text, prompt_type, cohort_key, provider, model, grounding_mode, status, grounded, request_id,
-              cost_usd, cost_is_estimate, usage_json, error, created_at
-         FROM geo_observations WHERE workspace_id = ? AND project_id = ? AND measurement_type = 'api'
-        ORDER BY created_at DESC, rowid DESC LIMIT ${BOARD_OBSERVATION_LIMIT}`,
-      ws,
-      pid,
+    // Per lane: its latest cohort, then that cohort's rows (newest first). Queried per engine so one busy
+    // engine can never push another engine's latest cohort out of a shared row cap.
+    Promise.all(
+      BOARD_LANES.map(async (provider): Promise<[GeoEngineProviderId, ObsRow[]]> => {
+        const latest = await db.first<{ cohort_key: string }>(
+          `SELECT cohort_key FROM geo_observations WHERE workspace_id = ? AND project_id = ? AND measurement_type = 'api' AND provider = ?
+            ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+          ws,
+          pid,
+          provider,
+        );
+        if (!latest) return [provider, []];
+        const rows = await db.all<ObsRow>(
+          `SELECT id, run_id, prompt_id, prompt_text, prompt_type, cohort_key, provider, model, grounding_mode, status, grounded, request_id,
+                  cost_usd, cost_is_estimate, usage_json, error, created_at
+             FROM geo_observations WHERE workspace_id = ? AND project_id = ? AND measurement_type = 'api' AND provider = ? AND cohort_key = ?
+            ORDER BY created_at DESC, rowid DESC LIMIT ${BOARD_OBSERVATION_LIMIT}`,
+          ws,
+          pid,
+          provider,
+          latest.cohort_key,
+        );
+        return [provider, rows];
+      }),
     ),
   ]);
-
-  // Latest cohort per lane (rows are newest first).
-  const laneRows = new Map<GeoEngineProviderId, ObsRow[]>();
-  for (const provider of BOARD_LANES) {
-    const mine = rows.filter((r) => r.provider === provider);
-    const latest = mine[0];
-    laneRows.set(provider, latest ? mine.filter((r) => r.cohort_key === latest.cohort_key) : []);
-  }
+  const laneRows = new Map<GeoEngineProviderId, ObsRow[]>(laneEntries);
   const cohortIds = [...laneRows.values()].flatMap((rs) => rs.map((r) => r.id));
   const okIds = [...laneRows.values()].flatMap((rs) => rs.filter((r) => r.status === "ok").map((r) => r.id));
   const requestIds = [...new Set([...laneRows.values()].flatMap((rs) => rs.map((r) => r.request_id).filter((x): x is string => !!x)))];
@@ -331,7 +343,8 @@ export async function buildEngineBoard(env: Env, db: Db, project: ProjectRow, no
       costUsd: laneCost(lrows),
       lastRunAt: latest?.created_at ?? null,
       smallSampleWarning: small,
-      feed: feed.slice(0, FEED_LIMIT),
+      // A lane that never produced an observation has nothing to show yet (no placeholder cards).
+      feed: lrows.length === 0 ? [] : feed.slice(0, FEED_LIMIT),
     };
   });
 

@@ -123,7 +123,8 @@ probability [A11]; there is no aggregate "citability" score.
   host most often cited in skipping answers, `share` = those answers / `answersSkippingUs`.
 - `costUsd` sums `geo_observations.cost_usd` for the cohort; `value` is null if any observation's cost is
   unknown and `isEstimate` is true if any is an estimate. `searchQueries` counts `geo_search_queries`.
-- `feed`: latest observation per approved prompt, newest first, at most 50 per lane. `latencyMs` comes from
+- `feed`: latest observation per approved prompt, newest first, at most 50 per lane; prompts without one are
+  `not_run`, and the feed is empty while the lane has never produced an observation. `latencyMs` comes from
   `provider_calls.latency_ms` joined on `request_id` (null when not linked). Manual imports never appear.
 - Queries that fan out over prompts or observations are chunked to stay under D1's 100 bound parameters.
 
