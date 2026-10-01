@@ -25,8 +25,13 @@ import { normalizeHost } from "../seo/ssrf";
 import { normalizeUrlKey } from "../seo/rules/registry";
 import { round, type DefiningTerm } from "./terms";
 
-export const CANDIDATES_VERSION = "links-candidates-2026-09-30.1";
-export const MAX_TARGETS_PER_SOURCE = 8;
+export const CANDIDATES_VERSION = "links-candidates-2026-10-01.1";
+/**
+ * Raised from 8 to 15 (2026-10-01, "7 workflows" reference). Jev spend is unchanged: pairs are still
+ * capped per run at MAX_PAIRS_PER_RUN (run.ts), so a run stays at most 40 calls of 10 pairs x 4 questions,
+ * inside the default 60 jev_calls per project per day.
+ */
+export const MAX_TARGETS_PER_SOURCE = 15;
 export const MIN_BASE_SCORE = 0.5;
 export const ORPHAN_BOOST = 1.5;
 export const LOW_INLINK_BOOST = 1.25;

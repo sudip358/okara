@@ -29,7 +29,7 @@ import {
 export function CheckRadar({ checks }: { checks: CompetitorCheck[] }) {
   const g = radarGeometry(checks);
   return (
-    <svg viewBox="0 0 120 120" aria-hidden="true" focusable="false" className="h-28 w-28 shrink-0">
+    <svg viewBox="-22 0 164 120" aria-hidden="true" focusable="false" className="h-32 w-44 max-w-full shrink-0">
       {g.rings.map((pts, i) => (
         <polygon key={i} points={pts} fill="none" strokeWidth={0.75} className="stroke-zinc-300 dark:stroke-zinc-700" />
       ))}

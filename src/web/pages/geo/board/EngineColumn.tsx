@@ -36,9 +36,9 @@ export interface EngineColumnProps {
   onApproved: (a: CompetitorPageAssessment) => void;
 }
 
-function SectionHeading({ letter, children }: { letter: string; children: ReactNode }) {
+function SectionHeading({ letter, children, inline }: { letter: string; children: ReactNode; inline?: boolean }) {
   return (
-    <h4 className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+    <h4 className={inline ? "inline text-xs font-semibold text-zinc-900 dark:text-zinc-100" : "text-xs font-semibold text-zinc-900 dark:text-zinc-100"}>
       <span aria-hidden="true" className="mr-1 font-mono text-zinc-500 dark:text-zinc-400">
         {letter}
       </span>
@@ -142,10 +142,10 @@ export function EngineColumn(props: EngineColumnProps) {
     <div className="min-w-0 space-y-4">
       <PromptFeed lane={lane} layout="row" onOpen={onOpenObservation} />
       <details className="group min-w-0" onToggle={(e) => setSkipOpen((e.currentTarget as HTMLDetailsElement).open)}>
-        <summary className="cursor-pointer list-inside">
-          <span className="inline">
-            <SectionHeading letter="B">{skipSectionTitle(lane)}</SectionHeading>
-          </span>
+        <summary className="cursor-pointer">
+          <SectionHeading letter="B" inline>
+            {skipSectionTitle(lane)}
+          </SectionHeading>
         </summary>
         <div className="mt-2">{skipOpen && skipBody}</div>
       </details>

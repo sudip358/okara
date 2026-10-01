@@ -40,7 +40,9 @@ export function RewritePlanCard({ plan, projectId }: { plan: RewritePlan; projec
                   {planItemLabel(it)}
                 </p>
                 <p className="break-words text-[11px] text-zinc-600 dark:text-zinc-400">
-                  {it.evidence ?? (it.method === "manual" ? "Check this yourself" : "No evidence recorded")} · {methodLabel(it.method)}
+                  {[it.evidence ?? (it.method === "manual" ? null : "No evidence recorded"), methodLabel(it.method)]
+                    .filter((x, i, arr): x is string => x !== null && arr.indexOf(x) === i)
+                    .join(" · ")}
                 </p>
               </div>
             </li>

@@ -12,6 +12,11 @@
  *   change re-scores without new calls.
  * - Every asked (query, question) gets a decision_records row (run id when inside a run, else null).
  * - A budget refusal or a failed call stops further calls; queries not asked stay unclassified.
+ * - maxCalls bounds the calls of one invocation (callers page through large query sets across requests:
+ *   the next invocation reuses the cache and continues). Hitting it sets hitMaxCalls (stoppedBy stays
+ *   "budget" for existing callers).
+ * - The cache lookup binds every spec id and a chunk of keys in one statement, within D1's 100 bound
+ *   parameters per statement.
  */
 import type { Tier } from "@shared/types";
 import { BudgetExceededError } from "../../lib/errors";
@@ -28,8 +33,11 @@ import { versionFor } from "../questions";
 export const QUERY_BATCH_QUESTIONS = 50;
 export const QUERY_CACHE_DAYS = 7;
 export const QUERY_KEY_MAX = 300;
-/** Keys per cache lookup: D1 allows 100 bound parameters per query and the lookup binds 5 more. */
-const CACHE_LOOKUP_CHUNK = 90;
+/** D1 allows 100 bound parameters per statement; the cache lookup binds 3 fixed values, the spec ids and versions, and the keys. */
+const D1_MAX_PARAMS = 100;
+const CACHE_LOOKUP_FIXED_PARAMS = 3;
+/** At most this many question specs per judgeQueries call (keeps the key chunk large). */
+export const QUERY_MAX_SPECS = 10;
 
 export interface QueryBatchDeps {
   db: Db;
@@ -68,6 +76,8 @@ export interface QueryBatchResult {
   cached: number;
   calls: number;
   stoppedBy: "budget" | "error" | null;
+  /** True when opts.maxCalls stopped further calls (more queries remain uncached). */
+  hitMaxCalls: boolean;
   error: string | null;
 }
 
@@ -108,32 +118,38 @@ export async function judgeQueries(
   const since = iso(new Date(deps.now.getTime() - QUERY_CACHE_DAYS * 86400_000));
   const keys = [...unique.keys()];
   const hits = new Map<string, Map<string, { answer: DecisionAnswer | null; provider: string; model: string }>>();
-  for (let i = 0; i < keys.length; i += CACHE_LOOKUP_CHUNK) {
-    const chunk = keys.slice(i, i + CACHE_LOOKUP_CHUNK);
-    for (const s of opts.specs) {
-      const rows = await deps.db.all<{ candidate_key: string; answer_json: string | null; provider: string | null; model: string | null }>(
-        `SELECT candidate_key, answer_json, provider, model FROM decision_records
-          WHERE workspace_id = ? AND project_id = ? AND question_id = ? AND question_version = ? AND created_at >= ? AND provider IS NOT NULL
-            AND candidate_key IN (${chunk.map(() => "?").join(",")})
-          ORDER BY created_at DESC`,
-        deps.workspaceId,
-        deps.projectId,
-        s.id,
-        versions[s.id],
-        since,
-        ...chunk,
-      );
-      for (const r of rows) {
-        let answer: DecisionAnswer | null = null;
-        try {
-          answer = (JSON.parse(r.answer_json ?? "{}") as { answer?: DecisionAnswer | null }).answer ?? null;
-        } catch {
-          continue; // unreadable row: ask again
-        }
-        const m = hits.get(r.candidate_key) ?? new Map();
-        if (!m.has(s.id)) m.set(s.id, { answer, provider: r.provider!, model: r.model ?? "" });
-        hits.set(r.candidate_key, m);
+  if (opts.specs.length === 0 || opts.specs.length > QUERY_MAX_SPECS) throw new Error(`judgeQueries takes 1..${QUERY_MAX_SPECS} question specs`);
+  const specIds = opts.specs.map((s) => s.id);
+  const versionList = [...new Set(specIds.map((id) => versions[id]!))];
+  const chunkSize = D1_MAX_PARAMS - CACHE_LOOKUP_FIXED_PARAMS - specIds.length - versionList.length;
+  for (let i = 0; i < keys.length; i += chunkSize) {
+    const chunk = keys.slice(i, i + chunkSize);
+    // One statement per chunk for all specs; each spec has its own version, matched in code below.
+    const rows = await deps.db.all<{ candidate_key: string; question_id: string; question_version: string; answer_json: string | null; provider: string | null; model: string | null }>(
+      `SELECT candidate_key, question_id, question_version, answer_json, provider, model FROM decision_records
+        WHERE workspace_id = ? AND project_id = ? AND created_at >= ? AND provider IS NOT NULL
+          AND question_id IN (${specIds.map(() => "?").join(",")})
+          AND question_version IN (${versionList.map(() => "?").join(",")})
+          AND candidate_key IN (${chunk.map(() => "?").join(",")})
+        ORDER BY created_at DESC`,
+      deps.workspaceId,
+      deps.projectId,
+      since,
+      ...specIds,
+      ...versionList,
+      ...chunk,
+    );
+    for (const r of rows) {
+      if (versions[r.question_id] !== r.question_version) continue; // older question wording: ask again
+      let answer: DecisionAnswer | null = null;
+      try {
+        answer = (JSON.parse(r.answer_json ?? "{}") as { answer?: DecisionAnswer | null }).answer ?? null;
+      } catch {
+        continue; // unreadable row: ask again
       }
+      const m = hits.get(r.candidate_key) ?? new Map();
+      if (!m.has(r.question_id)) m.set(r.question_id, { answer, provider: r.provider!, model: r.model ?? "" });
+      hits.set(r.candidate_key, m);
     }
   }
   let cached = 0;
@@ -157,10 +173,12 @@ export async function judgeQueries(
   let calls = 0;
   let asked = 0;
   let stoppedBy: QueryBatchResult["stoppedBy"] = null;
+  let hitMaxCalls = false;
   let error: string | null = null;
   for (let i = 0; i < toAsk.length; i += perCall) {
     if (opts.maxCalls !== undefined && calls >= opts.maxCalls) {
       stoppedBy = "budget";
+      hitMaxCalls = true;
       break;
     }
     const batch = toAsk.slice(i, i + perCall);
@@ -220,5 +238,5 @@ export async function judgeQueries(
       }
     }
   }
-  return { results, asked, cached, calls, stoppedBy, error };
+  return { results, asked, cached, calls, stoppedBy, hitMaxCalls, error };
 }

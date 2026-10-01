@@ -101,7 +101,7 @@ describe("links: candidate targets", () => {
     expect(out.get("src")!.map((c) => c.targetPageId)).toEqual(["ok"]);
   });
 
-  it("prioritises orphan and low-inlink targets and applies the GSC boost; keeps the top 8 per source", () => {
+  it("prioritises orphan and low-inlink targets and applies the GSC boost; keeps the top MAX_TARGETS_PER_SOURCE (15) per source", () => {
     const pages = [
       page("src", "/src", { sentences: ["x"] }),
       page("hub", "/hub", { internalLinks: [url("/popular"), url("/one-link")] }),
@@ -127,10 +127,14 @@ describe("links: candidate targets", () => {
     const boosted = candidateTargets(input(withGsc, terms, { src: ["brass"] })).get("src")!;
     expect(boosted.find((c) => c.targetPageId === "popular")!.score).toBeCloseTo(1.5, 4);
 
-    const many = [page("s", "/s", { sentences: ["x"] }), ...Array.from({ length: 12 }, (_, i) => page(`t${i}`, `/t${i}`))];
+    expect(MAX_TARGETS_PER_SOURCE).toBe(15);
+    const many = [page("s", "/s", { sentences: ["x"] }), ...Array.from({ length: 20 }, (_, i) => page(`t${i}`, `/t${i}`))];
     const manyTerms: Record<string, DefiningTerm[]> = { s: [term("other")] };
-    for (let i = 0; i < 12; i++) manyTerms[`t${i}`] = [term("brass", 0.5 + i / 100)];
-    expect(candidateTargets(input(many, manyTerms, { s: ["brass"] })).get("s")).toHaveLength(MAX_TARGETS_PER_SOURCE);
+    for (let i = 0; i < 20; i++) manyTerms[`t${i}`] = [term("brass", 0.5 + i / 100)];
+    const top = candidateTargets(input(many, manyTerms, { s: ["brass"] })).get("s")!;
+    expect(top).toHaveLength(MAX_TARGETS_PER_SOURCE);
+    // The highest-weighted targets are the ones kept (t19 .. t5).
+    expect(top.map((c) => c.targetPageId)).toEqual(Array.from({ length: 15 }, (_, i) => `t${19 - i}`));
   });
 
   it("needs an overlap weight of at least 0.5 and a source with sentences", () => {

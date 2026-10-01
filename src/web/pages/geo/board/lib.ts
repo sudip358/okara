@@ -21,8 +21,10 @@ import type {
   RunSummary,
   SourceType,
 } from "@shared/types";
-import type { BadgeTone } from "@web/components/ui";
 import { formatNumber, formatPercent, formatUsd } from "@web/lib/format";
+
+/** Same union as `BadgeTone` in components/ui.tsx (kept local so this module stays JSX- and DOM-free for tests). */
+export type BadgeTone = "neutral" | "success" | "warning" | "danger" | "info" | "demo";
 
 // ------------------------------------------------------------------ labels (exact strings, design §7)
 export const LABELS = {
@@ -385,6 +387,7 @@ export function approvalCandidates(
   const done = new Set(assessed.map((a) => urlKey(a.url)));
   const seen = new Set<string>();
   const out: ApprovalCandidate[] = [];
+  if (limit <= 0) return out;
   for (const f of feed) {
     const ci = f.citedInstead;
     if (!ci?.url) continue;

@@ -6,7 +6,10 @@
  *   GET  /projects/:pid/seo/buyer-queries             -> CoverageResponse<BuyerQueryRow> from the 7-day decision
  *                                                        cache only (never calls Jev; setup_required without Jev)
  *   POST /projects/:pid/seo/buyer-queries             -> same shape; asks Jev for uncached queries (rate-limited,
- *                                                        budgeted). Spending is POST-only so a cross-site GET cannot.
+ *                                                        budgeted, at most BUYER_CALLS_PER_REQUEST calls per POST;
+ *                                                        POST again to continue). Spending is POST-only so a
+ *                                                        cross-site GET cannot. Scope: all non-brand queries up to
+ *                                                        the BUYER_QUERIES_MAX env cap (default 5,000).
  *   GET  /projects/:pid/seo/translation-opportunities -> CoverageResponse<TranslationOpportunityRow> (no Jev)
  * CSRF/origin checks for the POSTs are enforced by the app-wide middleware.
  */
@@ -19,7 +22,7 @@ import { requireProject } from "../platform/access";
 import { CSV_MAX_BYTES, EXPECTED_CSV_HEADERS, importGscCsv } from "../seo/gsc/csv";
 import { buildSeoOverview } from "../seo/gsc/overview";
 import { buildTranslationOpportunities } from "../seo/gsc/translation";
-import { buildBuyerQueries } from "../seo/recommend/buyer-queries";
+import { buildBuyerQueries, buyerQueryCap } from "../seo/recommend/buyer-queries";
 import type { Env } from "../env";
 import type { Db } from "../lib/db";
 import { hitRateLimit } from "../platform/rate-limit";
@@ -56,7 +59,9 @@ async function buyerQueries(c: Context<AppEnv, "/projects/:pid/seo/buyer-queries
   const decisions = project.is_demo === 1 ? null : await decisionsFactory(c.env, db, project.workspace_id, project.id);
   const scope = { workspaceId: project.workspace_id, projectId: project.id, runId: null };
   const clock = () => now;
-  const data = await buildBuyerQueries({ db, project, now, decisions, budget: budgetFor(createBudget(db, c.env, scope, clock), "typesafe"), calls: createCallRecorder(db, scope, clock), classify });
+  // Optional operator setting (not in the typed Env yet): BUYER_QUERIES_MAX caps the queries in scope.
+  const maxQueries = buyerQueryCap((c.env as unknown as Record<string, unknown>).BUYER_QUERIES_MAX);
+  const data = await buildBuyerQueries({ db, project, now, decisions, budget: budgetFor(createBudget(db, c.env, scope, clock), "typesafe"), calls: createCallRecorder(db, scope, clock), classify, maxQueries });
   return c.json({ data });
 }
 

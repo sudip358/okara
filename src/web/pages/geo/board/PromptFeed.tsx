@@ -36,7 +36,7 @@ export function FeedCard({ item, onOpen }: { item: EngineFeedItem; onOpen?: (obs
         {item.citedInstead && (
           <div className="min-w-0 basis-full">
             <dt className="inline">Cited instead: </dt>
-            <dd className="inline break-all">
+            <dd className="inline wrap-anywhere">
               {item.citedInstead.host} via {sourceTypeLabel(item.citedInstead.sourceType)}
             </dd>
           </div>

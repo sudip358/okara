@@ -4,13 +4,16 @@
  * Steps: setup check (verified host + a completed/partial crawl; demo projects use the demo crawl) ->
  * load snapshots (link-context sentences; older snapshots fall back to sentences split from the stored
  * excerpt/first paragraph) and current-window GSC impressions -> TF-IDF defining terms (terms.ts) ->
- * candidate targets (candidates.ts, top 8 per source) -> sentences (top 4) and anchors (top 5) per pair
+ * candidate targets (candidates.ts, top 15 per source) -> sentences (top 4) and anchors (top 5) per pair
  * -> pairs sorted by score and capped at MAX_PAIRS_PER_RUN -> Jev in batches of 10 pairs (jev.ts), or
  * deterministic picks marked review -> persist link_run + link_suggestions, carrying user_status over
  * from earlier runs -> the stored LinkSuggestionReport.
  *
  * Cap: MAX_PAIRS_PER_RUN = 400 pairs per run (highest candidate scores first; sentences and anchors are
- * only computed until the cap is full). At 10 pairs per call a full run is at most 40 Jev calls. The
+ * only computed until the cap is full). At 10 pairs per call a full run is at most 40 Jev calls. The cap
+ * was deliberately NOT raised with MAX_TARGETS_PER_SOURCE (8 -> 15): 15/8 x 400 = 750 pairs would be 75
+ * calls, above the default 60 jev_calls per project per day. More targets per source widen the pool the
+ * top 400 pairs are chosen from. The
  * project's daily jev_calls/provider_calls limit (default 60/day, shared with the agents and the redirect
  * tool) is enforced per call by the DecisionProvider; pairs left when it runs out become deterministic
  * review suggestions.
