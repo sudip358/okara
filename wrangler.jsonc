@@ -9,7 +9,7 @@
     "run_worker_first": ["/api/*"]
   },
   "d1_databases": [
-    { "binding": "DB", "database_name": "okara", "database_id": "REPLACE_WITH_D1_DATABASE_ID", "migrations_dir": "migrations" }
+    { "binding": "DB", "database_name": "okara", "database_id": "c9818dd7-dcb4-4d7b-af6d-559e6c4345d3", "migrations_dir": "migrations" }
   ],
   "workflows": [
     { "name": "okara-agent-run", "binding": "AGENT_RUN", "class_name": "AgentRunWorkflow" }
@@ -17,7 +17,7 @@
   "triggers": { "crons": ["*/15 * * * *"] },
   "vars": {
     "ENVIRONMENT": "production",
-    "APP_ORIGIN": "https://REPLACE_WITH_APP_ORIGIN",
+    "APP_ORIGIN": "https://okara.sudipkumar211.workers.dev",
     "DEMO_MODE": "false",
     "TYPESAFE_MODEL": "jev-latest",
     "GEMINI_MODEL": "",
