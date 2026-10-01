@@ -105,9 +105,11 @@ context documents, brand and competitor names; never credentials or raw Search C
 Base URL changes (added 2026-10-01, owner request: "the custom base URL keeps on changing"). Tunnels such as
 Cloudflare quick tunnels (`*.trycloudflare.com`), ngrok (`*.ngrok-free.app`) and localtunnel (`*.loca.lt`)
 get a new hostname on every restart. They validate like any public hostname; a tunnel name that spells an
-IPv4 address in four groups is refused like every such name, including ngrok's random names for IPv4 clients
-(`<hex>-203-0-113-5.ngrok-free.app`); the error says so and suggests a tunnel URL without an embedded IP (an
-ngrok static domain, a `trycloudflare.com` URL). Moving a
+IPv4 address in four groups is refused (wildcard-DNS services such as nip.io/sslip.io resolve those names to the
+spelled address), except exactly one label directly under an ngrok domain (`ngrok-free.app`, `ngrok-free.dev`,
+`ngrok.app`, `ngrok.io`): ngrok's random names for IPv4 clients (`<hex>-203-0-113-5.ngrok-free.app`) resolve to
+ngrok's own edge addresses, not the embedded one (checked 2026-10-01 with dns.google:
+`7c3e-103-21-58-191.ngrok-free.app` and `127-0-0-1.ngrok-free.app` both answer with ngrok edge IPs). Moving a
 saved provider (writer or GEO engine) to a new host keeps its key only on explicit confirmation
 (`keepKeyForNewHost: true` from the "Send my saved key to <new host>" checkbox, unchecked by default, in
 "Edit URL or key" and the inline "Quick update URL"); without it the server answers 400

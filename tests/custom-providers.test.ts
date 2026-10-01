@@ -15,6 +15,7 @@ import {
   MAX_CUSTOM_PROVIDERS,
   CUSTOM_PROVIDER_CHANGES_SHOWN,
   EMBEDDED_IPV4_MESSAGE,
+  isNgrokTunnelHost,
   customProviderAad,
   extractModelIds,
   fetchModelList,
@@ -924,16 +925,18 @@ describe("tunnel hostnames (owner request: the base URL keeps changing)", () => 
     }
   });
 
-  it("a random ngrok name with an embedded IPv4 address is refused with an actionable message", () => {
-    const r = validateCustomBaseUrl("https://7c3e-103-21-58-191.ngrok-free.app/v1", "https://okara.workers.dev");
-    expect(r).toEqual({ ok: false, reason: "local_host", message: EMBEDDED_IPV4_MESSAGE });
-    if (!r.ok) {
-      expect(r.message).toMatch(/spells an IP address/);
-      expect(r.message).toMatch(/Tunnel names with an embedded IP address .*ngrok-free\.app\) are refused too/);
-      expect(r.message).toMatch(/use a tunnel URL without one, for example your ngrok static domain or a trycloudflare\.com URL/);
+  it("ngrok names with an embedded IPv4 address are allowed (ngrok DNS resolves them to ngrok's edge), other wildcard-DNS names are not", () => {
+    const origin = "https://okara.workers.dev";
+    for (const u of ["https://7c3e-103-21-58-191.ngrok-free.app/v1", "https://abcd-127-0-0-1.ngrok-free.dev/v1", "https://9f1e-10-0-0-5.ngrok.app/v1", "https://1a2b-34-56.ngrok-free.app/v1"]) {
+      expect(validateCustomBaseUrl(u, origin)).toMatchObject({ ok: true });
     }
-    // Three groups only (no full IPv4 address spelled): fine.
-    expect(validateCustomBaseUrl("https://1a2b-34-56.ngrok-free.app/v1", "https://okara.workers.dev")).toMatchObject({ ok: true });
+    // Only one label directly under an ngrok domain; deeper names and look-alike domains keep the rule.
+    for (const u of ["https://127-0-0-1.evil.ngrok-free.app/v1", "https://127-0-0-1.ngrok-free.app.evil.com/v1", "https://127.0.0.1.nip.io/v1", "https://10-0-0-1.sslip.io/v1", "https://127-0-0-1.trycloudflare.com/v1"]) {
+      expect(validateCustomBaseUrl(u, origin)).toMatchObject({ ok: false, reason: "local_host" });
+    }
+    expect(isNgrokTunnelHost("7c3e-103-21-58-191.ngrok-free.app")).toBe(true);
+    expect(isNgrokTunnelHost("ngrok-free.app")).toBe(false);
+    expect(isNgrokTunnelHost("a.b.ngrok.io")).toBe(false);
   });
 });
 
@@ -1159,7 +1162,7 @@ describe("PATCH base URL to a new host: keepKeyForNewHost", () => {
       ["https://localhost/v1", "local_host"],
       ["https://my-gpu.local/v1", "local_host"],
       ["https://127-0-0-1.trycloudflare.com/v1", "local_host"],
-      ["https://7c3e-103-21-58-191.ngrok-free.app/v1", "local_host"],
+      ["https://7c3e-103-21-58-191.sslip.io/v1", "local_host"],
       ["http://abc-def-123.trycloudflare.com/v1", "not_https"],
       ["https://u:p@abc-def-123.trycloudflare.com/v1", "credentials"],
       ["https://abc.nip.io/v1", "local_host"],

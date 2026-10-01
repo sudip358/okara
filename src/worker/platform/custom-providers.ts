@@ -126,7 +126,21 @@ const EMBEDDED_IPV4 = /(?:^|[.-])(?:\d{1,3}[.-]){3}\d{1,3}(?:[.-]|$)/;
  * refused by the rule above like any name with an embedded IPv4 address.
  */
 export const EMBEDDED_IPV4_MESSAGE =
-  "Base URL must not be a hostname that spells an IP address. Tunnel names with an embedded IP address (such as 1a2b-203-0-113-5.ngrok-free.app) are refused too; use a tunnel URL without one, for example your ngrok static domain or a trycloudflare.com URL.";
+  "Base URL must not be a hostname that spells an IP address (wildcard-DNS services resolve such names to that address). ngrok tunnel names are allowed.";
+
+/**
+ * ngrok's random names for IPv4 clients embed the client's address (<hex>-a-b-c-d.ngrok-free.app), but ngrok's
+ * wildcard DNS answers every such name with ngrok's own edge addresses, never the embedded one (checked
+ * 2026-10-01 via dns.google: 7c3e-103-21-58-191.ngrok-free.app and 127-0-0-1.ngrok-free.app both resolve
+ * to ngrok edge IPs). So for exactly one label under these ngrok domains the embedded-IP rule is lifted.
+ */
+const NGROK_TUNNEL_SUFFIXES = [".ngrok-free.app", ".ngrok-free.dev", ".ngrok.app", ".ngrok.io"];
+export function isNgrokTunnelHost(host: string): boolean {
+  const suffix = NGROK_TUNNEL_SUFFIXES.find((x) => host.endsWith(x));
+  if (!suffix) return false;
+  const label = host.slice(0, -suffix.length);
+  return label.length > 0 && !label.includes(".");
+}
 
 const LDH_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const TLD = /^(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/;
@@ -168,7 +182,7 @@ export function validateCustomBaseUrl(raw: unknown, appOrigin?: string | null): 
   }
   // Names are never resolved here (Workers egress cannot reach private addresses, as for the crawler in
   // seo/ssrf.ts); this refuses the names that are well known to resolve to the address they spell.
-  if (EMBEDDED_IPV4.test(host)) return reject("local_host", EMBEDDED_IPV4_MESSAGE);
+  if (EMBEDDED_IPV4.test(host) && !isNgrokTunnelHost(host)) return reject("local_host", EMBEDDED_IPV4_MESSAGE);
   if (!labels.every((l) => LDH_LABEL.test(l)) || !TLD.test(labels[labels.length - 1]!)) {
     return reject("not_public_host", "Base URL must be a public hostname with a valid top-level domain.");
   }
