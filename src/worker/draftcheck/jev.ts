@@ -206,7 +206,7 @@ export const ITEM_QUESTIONS: Record<ItemQuestionKey, { itemId: string; questionI
     question: {
       type: "noul",
       instructions:
-        "Are the specific numbers in `draft.text` (statistics, prices, measurements, percentages, dates of findings) each attributed to a source, the business's own data, or a described measurement? `draft.source_count` counts the outbound links and citation markers found.",
+        "Are the specific numbers in `draft.text` (statistics, prices, measurements, percentages, dates of findings) each attributed to a source, the business's own data, or a described measurement? `draft.source_count` counts the outbound source links found.",
       criteria: {
         true: "Yes. Each specific number is attributed: a named or linked source, the business's own records, or a measurement the draft describes. Plain product specifications count as attributed to the business.",
         false: "No. At least one statistic or comparative number is stated without saying where it comes from.",

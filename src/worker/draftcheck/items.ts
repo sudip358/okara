@@ -209,7 +209,7 @@ export const DRAFT_EXTRA_ITEMS: ItemDef<DraftItemContext>[] = [
         return { status: "not_applicable", method: "measured", summary: `${subject(ctx)} contains no numbers.`, guidance: "When you add prices, measurements, or statistics, say where each comes from." };
       }
       return manual(
-        `${withNumbers} sentence${withNumbers === 1 ? "" : "s"} contain numbers; ${ctx.sourceCount} outbound source${ctx.sourceCount === 1 ? "" : "s"} or citation${ctx.sourceCount === 1 ? "" : "s"} found.`,
+        `${withNumbers} sentence${withNumbers === 1 ? "" : "s"} contain numbers; ${ctx.sourceCount} outbound source link${ctx.sourceCount === 1 ? "" : "s"} found.`,
         "Attribute each statistic, price, or measurement to a source, your own data, or a described measurement.",
       );
     },

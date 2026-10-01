@@ -1,7 +1,7 @@
 /**
  * [A23] Draft / page quality check (madewithjev "Jev for SEO and GEO" workflow): paste a draft or pick a
- * crawled page, plus a target query. Returns the 16 per-page on-page checklist items evaluated against
- * it, deterministic flags (guarantees, testimonials, filler, unsupported claims), optional Jev answers,
+ * crawled page, plus a target query. Returns the 16 per-page on-page checklist items plus the nine
+ * draft-check items of items.ts (25 checks; 2026-10-01 "7 workflows" reference) evaluated against it, deterministic flags (guarantees, testimonials, filler, unsupported claims), optional Jev answers,
  * and a pass / needs_review / fail verdict.
  *
  * It is a quality gate before human review: never an AI-authorship detector, never a ranking or citation
@@ -15,7 +15,7 @@
  *     the page's only query. Items that need the published page (URL, inbound links, HTTP status /
  *     indexability / canonical, structured data + viewport + CWV) are overridden to `unknown` for drafts,
  *     except what the draft itself shows (outgoing internal links, a pasted noindex).
- *  3. Flags: flags.ts (rules). Jev (jev.ts): one batched call for five items + suspicious excerpts, when
+ *  3. Flags: flags.ts (rules). Jev (jev.ts): one batched call for up to 13 items + 8 suspicious excerpts, when
  *     TypeSafe is configured, the project is not a demo, and the subject could be measured.
  *  4. Verdict (VERDICT_RULES_VERSION):
  *       fail          any CRITICAL_ITEMS item not_met by a non-manual method (deterministic or Jev act),
@@ -40,9 +40,10 @@ import type { DecisionProvider } from "../providers/types";
 import { POLICY_VERSION } from "../runs/policy";
 import { scanFlags, FLAG_RULES_VERSION, type FlagScan } from "./flags";
 import { askDraftJev, DRAFTCHECK_QUESTIONS_REVISION, ITEM_QUESTIONS, type DraftJevRun, type ItemQuestionKey } from "./jev";
+import { DRAFT_EXTRA_ITEMS, MAX_PRODUCT_FACTS, type DraftItemContext } from "./items";
 import { parseDraft, type DraftBlock, type DraftDoc } from "./parse";
 
-export const VERDICT_RULES_VERSION = "draftcheck-verdict-2026-09-30.1";
+export const VERDICT_RULES_VERSION = "draftcheck-verdict-2026-10-01.1";
 export const LABEL_GATE = "A quality gate before human review — not an AI detector and not a ranking prediction.";
 export const LABEL_FLAGS = "Flags mark wording to verify, support, or cut before publishing. They never judge who or what wrote the text.";
 /** Drafts have no page type; they are evaluated as article pages (the usual shape of a written draft). */
@@ -63,6 +64,10 @@ export interface DraftCheckInput {
   draftText?: string | undefined;
   title?: string | undefined;
   metaDescription?: string | undefined;
+  /** Drafts only: the page type to evaluate the draft as (default DRAFT_PAGE_TYPE). */
+  pageType?: PageType | undefined;
+  /** Product fields (name -> value) the text must agree with; at most MAX_PRODUCT_FACTS are used. */
+  productFacts?: Record<string, string> | undefined;
 }
 
 export interface DraftCheckDeps {
@@ -107,12 +112,13 @@ function draftSubject(input: DraftCheckInput, project: ProjectRow, now: Date): S
   const host = projectHost(project);
   const url = `https://${host}/draft-preview`;
   const doc = parseDraft(input.draftText ?? "", url);
+  const pageType: PageType = input.pageType ?? DRAFT_PAGE_TYPE;
   const title = input.title?.trim() || doc.html?.title || null;
   const meta = input.metaDescription?.trim() || doc.html?.metaDescription || null;
   const snap: Snap = {
     pageId: "draft",
     url,
-    pageType: DRAFT_PAGE_TYPE,
+    pageType,
     statusCode: 200, // synthetic: the draft is text by construction; HTTP status is checked after publishing
     finalUrl: url,
     skippedReason: null,
@@ -144,12 +150,12 @@ function draftSubject(input: DraftCheckInput, project: ProjectRow, now: Date): S
   const note = `Pasted draft parsed as ${doc.format === "html" ? "HTML" : "markdown/plain text"}: ${plural(doc.wordCount, "word")}, ${plural(doc.headings.length, "heading")}, ${plural(doc.tableCount, "table")}, ${plural(doc.internalLinks.length, "internal link")}, ${plural(doc.outboundLinks.length, "outbound link")}.`;
   const labels = [
     note,
-    `Drafts are evaluated as an ${DRAFT_PAGE_TYPE} page. URL, inbound links, HTTP status, indexability, canonical, structured data, and Core Web Vitals are checked after publishing: pick the crawled page here once it is live.`,
+    `Drafts are evaluated as ${/^[aeiou]/.test(pageType) ? "an" : "a"} ${pageType} page. URL, inbound links, HTTP status, indexability, canonical, structured data, and Core Web Vitals are checked after publishing: pick the crawled page here once it is live.`,
   ];
   if (!title) labels.push("No title was given; enter the planned title tag to check it.");
   return {
     mode: "draft",
-    ctx: { sig: new Signals(data), page: { id: "draft", url, pageType: DRAFT_PAGE_TYPE }, snap, queries: [targetRow(input.targetQuery, url)], intent: null },
+    ctx: { sig: new Signals(data), page: { id: "draft", url, pageType }, snap, queries: [targetRow(input.targetQuery, url)], intent: null },
     data,
     blocks: doc.blocks,
     doc,
@@ -332,6 +338,14 @@ const JEV_PHRASE: Record<ItemQuestionKey, string> = {
   unique_angle: "the text contains original information or a distinct angle",
   first_hand: "the text shows first-hand experience",
   terms_entities: "the text uses the relevant terms and entities naturally",
+  faq_when_useful: "the text answers readers' common follow-up questions in a question-and-answer form where they exist",
+  compare_table: "comparisons in the text are laid out in a table",
+  headings_match_questions: "the subheadings match the reader's questions",
+  clear_next_step: "the text gives the reader a clear next step",
+  author_credentials: "an author or reviewer is named with relevant credentials",
+  numbers_sourced: "the specific numbers in the text are attributed to a source",
+  product_facts: "the product facts in the text match the provided product fields",
+  schema_fit: "the structured data type fits the page type",
 };
 const JEV_CAVEAT = "A Jev model judgment on the text (a Noul yes-probability tiered by the decision policy), not a measurement. It never predicts rankings or citations.";
 
@@ -375,6 +389,39 @@ export function jevClaimFlags(run: DraftJevRun, existing: readonly DraftCheckFla
   return out;
 }
 
+// ------------------------------------------------------------------ draft-check items (items.ts)
+/** Trimmed, non-empty product fields, at most MAX_PRODUCT_FACTS; null when none. Pure. */
+export function cleanFacts(facts: Record<string, string> | undefined): Record<string, string> | null {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(facts ?? {})) {
+    if (Object.keys(out).length >= MAX_PRODUCT_FACTS) break;
+    if (typeof v !== "string" || !k.trim() || !v.trim()) continue;
+    out[k.trim()] = v.trim();
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function extraContext(subject: Subject, targetQuery: string, productFacts: Record<string, string> | null): DraftItemContext {
+  const snap = subject.ctx.snap;
+  const body = subject.blocks.filter((b) => b.kind !== "heading" && b.kind !== "code").map((b) => b.text).join("\n");
+  const doc = subject.doc;
+  return {
+    mode: subject.mode,
+    targetQuery,
+    pageType: subject.ctx.page.pageType,
+    opening: snap?.firstParagraph ?? null,
+    headings: snap?.headings ?? [],
+    body,
+    tableCount: snap?.tableCount ?? 0,
+    author: snap?.author ?? null,
+    schemaTypes: snap?.jsonLdTypes ?? [],
+    sourceCount: doc ? doc.outboundLinks.length : (snap?.outboundCitations ?? 0),
+    fullText: subject.mode === "draft",
+    productFacts,
+    measurable: subject.measurable,
+  };
+}
+
 // ------------------------------------------------------------------ verdict
 export function decideVerdict(
   items: readonly ChecklistItem[],
@@ -414,6 +461,9 @@ export async function runDraftCheck(input: DraftCheckInput, deps: DraftCheckDeps
   // Items.
   let items = PAGE_ITEMS.map((def) => evaluateItem(def, subject.ctx, undefined, "page")).map((i) => reword(i, subject.mode, subject.note));
   if (subject.mode === "draft" && subject.doc) items = items.map((i) => draftOverride(i, subject.doc!, host));
+  const productFacts = cleanFacts(input.productFacts);
+  const extra = extraContext(subject, input.targetQuery, productFacts);
+  items = [...items, ...DRAFT_EXTRA_ITEMS.map((def) => evaluateItem(def, extra, undefined, "page")).map((i) => reword(i, subject.mode, subject.note))];
 
   // Flags.
   const scan: FlagScan = subject.measurable ? scanFlags(subject.blocks) : { flags: [], jevCandidates: [], sentences: 0 };
@@ -437,6 +487,13 @@ export async function runDraftCheck(input: DraftCheckInput, deps: DraftCheckDeps
         text: subject.blocks.filter((b) => b.kind !== "code").map((b) => b.text).join("\n"),
         wordCount: snap.wordCount ?? 0,
         claims: scan.jevCandidates,
+        pageType: extra.pageType,
+        schemaTypes: extra.schemaTypes,
+        author: extra.author,
+        fullText: extra.fullText,
+        tableCount: extra.tableCount,
+        sourceCount: extra.sourceCount,
+        productFacts,
       },
       { decisions, db, workspaceId: project.workspace_id, projectId: project.id, candidateKey: `draftcheck:${hash}`, clock },
     );
@@ -468,7 +525,9 @@ export async function runDraftCheck(input: DraftCheckInput, deps: DraftCheckDeps
   } else if (!subject.measurable) {
     labels.push("Jev was not asked because there is nothing to judge yet.");
   } else {
-    labels.push("Jev (TypeSafe) is not configured for this workspace: deterministic checks only. Originality, first-hand experience, and topic completeness stay manual.");
+    labels.push(
+      "Jev (TypeSafe) is not configured for this workspace: deterministic checks only. Originality, first-hand experience, topic completeness, FAQ, comparison tables, author credentials, heading wording, number sourcing, product facts, schema fit, and the next step stay manual.",
+    );
   }
   if (subject.measurable) {
     labels.push(
