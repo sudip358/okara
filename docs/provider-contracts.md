@@ -2,10 +2,13 @@
 
 Official documentation is the authority. Every entry lists the endpoint and fields this codebase relies on,
 where it is implemented, and the doc URL. Contracts were checked on 2026-09-30; re-verify before changing an
-adapter. Model ids are configuration only (`TYPESAFE_MODEL`, `GEMINI_MODEL`, `PERPLEXITY_MODEL`,
-`WRITER_MODEL`); no adapter hardcodes a default model id except the documented `jev-latest` alias.
+adapter. Model ids are configuration only: the workspace owner's selection on the Integrations page
+(`workspace_provider_models`, see "Workspace model selection") or the operator env vars (`TYPESAFE_MODEL`,
+`GEMINI_MODEL`, `PERPLEXITY_MODEL`, `OPENAI_GEO_MODEL`, `ANTHROPIC_GEO_MODEL`, `WRITER_MODEL`); no adapter
+hardcodes a default model id except the documented `jev-latest` alias.
 
-All provider traffic from runs goes through `ctx.apiFetch` (host allowlist, https, `redirect: "manual"`).
+All provider traffic from runs goes through `ctx.apiFetch` (host allowlist, https, `redirect: "manual"`), or,
+for a custom GEO engine, a lane fetch built by the same `createApiFetch` that admits only that provider's host.
 Every HTTP attempt, including retries and failures, is written to `provider_calls`.
 
 ## TypeSafe (Jev) — decisions
@@ -98,6 +101,72 @@ model. A provider without a `/models` endpoint still works: the model id is type
 then reports the HTTP status of `/models`). Outputs are validated with zod and the product-fact validator like
 every writer draft. Data sent is the writer's disclosure (`DATA_SENT.writer`): stored evidence, confirmed
 context documents, brand and competitor names; never credentials or raw Search Console exports.
+
+## Workspace model selection — built-in providers (`workspace_provider_models`)
+
+Added 2026-10-01 (owner request). The owner picks the model per workspace for `typesafe`, `gemini`,
+`perplexity`, `openai_geo` and `anthropic_geo` on the Integrations page. Rules:
+`src/worker/platform/provider-models.ts`; routes: `src/worker/routes/credentials.ts`
+(`POST /workspaces/:wid/credentials/:provider/models`, `PUT /workspaces/:wid/credentials/:provider/model`).
+Resolution: workspace selection > operator env var > none (`setup_required`, "choose a model"); TypeSafe's
+last step is its documented `jev-latest` alias. List endpoints, verified against the official docs on
+2026-10-01:
+
+| Provider | List request | Response used | Official docs |
+|---|---|---|---|
+| Gemini | `GET https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000`, header `x-goog-api-key` (pageSize default 50, max 1000) | `models[].name` (`models/{model}`; the prefix is removed), `displayName`, `supportedGenerationMethods[]` (only models listing `generateContent` are offered), `nextPageToken` (reported as "more models than one page") | https://ai.google.dev/api/models#method:-models.list |
+| OpenAI (`openai_geo`) | `GET https://api.openai.com/v1/models`, `Authorization: Bearer` | `{object: "list", data: [{id, created, owned_by}]}` | https://platform.openai.com/docs/api-reference/models/list (served at https://developers.openai.com/api/reference/resources/models/methods/list) |
+| Anthropic (`anthropic_geo`) | `GET https://api.anthropic.com/v1/models?limit=1000`, headers `x-api-key`, `anthropic-version: 2023-06-01` (limit default 20, range 1-1000) | `data[].{id, display_name}`, `has_more` (reported as more pages). The response also carries `capabilities`, but none of them is web search, so no web-search capability is inferred | https://platform.claude.com/docs/en/api/models/list |
+| Perplexity | `GET https://api.perplexity.ai/v1/models` (OpenAPI operation `listModels`; `Authorization: Bearer` sent as for every Perplexity call). listModels has no security requirement (openapi.json `security: []`, re-read 2026-10-01): a successful list does not prove the key works | `{object: "list", data: [{id, object, created, owned_by}]}`; ids are Agent API models in `provider/model` format (e.g. `perplexity/sonar`); ids without a `/` are dropped | https://docs.perplexity.ai/api-reference/models-get, https://docs.perplexity.ai/openapi.json |
+| TypeSafe | `GET https://api.typesafe.ai/v1/models`, `Authorization: Bearer` | `{models: [{name, description, release_date}]}` ("returns the names your account can send in the model field"; versioned ids such as `jev-1.13.0` are accepted whether or not they are listed) | https://docs.typesafe.ai/models |
+
+Transport for every list: the guarded API fetch (allowlisted hosts only), `redirect: "manual"`, 10 s timeout
+covering headers and body, body capped at 8 MiB, at most 10,000 entries inspected and 500 returned; ids are
+validated per provider (the id rules the adapters already apply), at most 200 characters, no control
+characters. The provider body is never echoed and the key travels only in a header. Capability: a list
+cannot prove that a model supports the lane's feature (Gemini grounding with `google_search`, Perplexity
+Agent API `web_search`, OpenAI Responses `web_search`, Anthropic web search tool); the UI says "Must support
+<feature>; the Test run will tell you" and nothing is inferred. Cost: `providers/rates.ts` only; a selected
+model without a verified rate records cost as unknown (NULL) and the card says so. The model is part of the
+cohort key, so trend series split by model.
+
+Operator-key spend guard (`modelForKeySource` in `provider-models.ts`; runtime, request-scoped decisions,
+Integrations statuses, capability presence and the board all use it). Before this feature only the operator
+chose the model that runs on the operator's key. An unpriced call reserves and settles a flat
+`UNKNOWN_RATE_RESERVE_USD_MICROS` ($0.15) whatever it really costs, so `GLOBAL_USD_MICROS_PER_DAY` would
+undercount operator spend. Therefore, when a workspace has no key of its own for a provider and the
+operator key is used:
+
+- a workspace-chosen GEO engine model runs only when `providers/rates.ts` has a verified rate for it (or it
+  equals the operator's own env model). Otherwise no lane is built, the run logs "<Vendor> model <id> has
+  no verified price and this workspace uses the operator key; add your own <Vendor> key to use it.", and
+  the card and the board show `setup_required` with that text. `PUT .../model` refuses such a choice
+  up front (400, `reason: "operator_key_unpriced"`);
+- a workspace-chosen TypeSafe model is ignored (`TYPESAFE_MODEL`, else `jev-latest`); `PUT .../model`
+  refuses it (400, `reason: "operator_key_model"`), and the TypeSafe list is not fetched with the operator key;
+- a model list fetched with the operator key returns only ids with a verified rate. For OpenAI it also
+  drops fine-tuned (`ft:`) models and models whose `owned_by` is not `openai`, `system` or
+  `openai-internal`, so the operator's private model and organisation names are never shown to a tenant.
+
+With the workspace's own key every valid id can be chosen (cost unknown when unpriced).
+
+## Custom GEO engine lane (`workspace_custom_providers.role = 'geo'`)
+
+Added 2026-10-01 (owner request). Same records, base URL rules, key storage, model list and test as the
+custom writer above (`role` column from migration 0011; at most 2 per workspace; never the writer). Adapter:
+`src/worker/providers/custom-geo.ts`; lane rules: `src/worker/geo/custom-lanes.ts`.
+
+| Item | Contract |
+|---|---|
+| Request | `POST {baseUrl}/chat/completions`, `Authorization: Bearer <key>`, body `{ model, messages: [ {role: "system", content: <neutral locale instruction>}?, {role: "user", content: <prompt>} ], max_completion_tokens: 4096 }`. No `tools`, no `response_format`; the brand is never named. Same OpenAI-compatible Chat Completions shape the custom writer relies on (https://platform.openai.com/docs/api-reference/chat/create) |
+| Response | `choices[0].message.content` (answer text, stored as untrusted plain text, capped like every raw answer), `finish_reason` (`length` = incomplete), `usage.{prompt_tokens, completion_tokens}`, `id`, `model`. Body capped at 2 MiB |
+| Grounding | None: nothing in the response proves a web search. `grounded = 0`, grounding mode `none (custom provider)`, no citations, no search queries (`searchQueriesExposed: false`). Mention rate and tracked-brand share of voice only; citation rate excludes ungrounded answers by definition |
+| Errors | 3xx not followed (rejected); 4xx rejected; 5xx, a non-JSON or oversized body = server error (billing unknown); timeouts 30 s. Stored error text is the HTTP status only (never the provider body); the key is scrubbed |
+| Hosts | A lane-specific guarded fetch admitting only that provider's host, only for its workspace; `ctx.apiFetch` does not admit it |
+| Cost and budget | Cost unknown (NULL). Reserves `geo_prompts` and `provider_calls` like every engine (tenant key: project limits only, never the operator global caps); no `usd_micros` reservation |
+| Label | "Custom · no web search proof · mention rate only" on results lanes, the AI engines board and the activity window |
+| Untrusted response fields | The host is owner-chosen, so its `model` and `id` are untrusted: every answer (ok or failed) is stored with the CONFIGURED model id, so the cohort key and the trend series are fixed by the owner's selection, never by what a router reports; the request id is kept only when it is at most 200 characters without control characters (else NULL); `finish_reason` likewise |
+| Board and proposals | The AI engines board shows only the prompt feed for this lane, its mention rate and "Citation rate: not measured (no web search proof)"; no cited pages, skip factors or rewrite plans (they need citations). Custom lanes are not inputs to GEO proposals (`geo/proposals.ts`) |
 
 ## Gemini API with Grounding with Google Search — GEO
 

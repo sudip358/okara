@@ -3,7 +3,7 @@ import type { EngineFeedItem, EngineLaneSummary } from "@shared/types";
 import { formatNumber } from "@web/lib/format";
 import { Badge, cx } from "@web/components/ui";
 import { SENTIMENT_LABEL, sourceTypeLabel } from "../lib";
-import { FEED_STATUS, LABELS, engineName, feedItems, formatLatency, positionLabel } from "./lib";
+import { FEED_STATUS, LABELS, apiSampledTipFor, engineName, feedItems, formatLatency, positionLabel } from "./lib";
 
 export function FeedCard({ item, onOpen }: { item: EngineFeedItem; onOpen?: (observationId: string, title: string) => void }) {
   const st = FEED_STATUS[item.status];
@@ -77,7 +77,7 @@ export function PromptFeed({
           <span aria-hidden="true" className="mr-1 font-mono text-zinc-500 dark:text-zinc-400">A</span>
           {formatNumber(lane.counts.valid)} prompts answered by {name}
         </h4>
-        <span className="text-[11px] text-zinc-600 dark:text-zinc-400" title={LABELS.apiSampledTip}>
+        <span className="text-[11px] text-zinc-600 dark:text-zinc-400" title={apiSampledTipFor(lane.provider)}>
           Latest cohort · {LABELS.apiSampled}
         </span>
       </div>

@@ -5,12 +5,21 @@
  * names are untrusted text and are only ever rendered as plain text. OWNED BY: web-shell.
  */
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import type { CustomProviderModelList, CustomProviderStatus, CustomProvidersResponse, IntegrationsStatus, WriterSource } from "@shared/types";
+import type {
+  CustomProviderModelList,
+  CustomProviderRole,
+  CustomProviderStatus,
+  CustomProvidersResponse,
+  IntegrationsStatus,
+  ProviderModelOption,
+  WriterSource,
+} from "@shared/types";
 import { api, errorMessage } from "@web/lib/api";
 import { useApi, useMutation, type ApiState } from "@web/lib/hooks";
 import { formatDateTime } from "@web/lib/format";
 import { Button, ErrorState, LoadingState, SelectField, StateBadge, TextField, cx } from "@web/components/ui";
-import { activeCustomWriter, baseUrlInputError, defaultWriterName, fieldErrorFor, filterModels, isFieldError, testOutcomeText } from "./custom-writer-lib";
+import { activeCustomWriter, baseUrlInputError, defaultWriterName, fieldErrorFor, isFieldError, testOutcomeText } from "./custom-writer-lib";
+import { CUSTOM_GEO_NOTE, filterModelOptions, toOptions, writerProviders } from "./model-lib";
 
 type ProviderStatus = IntegrationsStatus["providers"][number];
 type TestResult = { ok: boolean | null; detail: string };
@@ -20,7 +29,7 @@ const mutedText = "text-xs text-zinc-600 dark:text-zinc-400";
 
 const customState = (p: CustomProviderStatus) => (p.lastTestOk === false ? "error" : "ready");
 
-const providersPath = (workspaceId: string) => `/workspaces/${encodeURIComponent(workspaceId)}/custom-providers`;
+export const providersPath = (workspaceId: string) => `/workspaces/${encodeURIComponent(workspaceId)}/custom-providers`;
 
 /** The whole writer row: provider type choice, then the default key panel or the custom provider panel. */
 export function WriterProviderRow({
@@ -165,9 +174,11 @@ function CustomWriterPanel({ workspaceId, state, apply }: { workspaceId: string;
   if (state.loading && !data) return <LoadingState />;
   if (!data) return <ErrorState error={state.error} onRetry={state.reload} />;
   const active = activeCustomWriter(data);
-  const others = data.providers.filter((p) => !p.isWriter);
-  const formOpen = data.canManage && (editing !== null || data.providers.length === 0);
-  const editingProvider = editing && editing !== "new" ? (data.providers.find((p) => p.id === editing) ?? null) : null;
+  // Custom GEO engines (role "geo") live in the AI engines section, never here.
+  const writers = writerProviders(data);
+  const others = writers.filter((p) => !p.isWriter);
+  const formOpen = data.canManage && (editing !== null || writers.length === 0);
+  const editingProvider = editing && editing !== "new" ? (writers.find((p) => p.id === editing) ?? null) : null;
   const saved = (next: CustomProvidersResponse) => {
     setEditing(null);
     apply(next);
@@ -189,7 +200,7 @@ function CustomWriterPanel({ workspaceId, state, apply }: { workspaceId: string;
           workspaceId={workspaceId}
           initial={editingProvider}
           onSaved={saved}
-          onCancel={data.providers.length > 0 ? () => setEditing(null) : undefined}
+          onCancel={writers.length > 0 ? () => setEditing(null) : undefined}
         />
       )}
 
@@ -210,9 +221,9 @@ function CustomWriterPanel({ workspaceId, state, apply }: { workspaceId: string;
 
       {data.canManage && !formOpen && (
         <div>
-          {data.providers.length < data.maxProviders ? (
+          {writers.length < data.maxProviders ? (
             <Button size="sm" onClick={() => setEditing("new")}>
-              {data.providers.length === 0 ? "Add a custom provider" : "Add another custom provider"}
+              {writers.length === 0 ? "Add a custom provider" : "Add another custom provider"}
             </Button>
           ) : (
             <p className={mutedText}>This workspace has the maximum of {data.maxProviders} custom providers; remove one to add another.</p>
@@ -247,6 +258,7 @@ export function SavedProviderItem({
   );
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [changingModel, setChangingModel] = useState(false);
+  const isGeo = p.role === "geo";
 
   return (
     <div className={cx("rounded-lg border p-3", p.isWriter ? "border-emerald-300 dark:border-emerald-800" : "border-zinc-200 dark:border-zinc-800")}>
@@ -255,6 +267,7 @@ export function SavedProviderItem({
           <p className="break-words text-sm font-semibold">
             {p.label}
             {p.isWriter && <span className="ml-2 text-xs font-medium text-emerald-800 dark:text-emerald-300">Active writer</span>}
+            {isGeo && <span className="ml-2 text-xs font-medium text-amber-800 dark:text-amber-300">{CUSTOM_GEO_NOTE}</span>}
           </p>
           <dl className="mt-1 space-y-0.5 text-xs">
             <div className="flex flex-wrap gap-x-2">
@@ -311,7 +324,7 @@ export function SavedProviderItem({
           </Button>
           {canManage && (
             <>
-              {!p.isWriter && (
+              {!p.isWriter && !isGeo && (
                 <Button
                   size="sm"
                   variant="primary"
@@ -336,7 +349,13 @@ export function SavedProviderItem({
                 </Button>
               ) : (
                 <span className="flex flex-wrap items-center gap-1">
-                  <span className="text-xs">{p.isWriter ? "Remove it? The writer switches back to the default." : "Remove it?"}</span>
+                  <span className="text-xs">
+                    {p.isWriter
+                      ? "Remove it? The writer switches back to the default."
+                      : isGeo
+                        ? "Remove this GEO engine? Its earlier answers stay in your results."
+                        : "Remove it?"}
+                  </span>
                   <Button
                     size="sm"
                     variant="danger"
@@ -405,6 +424,7 @@ function ModelChanger({ workspaceId, p, onSaved, onCancel }: { workspaceId: stri
       </div>
       <FetchOutcome result={fetchModels.data} error={fetchModels.error} />
       <ModelPicker id={id} list={fetchModels.data} value={model} onChange={setModel} error={fieldErrorFor(save.error, "model")} />
+      {p.role === "geo" && <p className={mutedText}>Changing the model starts a new trend series for this engine (results are compared within one model only).</p>}
       <div className="flex flex-wrap gap-2">
         <Button type="submit" size="sm" variant="primary" loading={save.loading} disabled={!model.trim() || model.trim() === p.model}>
           Save model
@@ -424,11 +444,14 @@ export function CustomProviderForm({
   initial,
   onSaved,
   onCancel,
+  role = "writer",
 }: {
   workspaceId: string;
   initial: CustomProviderStatus | null;
   onSaved: (next: CustomProvidersResponse) => void;
   onCancel?: () => void;
+  /** "geo": add a custom GEO engine lane (never the writer). */
+  role?: CustomProviderRole;
 }) {
   const id = useId();
   const path = providersPath(workspaceId);
@@ -467,7 +490,7 @@ export function CustomProviderForm({
     <form
       noValidate
       className="space-y-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800"
-      aria-label={initial ? `Edit ${initial.label}` : "Add a custom provider"}
+      aria-label={initial ? `Edit ${initial.label}` : role === "geo" ? "Add a custom GEO engine" : "Add a custom provider"}
       onSubmit={async (e) => {
         e.preventDefault();
         setClientError(null);
@@ -480,7 +503,10 @@ export function CustomProviderForm({
         const body: Record<string, unknown> = { baseUrl: baseUrl.trim(), model: model.trim() };
         if (label.trim()) body.label = label.trim();
         if (apiKey.trim()) body.apiKey = apiKey.trim();
-        if (!initial) body.useAsWriter = true;
+        if (!initial) {
+          if (role === "geo") body.role = "geo";
+          else body.useAsWriter = true;
+        }
         const next = await save.run(body);
         if (next) {
           setApiKey("");
@@ -488,7 +514,7 @@ export function CustomProviderForm({
         }
       }}
     >
-      <p className="text-sm font-medium">{initial ? `Edit ${initial.label}` : "Custom provider (OpenAI-compatible)"}</p>
+      <p className="text-sm font-medium">{initial ? `Edit ${initial.label}` : role === "geo" ? "Custom GEO engine (OpenAI-compatible)" : "Custom provider (OpenAI-compatible)"}</p>
       <div className="grid gap-3 sm:grid-cols-2">
         <TextField
           id={`${id}-url`}
@@ -546,7 +572,7 @@ export function CustomProviderForm({
       </div>
       <div className="flex flex-wrap gap-2">
         <Button type="submit" variant="primary" loading={save.loading}>
-          {initial ? "Save changes" : "Save and use as writer"}
+          {initial ? "Save changes" : role === "geo" ? "Save custom GEO engine" : "Save and use as writer"}
         </Button>
         {onCancel && (
           <Button variant="ghost" onClick={onCancel}>
@@ -596,19 +622,22 @@ export function ModelPicker({
   value,
   onChange,
   error,
+  manualPlaceholder = "provider/model-name",
 }: {
   id: string;
-  list: CustomProviderModelList | null;
+  /** A custom provider's list (ids), or a built-in provider's list (id + display label). */
+  list: CustomProviderModelList | { models: ProviderModelOption[]; total: number; truncated: boolean } | null;
   value: string;
   onChange: (v: string) => void;
   error?: string | null;
+  manualPlaceholder?: string;
 }) {
-  const models = list?.models ?? [];
+  const models: ProviderModelOption[] = (list?.models ?? []).map((m) => (typeof m === "string" ? toOptions([m])[0]! : m));
   const [manual, setManual] = useState(false);
   const [query, setQuery] = useState("");
   if (models.length > 0 && !manual) {
-    const { shown, matched } = filterModels(models, query);
-    const options = value && !shown.includes(value) ? [value, ...shown] : shown;
+    const { shown, matched } = filterModelOptions(models, query);
+    const options = value && !shown.some((o) => o.id === value) ? [{ id: value, label: value }, ...shown] : shown;
     const more = matched > shown.length ? ` (first ${shown.length} shown; refine the search)` : "";
     return (
       <div className="space-y-2">
@@ -633,8 +662,8 @@ export function ModelPicker({
           >
             <option value="">Select a model…</option>
             {options.map((m) => (
-              <option key={m} value={m}>
-                {m}
+              <option key={m.id} value={m.id}>
+                {m.label}
               </option>
             ))}
           </SelectField>
@@ -655,7 +684,7 @@ export function ModelPicker({
         maxLength={200}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder="provider/model-name"
+        placeholder={manualPlaceholder}
         error={error}
         hint={
           models.length > 0

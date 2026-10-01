@@ -140,9 +140,9 @@ describe("credentials and budget attribution", () => {
     expect(await db.first("SELECT used FROM usage_counters WHERE scope_key = ? AND resource = 'provider_calls'", GLOBAL_SCOPE_KEY)).toBeNull();
   });
 
-  it("the daily geo_prompts ceiling covers four engine lanes", () => {
-    expect(MAX_GEO_PROVIDERS).toBe(4);
-    expect(dailyLimit("geo_prompts", DEFAULT_PROJECT_LIMITS)).toBe(DEFAULT_PROJECT_LIMITS.geo_prompts_per_run * 4 * 4);
+  it("the daily geo_prompts ceiling covers four engine lanes plus two custom GEO engines", () => {
+    expect(MAX_GEO_PROVIDERS).toBe(6);
+    expect(dailyLimit("geo_prompts", DEFAULT_PROJECT_LIMITS)).toBe(DEFAULT_PROJECT_LIMITS.geo_prompts_per_run * 6 * 4);
   });
 });
 

@@ -4,20 +4,23 @@
  * - Providers are constructed only when both a key and a model exist; otherwise they are null / absent and
  *   steps report setup_required. Nothing is ever faked. Models resolve through platform/provider-models.ts:
  *   the workspace's selection > the operator env var > none (TypeSafe: > the documented jev-latest alias).
+ *   Operator-key spend guard (provider-models.ts modelForKeySource): on the operator's key a workspace-chosen
+ *   GEO engine model runs only when providers/rates.ts has a verified price for it (otherwise no lane, a run
+ *   event says why); a workspace-chosen TypeSafe model is ignored on the operator key.
  * - Custom GEO engines (workspace custom providers with role 'geo') become extra GEO lanes, each with its
  *   own guarded fetch that admits only that provider's host (never the shared apiFetch).
  * - `apiFetch` is an allowlisted fetch for provider APIs only; `crawlFetch` is the platform fetch,
  *   which the crawler wraps in its SSRF guard (src/worker/seo/ssrf.ts).
  */
-import type { AgentKind } from "@shared/types";
+import type { AgentKind, GeoEngineProviderId, ModelSelectableProviderId } from "@shared/types";
 import type { Env } from "../env";
 import { Db } from "../lib/db";
 import { newId } from "../lib/ids";
 import { iso, systemClock, type Clock } from "../lib/time";
 import type { ProjectRow } from "../platform/access";
-import { resolveProviderKey, type CredentialProviderId, type ResolvedKey } from "../platform/credentials";
+import { OPERATOR_KEY_ENV, resolveProviderKey, type CredentialProviderId, type ResolvedKey } from "../platform/credentials";
 import { cleanModelId, listCustomGeoEngines, resolveCustomProviderRow, resolveCustomWriter, selectedCustomWriter, validateCustomBaseUrl } from "../platform/custom-providers";
-import { loadWorkspaceModels, resolveAllModels, resolveWorkspaceModels } from "../platform/provider-models";
+import { loadWorkspaceModels, modelForKeySource, type ModelInUse } from "../platform/provider-models";
 import { customGeoLaneLabel, customGeoProviderId } from "../geo/custom-lanes";
 import { createCustomGeoProvider } from "../providers/custom-geo";
 import { createGscProvider } from "../platform/gsc-client";
@@ -178,7 +181,7 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
   const baseCrawlFetch = opts.crawlFetchImpl ?? fetch;
   const crawlFetch = ((input: RequestInfo | URL, init?: RequestInit) => baseCrawlFetch(input, init)) as typeof fetch;
 
-  const [models, customGeoRows] = await Promise.all([resolveWorkspaceModels(env, db, ref.workspaceId), listCustomGeoEngines(db, ref.workspaceId)]);
+  const [savedModels, customGeoRows] = await Promise.all([loadWorkspaceModels(db, ref.workspaceId), listCustomGeoEngines(db, ref.workspaceId)]);
   const [typesafe, writerResolved, gemini, perplexity, openaiGeo, anthropicGeo] = await Promise.all([
     safeKey(env, db, ref.workspaceId, "typesafe", log),
     custom.status === "none" ? safeKey(env, db, ref.workspaceId, "writer", log) : Promise.resolve(null),
@@ -205,8 +208,10 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
     },
   });
 
+  // The model each provider really uses with the key it resolved to (operator-key spend guard applied).
+  const modelInUse = (provider: ModelSelectableProviderId, key: ResolvedKey | null): ModelInUse => modelForKeySource(env, savedModels, provider, key?.source ?? null, clock());
   const decisions = typesafeKey
-    ? createTypeSafeProvider({ apiKey: typesafeKey, model: models.typesafe.model ?? undefined, fetchImpl: apiFetch, calls, budget: budgetFor(budget, "typesafe") })
+    ? createTypeSafeProvider({ apiKey: typesafeKey, model: modelInUse("typesafe", typesafe).model ?? undefined, fetchImpl: apiFetch, calls, budget: budgetFor(budget, "typesafe") })
     : null;
   // Provider views: global operator-key caps apply only when that provider uses the operator key.
   const writerHooks = { calls, budget: budgetFor(budget, "writer") };
@@ -222,20 +227,31 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
 
   const geoProviders: GeoProvider[] = [];
   // Model ids come only from the workspace's selection or the operator's configuration; both a key and a
-  // valid model id are required.
-  const gm = models.gemini.model;
+  // valid model id are required. A workspace-chosen model without a verified price never runs on the
+  // operator's key (its spend could not be counted against the operator's global usd cap): no lane, and a
+  // run event says why.
+  const engineModel = async (provider: GeoEngineProviderId, key: ResolvedKey | null): Promise<string | null> => {
+    if (!key) return null;
+    const use = modelInUse(provider, key);
+    if (use.blocked) {
+      await log.event("runtime", "info", use.blocked);
+      return null;
+    }
+    return use.model;
+  };
+  const gm = await engineModel("gemini", gemini);
   if (geminiKey && gm && geminiConfigured(env, geminiKey, gm)) {
     geoProviders.push(createGeminiProvider({ apiKey: geminiKey, model: gm, fetchImpl: apiFetch, now: clock, thinkingLevel: env.GEMINI_THINKING_LEVEL }));
   }
-  const pm = models.perplexity.model;
+  const pm = await engineModel("perplexity", perplexity);
   if (perplexityKey && pm && perplexityConfigured(env, perplexityKey, pm)) {
     geoProviders.push(createPerplexityProvider({ apiKey: perplexityKey, model: pm, fetchImpl: apiFetch, now: clock }));
   }
-  const om = models.openai_geo.model;
+  const om = await engineModel("openai_geo", openaiGeo);
   if (openaiGeoKey && om && openaiGeoConfigured(env, openaiGeoKey, om)) {
     geoProviders.push(createOpenAiGeoProvider({ apiKey: openaiGeoKey, model: om, fetchImpl: apiFetch, now: clock }));
   }
-  const am = models.anthropic_geo.model;
+  const am = await engineModel("anthropic_geo", anthropicGeo);
   if (anthropicGeoKey && am && anthropicGeoConfigured(env, anthropicGeoKey, am)) {
     geoProviders.push(createAnthropicGeoProvider({ apiKey: anthropicGeoKey, model: am, fetchImpl: apiFetch, now: clock }));
   }
@@ -354,28 +370,45 @@ export async function writerStatusForWorkspace(env: Env, db: Db, workspaceId: st
 export type CapabilityPresence = Record<CredentialProviderId, boolean> & {
   /** Provider ids ("custom_geo:<id>") of the workspace's custom GEO engines whose saved config validates. */
   customGeoEngines: string[];
+  /**
+   * GEO engines whose workspace-chosen model cannot run on the operator key (no verified price), with the
+   * plain-text reason (provider-models.ts modelForKeySource). Those engines are not configured.
+   */
+  modelBlocked: Partial<Record<GeoEngineProviderId, string>>;
 };
 
 /** Which capabilities are configured for a workspace, without decrypting any key. */
-export async function capabilityPresence(env: Env, db: Db, workspaceId: string): Promise<CapabilityPresence> {
+export async function capabilityPresence(env: Env, db: Db, workspaceId: string, at: Date = new Date()): Promise<CapabilityPresence> {
   const [rows, customWriter, saved, customGeo] = await Promise.all([
     db.all<{ provider: CredentialProviderId }>("SELECT provider FROM provider_credentials WHERE workspace_id = ?", workspaceId),
     selectedCustomWriter(db, workspaceId),
     loadWorkspaceModels(db, workspaceId),
     listCustomGeoEngines(db, workspaceId),
   ]);
-  const models = resolveAllModels(env, saved);
   const savedKeys = new Set(rows.map((r) => r.provider));
   const op = (v: string | undefined) => typeof v === "string" && v.trim().length > 0;
+  const modelBlocked: CapabilityPresence["modelBlocked"] = {};
+  // Presence only (no decryption): a saved BYO key stands in as "some key"; without one the operator key (if
+  // set) is used, and the operator-key spend guard applies to the workspace's model.
+  const engine = (provider: GeoEngineProviderId, configured: (env: Env, key: string | null, model: string | null) => boolean): boolean => {
+    const hasSaved = savedKeys.has(provider);
+    const source = hasSaved ? "workspace_key" : op(env[OPERATOR_KEY_ENV[provider]] as string | undefined) ? "operator_key" : null;
+    const use = modelForKeySource(env, saved, provider, source, at);
+    if (use.blocked) {
+      modelBlocked[provider] = use.blocked;
+      return false;
+    }
+    return configured(env, hasSaved ? "saved" : null, use.model);
+  };
   return {
     typesafe: savedKeys.has("typesafe") || op(env.TYPESAFE_API_KEY),
     // A selected custom writer is the workspace's writer (its own key).
     writer: customWriter !== null || savedKeys.has("writer") || op(env.WRITER_API_KEY),
-    // Presence only (no decryption): a saved BYO key stands in as "some key".
-    gemini: geminiConfigured(env, savedKeys.has("gemini") ? "saved" : null, models.gemini.model),
-    perplexity: perplexityConfigured(env, savedKeys.has("perplexity") ? "saved" : null, models.perplexity.model),
-    openai_geo: openaiGeoConfigured(env, savedKeys.has("openai_geo") ? "saved" : null, models.openai_geo.model),
-    anthropic_geo: anthropicGeoConfigured(env, savedKeys.has("anthropic_geo") ? "saved" : null, models.anthropic_geo.model),
+    gemini: engine("gemini", geminiConfigured),
+    perplexity: engine("perplexity", perplexityConfigured),
+    openai_geo: engine("openai_geo", openaiGeoConfigured),
+    anthropic_geo: engine("anthropic_geo", anthropicGeoConfigured),
+    modelBlocked,
     customGeoEngines: customGeo
       .filter((r) => {
         const check = validateCustomBaseUrl(r.base_url, env.APP_ORIGIN);

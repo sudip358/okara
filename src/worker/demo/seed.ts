@@ -25,7 +25,11 @@ import {
   DEMO_PAGES,
   DEMO_PROJECT,
   DEMO_PROMPTS,
+  DEMO_QUERY_RELEVANCE,
+  DEMO_SEO_JUDGMENTS,
 } from "./fixtures";
+import { tierFor } from "../runs/policy";
+import { normalizeDemandQuery } from "../seo/gsc/demand";
 
 type Stmt = [string, ...unknown[]];
 
@@ -99,8 +103,9 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
     ["reserve_budget", "completed", "Budget reserved (demo: no real spend).", 124.9],
     ["fetch_gsc", "completed", `Imported ${DEMO_GSC_ROWS.length} query/page rows per 28-day window.`, 123.95],
     ["crawl", "completed", "8 of 8 pages crawled; 0 skipped.", 121.05],
-    ["shortlist", "completed", "3 candidates shortlisted.", 120.95],
-    ["decisions", "completed", "3 candidates judged; 1 rejected (low_fit).", 120.3],
+    ["query_relevance", "completed", `Query relevance: ${DEMO_QUERY_RELEVANCE.length} of ${DEMO_QUERY_RELEVANCE.length} queries judged; 0 dropped as not about the business, 1 flagged for review.`, 120.96],
+    ["shortlist", "completed", "11 candidates shortlisted.", 120.95],
+    ["decisions", "completed", "11 candidates judged; 9 rejected (4 low_fit, 5 budget: daily recommendation cap).", 120.3],
     ["generate_proposals", "completed", "2 recommendations drafted.", 119.2],
     ["validate_evidence", "completed", "All evidence IDs resolved.", 118.5],
     ["persist_summary", "completed", "Run summary saved.", 118.05],
@@ -325,6 +330,35 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
   decision(seoRun, "seo", `demo:${pid}:template:product:offer`, "selected", null, { type: "choice", choice: "add_offer_markup", confidence: 0.86, probabilities: { add_offer_markup: 0.86, insufficient_context: 0.14 } }, "act");
   decision(seoRun, "seo", `demo:${pid}:url:sofas:meta`, "selected", null, { type: "choice", choice: "rewrite_snippet", confidence: 0.64, probabilities: { rewrite_snippet: 0.64, none: 0.36 } }, "flag");
   decision(seoRun, "seo", "template:collection:intro", "rejected", "low_fit", { type: "choice", choice: "none", confidence: 0.71, probabilities: { add_intro: 0.29, none: 0.71 } }, "act");
+  // Element judgments of the SEO run (Live view panel "Every SEO element, judged one by one"): one row per
+  // asked question in the runtime format, the tier computed by the real policy. Rows of one candidate share
+  // its timestamp, as recordOutcome writes them.
+  for (const j of DEMO_SEO_JUDGMENTS) {
+    const readable = `${j.kind}:${DEMO_ORIGIN}${j.path}`;
+    const candidateKey = j.recKey ? `demo:${pid}:${j.recKey}` : `demo:${pid}:seo:${j.kind}:${j.path}`;
+    for (const q of j.questions) {
+      const tier = tierFor(q.id, q.answer);
+      ins("decision_records", {
+        id: newId("dec"), ...base, run_id: seoRun, agent: "seo", candidate_key: candidateKey, question_id: q.id, question_version: "demo-fixture",
+        policy_version: "demo-fixture", provider: DEMO_MODEL, model: DEMO_MODEL, state_hash: null,
+        answer_json: JSON.stringify({ answer: q.answer, candidate: readable, questionTier: tier, ...(q.key ? { key: q.key } : {}) }),
+        tier, outcome: j.outcome, reason_code: j.reason, created_at: at(j.minutesAgo),
+      });
+    }
+  }
+  // Query relevance pre-filter answers (query-batch format), judged after the crawl and before the shortlist.
+  DEMO_QUERY_RELEVANCE.forEach(([query, n], i) => {
+    const answer = { type: "noul" as const, noul: n };
+    const tier = tierFor("seo.query_relevance", answer);
+    const band = tier === "act" ? (n >= 0.5 ? "yes" : "no") : tier === "flag" ? "middle" : null;
+    ins("decision_records", {
+      id: newId("dec"), ...base, run_id: seoRun, agent: "seo", candidate_key: `qrel:${normalizeDemandQuery(query)}`, question_id: "seo.query_relevance",
+      question_version: "demo-fixture", policy_version: "demo-fixture", provider: DEMO_MODEL, model: DEMO_MODEL, state_hash: null,
+      answer_json: JSON.stringify({ answer, query, questionTier: tier }), tier,
+      outcome: band === "no" ? "rejected" : "selected", reason_code: band === "no" ? "low_fit" : band === null ? "insufficient_evidence" : null,
+      created_at: at(121 - i * 0.005),
+    });
+  });
   decision(geoRun, "geo", `demo:${pid}:geo:prompt0:comparison`, "selected", null, { type: "choice", choice: "add_comparison_content", confidence: 0.81, probabilities: { add_comparison_content: 0.81, insufficient_context: 0.19 } }, "act");
   decision(geoRun, "geo", `demo:${pid}:geo:prompt1:fact`, "selected", null, { type: "choice", choice: "clarify_product_fact", confidence: 0.77, probabilities: { clarify_product_fact: 0.77, none: 0.23 } }, "act");
   decision(geoRun, "geo", "prompt:4:none", "rejected", "insufficient_evidence", { type: "choice", choice: "insufficient_context", confidence: 0.9, probabilities: { insufficient_context: 0.9, none: 0.1 } }, "act");

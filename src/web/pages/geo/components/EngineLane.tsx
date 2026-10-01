@@ -4,7 +4,8 @@ import { formatNumber, formatRatio, formatUsd } from "@web/lib/format";
 import { Badge, StateBadge } from "@web/components/ui";
 import { sourceTypeLabel } from "../lib";
 
-function costLabel(cost: GeoLane["cost"]): { value: string; note: string } {
+function costLabel(cost: GeoLane["cost"], provider: string): { value: string; note: string } {
+  if (cost.usd === null && provider.startsWith("custom_geo:")) return { value: "Unknown", note: "Custom provider: no verified price, so cost is recorded as unknown, not $0" };
   if (cost.usd === null) return { value: "Unknown", note: "Provider returned no usage/price data; not counted as $0" };
   return cost.isEstimate
     ? { value: formatUsd(cost.usd, true), note: "Estimate from versioned configured rates" }
@@ -12,7 +13,7 @@ function costLabel(cost: GeoLane["cost"]): { value: string; note: string } {
 }
 
 export function EngineLane({ lane }: { lane: GeoLane }) {
-  const cost = costLabel(lane.cost);
+  const cost = costLabel(lane.cost, lane.provider);
   return (
     <article className="flex min-w-0 flex-col gap-3 rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       <header className="flex flex-wrap items-start justify-between gap-2">

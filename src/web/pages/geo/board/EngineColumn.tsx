@@ -2,6 +2,8 @@
  * One engine lane of the board (design §1-§6): header, then A prompt feed, B our pages, C cited pages,
  * D rewrite plans. Desktop/tablet stack the sections; on mobile the lane is a collapsible <details> and
  * B-D are tabs. Setup / disabled / error / no-answer lanes keep the header and show an honest state only.
+ * A custom GEO engine lane (no web search) shows only A plus a note: B-D come from the citation pipeline and
+ * the per-engine skip-factor API, which never have data for an ungrounded lane.
  */
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router";
@@ -14,7 +16,7 @@ import { PromptFeed } from "./PromptFeed";
 import { SkipFactorsBody, skipSectionTitle, type SkipInputs } from "./SkipFactorsPanel";
 import { CompetitorBody } from "./CompetitorPanel";
 import { RewritePlansBody } from "./RewritePlansPanel";
-import { assessmentsForEngine, engineName, engineVendor, laneBodyMode, plansForEngine } from "./lib";
+import { CUSTOM_LANE_BODY_NOTE, assessmentsForEngine, engineName, engineVendor, isCustomEngine, laneBodyMode, plansForEngine } from "./lib";
 
 export interface ListState<T> {
   data: T | null;
@@ -124,8 +126,17 @@ export function EngineColumn(props: EngineColumnProps) {
   );
   const skipBody = <SkipFactorsBody projectId={projectId} lane={lane} inputs={skipInputs} onNeed={onNeedSkipInputs} />;
 
+  const customBody = (
+    <div className="min-w-0 space-y-3">
+      <PromptFeed lane={lane} layout={compact ? "list" : "row"} onOpen={onOpenObservation} />
+      <p className="text-xs text-zinc-600 dark:text-zinc-400">{CUSTOM_LANE_BODY_NOTE}</p>
+    </div>
+  );
+
   const body = !ready ? (
     <LaneStateBody projectId={projectId} lane={lane} />
+  ) : isCustomEngine(lane.provider) ? (
+    customBody
   ) : compact ? (
     <div className="min-w-0 space-y-3">
       <Tabs

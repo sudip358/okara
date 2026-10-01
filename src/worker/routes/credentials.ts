@@ -9,6 +9,11 @@
  *                                                         saved workspace key, else the operator key)
  *   PUT    /workspaces/:wid/credentials/:provider/model  -> owner only; body {model: string | null}; the workspace's
  *                                                         model for that provider (null = back to the operator default)
+ * Operator-key spend guard (platform/provider-models.ts modelForKeySource): without a workspace key of its own,
+ * a workspace may not pick a GEO engine model that has no verified price (400 operator_key_unpriced) nor a
+ * TypeSafe model (400 operator_key_model); a list fetched with the operator key shows only priced ids (no
+ * fine-tuned or org-owned OpenAI models), and TypeSafe is not listed with it at all. A stored selection that
+ * cannot run on the operator key shows state setup_required with a `modelNote`.
  * Model routes exist for typesafe, gemini, perplexity, openai_geo and anthropic_geo (not the writer, which has
  * its own custom provider flow). Keys are decrypted only server-side, never returned, and never logged.
  */
@@ -36,10 +41,13 @@ import {
   isModelProvider,
   listProviderModels,
   loadWorkspaceModels,
+  modelForKeySource,
   normalizeModelId,
+  operatorKeyModelRefusal,
   rateKnownFor,
-  resolveAllModels,
-  type ResolvedModels,
+  resolveModel,
+  typesafeOperatorKeyNote,
+  type WorkspaceModels,
 } from "../platform/provider-models";
 import { createApiFetch } from "../runs/runtime";
 
@@ -104,7 +112,7 @@ interface CredentialRow {
 }
 
 /** Status of every provider for a workspace. Exported for routes/integrations.ts. Never includes keys. */
-export async function listProviderStatuses(env: Env, db: Db, workspaceId: string): Promise<ProviderStatus[]> {
+export async function listProviderStatuses(env: Env, db: Db, workspaceId: string, at: Date = new Date()): Promise<ProviderStatus[]> {
   const [rows, saved] = await Promise.all([
     db.all<CredentialRow>(
       "SELECT provider, key_hint, last_tested_at, last_test_ok, last_test_detail FROM provider_credentials WHERE workspace_id = ?",
@@ -113,14 +121,37 @@ export async function listProviderStatuses(env: Env, db: Db, workspaceId: string
     loadWorkspaceModels(db, workspaceId),
   ]);
   const byProvider = new Map(rows.map((r) => [r.provider, r]));
-  const models = resolveAllModels(env, saved);
-  return PROVIDERS.map((p) => statusFor(env, p, byProvider.get(p) ?? null, models));
+  return PROVIDERS.map((p) => statusFor(env, p, byProvider.get(p) ?? null, saved, at));
 }
 
-/** The model the runtime would use (workspace selection > env > none; TypeSafe > jev-latest), and where it comes from. */
-function modelFor(env: Env, provider: ProviderId, models: ResolvedModels): { model: string | null; source: ProviderStatus["modelSource"] } {
-  if (provider === "writer") return { model: envStr(env, "WRITER_MODEL"), source: envStr(env, "WRITER_MODEL") ? "operator" : null };
-  return models[provider];
+interface ModelStatus {
+  model: string | null;
+  source: ProviderStatus["modelSource"];
+  /** The workspace's selection cannot run on the key in use (operator key, no verified price). */
+  blocked: boolean;
+  note: string | null;
+  workspaceModel: string | null;
+}
+
+/**
+ * The model the runtime would use with the key it would use (workspace selection > env > none; TypeSafe >
+ * jev-latest; operator-key spend guard applied, exactly as runs/runtime.ts buildRunContext), and where it
+ * comes from.
+ */
+function modelFor(env: Env, provider: ProviderId, keySource: ProviderStatus["source"], saved: WorkspaceModels, at: Date): ModelStatus {
+  if (provider === "writer") {
+    const m = envStr(env, "WRITER_MODEL");
+    return { model: m, source: m ? "operator" : null, blocked: false, note: null, workspaceModel: null };
+  }
+  const use = modelForKeySource(env, saved, provider, keySource, at);
+  const stored = saved[provider];
+  return {
+    model: use.model,
+    source: use.source,
+    blocked: use.blocked !== null,
+    note: use.blocked ?? (use.ignoredSelection ? typesafeOperatorKeyNote(use.ignoredSelection) : null),
+    workspaceModel: stored !== undefined ? normalizeModelId(provider, stored) : null,
+  };
 }
 
 function modelValid(provider: ProviderId, model: string): boolean {
@@ -138,11 +169,12 @@ function modelValid(provider: ProviderId, model: string): boolean {
   }
 }
 
-function statusFor(env: Env, provider: ProviderId, row: CredentialRow | null, models: ResolvedModels): ProviderStatus {
+function statusFor(env: Env, provider: ProviderId, row: CredentialRow | null, saved: WorkspaceModels, at: Date): ProviderStatus {
   const operatorKey = envStr(env, OPERATOR_KEY_ENV[provider]);
   const source: ProviderStatus["source"] = row ? "workspace_key" : operatorKey ? "operator_key" : "none";
-  const { model, source: modelSource } = modelFor(env, provider, models);
-  const configured = model !== null && (provider !== "writer" || writerProvider(env) !== null) && modelValid(provider, model);
+  const { model, source: modelSource, blocked, note, workspaceModel } = modelFor(env, provider, source, saved, at);
+  // A workspace-chosen model that may not run on the operator key is setup_required (add your own key).
+  const configured = !blocked && model !== null && (provider !== "writer" || writerProvider(env) !== null) && modelValid(provider, model);
   let state: CapabilityState;
   if (source === "none" || !configured) state = "setup_required";
   else if (row && row.last_test_ok === 0) state = "error";
@@ -158,14 +190,16 @@ function statusFor(env: Env, provider: ProviderId, row: CredentialRow | null, mo
     lastTestDetail: row?.last_test_detail ?? null,
     model,
     modelSource: modelSource ?? null,
-    rateKnown: provider === "writer" ? null : rateKnownFor(provider, model),
+    rateKnown: provider === "writer" ? null : rateKnownFor(provider, model, at),
+    workspaceModel,
+    modelNote: note,
     dataSent: DATA_SENT[provider],
   };
 }
 
-async function statusOf(env: Env, db: Db, workspaceId: string, provider: ProviderId): Promise<ProviderStatus> {
+async function statusOf(env: Env, db: Db, workspaceId: string, provider: ProviderId, at: Date = new Date()): Promise<ProviderStatus> {
   const [row, saved] = await Promise.all([rowFor(db, workspaceId, provider), loadWorkspaceModels(db, workspaceId)]);
-  return statusFor(env, provider, row, resolveAllModels(env, saved));
+  return statusFor(env, provider, row, saved, at);
 }
 
 // ------------------------------------------------------------------ provider test calls
@@ -320,7 +354,7 @@ credentialRoutes.get("/workspaces/:wid/credentials", async (c) => {
   const wid = c.req.param("wid");
   const db = c.get("db");
   await requireWorkspaceMember(db, user.id, wid);
-  return c.json({ data: await listProviderStatuses(c.env, db, wid) });
+  return c.json({ data: await listProviderStatuses(c.env, db, wid, c.get("now")) });
 });
 
 credentialRoutes.put(
@@ -362,7 +396,7 @@ credentialRoutes.put(
       }
       throw e;
     }
-    return c.json({ data: await statusOf(c.env, db, wid, provider) });
+    return c.json({ data: await statusOf(c.env, db, wid, provider, c.get("now")) });
   },
 );
 
@@ -424,3 +458,114 @@ async function recordTest(db: Db, workspaceId: string, provider: ProviderId, res
     provider,
   );
 }
+
+// ------------------------------------------------------------------ workspace model selection
+
+const MODELS_MIGRATION_PENDING = "Choosing a model per workspace needs database migration 0011_workspace_models_custom_geo.sql to be applied.";
+const modelsBody = z.object({ apiKey: keySchema.optional() }).strict();
+const modelBody = z.object({ model: z.union([z.string().max(400), z.null()]) }).strict();
+const modelsKey = (c: Context<AppEnv>) => `cred_models:${c.req.param("wid") ?? ""}:${c.get("user")?.id ?? c.req.header("CF-Connecting-IP") ?? "anon"}`;
+
+function modelProviderParam(c: Context<AppEnv>): ModelSelectableProviderId {
+  const p = c.req.param("provider");
+  if (!p || !isModelProvider(p)) throw notFound("Provider");
+  return p;
+}
+
+credentialRoutes.post(
+  "/workspaces/:wid/credentials/:provider/models",
+  rateLimit({ key: modelsKey, limit: 10, windowSeconds: 60 }),
+  async (c) => {
+    const user = userOf(c);
+    const wid = c.req.param("wid");
+    const db = c.get("db");
+    await requireWorkspaceOwner(db, user.id, wid);
+    const provider = modelProviderParam(c);
+    const { apiKey } = parseOrThrow(modelsBody, await jsonBody(c));
+    const base = { mustSupport: MUST_SUPPORT[provider] };
+    let key: string | null = null;
+    let keySource: ProviderModelList["keySource"] = null;
+    if (apiKey) {
+      key = apiKey;
+      keySource = "typed_key";
+    } else {
+      const row = await rowFor(db, wid, provider);
+      if (row) {
+        try {
+          key = await decryptSecret(c.env, row.key_enc, credentialAad(wid, provider));
+          keySource = "workspace_key";
+        } catch {
+          const out: ProviderModelList = { ok: false, detail: "Saved key could not be decrypted; please re-enter it.", models: [], total: 0, truncated: false, keySource: null, ...base };
+          return c.json({ data: out });
+        }
+      } else {
+        const op = envStr(c.env, OPERATOR_KEY_ENV[provider]);
+        if (op) {
+          key = op;
+          keySource = "operator_key";
+        }
+      }
+    }
+    if (!key) throw setupRequired(`Add a ${providerLabel(c.env, provider)} key (or type one) to fetch its models.`);
+    if (keySource === "operator_key" && provider === "typesafe") {
+      // The operator key always uses the operator's TypeSafe model; its account's list is not disclosed.
+      const out: ProviderModelList = {
+        ok: null,
+        detail: `With the operator key TypeSafe uses the operator's model (${resolveModel(c.env, {}, "typesafe").model}); add your own TypeSafe key to choose a model.`,
+        models: [],
+        total: 0,
+        truncated: false,
+        keySource,
+        ...base,
+      };
+      return c.json({ data: out });
+    }
+    // With the operator key only models a workspace may run on it are listed (verified price; no fine-tuned or
+    // org-owned OpenAI models): the operator's private model names are never disclosed to a tenant.
+    const result = await listProviderModels(provider, key, createApiFetch(c.env, outboundFetch), { operatorKey: keySource === "operator_key", at: c.get("now") });
+    const out: ProviderModelList = { ...result, keySource, ...base };
+    return c.json({ data: out });
+  },
+);
+
+credentialRoutes.put(
+  "/workspaces/:wid/credentials/:provider/model",
+  rateLimit({ key: workspaceWriteKey, limit: 20, windowSeconds: 60 }),
+  async (c) => {
+    const user = userOf(c);
+    const wid = c.req.param("wid");
+    const db = c.get("db");
+    await requireWorkspaceOwner(db, user.id, wid);
+    const provider = modelProviderParam(c);
+    const parsed = modelBody.safeParse(await jsonBody(c));
+    if (!parsed.success) throw badRequest("model must be a model id or null.", { field: "model", reason: "invalid_model" });
+    const now = iso(c.get("now"));
+    try {
+      if (parsed.data.model === null) {
+        await db.run("DELETE FROM workspace_provider_models WHERE workspace_id = ? AND provider = ?", wid, provider);
+      } else {
+        const model = normalizeModelId(provider, parsed.data.model);
+        // Never echo the value: report the expected format only.
+        if (!model) throw badRequest(`Choose a model, or type a valid model id: ${MODEL_ID_FORMAT[provider]}.`, { field: "model", reason: "invalid_model" });
+        // Operator-key spend guard: without a workspace key the operator's key would run this model.
+        if (envStr(c.env, OPERATOR_KEY_ENV[provider]) && !(await rowFor(db, wid, provider))) {
+          const refusal = operatorKeyModelRefusal(c.env, provider, model, c.get("now"));
+          if (refusal) throw badRequest(refusal.message, { field: "model", reason: refusal.reason });
+        }
+        await db.run(
+          `INSERT INTO workspace_provider_models (workspace_id, provider, model, updated_by, updated_at) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (workspace_id, provider) DO UPDATE SET model = excluded.model, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
+          wid,
+          provider,
+          model,
+          user.id,
+          now,
+        );
+      }
+    } catch (e) {
+      if (isMissingTableError(e)) throw setupRequired(MODELS_MIGRATION_PENDING);
+      throw e;
+    }
+    return c.json({ data: await statusOf(c.env, db, wid, provider, c.get("now")) });
+  },
+);

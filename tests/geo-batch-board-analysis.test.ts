@@ -78,8 +78,8 @@ describe("GET /projects/:pid/geo/board", () => {
       expect(l).toMatchObject({ state: "setup_required", model: null, promptsRun: 0, answersCitingUs: 0, answersSkippingUs: 0, citedInstead: null, feed: [], costUsd: { value: null, isEstimate: true } });
       expect(l.citationRate).toEqual({ numerator: 0, denominator: 0, value: null });
     }
-    expect(lane(b, "openai_geo").stateDetail).toBe("Set OPENAI_GEO_MODEL and an OpenAI API key");
-    expect(lane(b, "perplexity").stateDetail).toBe("Set PERPLEXITY_MODEL and a Perplexity API key");
+    expect(lane(b, "openai_geo").stateDetail).toBe("Choose an OpenAI model on the Integrations page (or set OPENAI_GEO_MODEL) and add an OpenAI API key");
+    expect(lane(b, "perplexity").stateDetail).toBe("Choose a Perplexity model on the Integrations page (or set PERPLEXITY_MODEL) and add a Perplexity API key");
     expect(b.labels.join(" ")).toContain("API-sampled answers; not consumer-app answers");
     expect(b.labels).toContain("Setup required: approve at least one prompt.");
     expect(JSON.stringify(b)).not.toMatch(/citability|\/10\b|projected (traffic|revenue)/i);

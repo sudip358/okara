@@ -26,6 +26,9 @@ import {
   cx,
 } from "@web/components/ui";
 import { WriterProviderRow } from "./integrations/CustomWriter";
+import { CustomGeoEngines } from "./integrations/CustomGeo";
+import { ProviderModelRow } from "./integrations/ProviderModel";
+import { GEO_ENGINE_PROVIDERS, isModelSelectable } from "./integrations/model-lib";
 
 type ProviderStatus = IntegrationsStatus["providers"][number];
 
@@ -388,36 +391,60 @@ function ProviderKeysCard({ workspaceId, fallback, onChange }: { workspaceId: st
       ) : !providers ? (
         <ErrorState error={list.error} onRetry={list.reload} />
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-5">
           {list.error !== null && <ErrorState error={list.error} onRetry={list.reload} title="Could not load workspace keys" />}
-          <ul className="space-y-3">
-            {providers.map((p) => {
-              const row = (
-                <ProviderRow
-                  workspaceId={workspaceId}
-                  p={p}
-                  onChange={(next) => {
-                    if (next && list.data) list.setData(list.data.map((x) => (x.provider === next.provider ? next : x)));
-                    else list.reload();
-                    onChange();
-                  }}
-                />
-              );
-              return (
-                <li key={p.provider}>
-                  {/* The writer row adds the provider type choice: default writer or a custom OpenAI-compatible provider. */}
-                  {p.provider === "writer" ? <WriterProviderRow workspaceId={workspaceId} writer={p} defaultPanel={row} onChange={onChange} /> : row}
-                </li>
-              );
-            })}
-          </ul>
+          {(
+            [
+              {
+                title: "AI engines (GEO)",
+                note: "Each engine needs a key and a model. Choose the model per workspace below; trends are split by model.",
+                rows: providers.filter((p) => GEO_ENGINE_PROVIDERS.includes(p.provider)),
+                extra: <CustomGeoEngines workspaceId={workspaceId} onChange={onChange} />,
+              },
+              {
+                title: "Jev and writer",
+                note: null,
+                rows: providers.filter((p) => !GEO_ENGINE_PROVIDERS.includes(p.provider)),
+                extra: null,
+              },
+            ] as const
+          ).map((group) => (
+            <section key={group.title} aria-label={group.title} className="space-y-3">
+              <div>
+                <h3 className="text-sm font-semibold">{group.title}</h3>
+                {group.note && <p className="text-xs text-zinc-600 dark:text-zinc-400">{group.note}</p>}
+              </div>
+              <ul className="space-y-3">
+                {group.rows.map((p) => {
+                  const row = (
+                    <ProviderRow
+                      workspaceId={workspaceId}
+                      p={p}
+                      onChange={(next) => {
+                        if (next && list.data) list.setData(list.data.map((x) => (x.provider === next.provider ? next : x)));
+                        else list.reload();
+                        onChange();
+                      }}
+                    />
+                  );
+                  return (
+                    <li key={p.provider}>
+                      {/* The writer row adds the provider type choice: default writer or a custom OpenAI-compatible provider. */}
+                      {p.provider === "writer" ? <WriterProviderRow workspaceId={workspaceId} writer={p} defaultPanel={row} onChange={onChange} /> : row}
+                    </li>
+                  );
+                })}
+              </ul>
+              {group.extra}
+            </section>
+          ))}
         </div>
       )}
     </Card>
   );
 }
 
-function ProviderRow({ workspaceId, p, onChange }: { workspaceId: string; p: ProviderStatus; onChange: (next?: ProviderStatus) => void }) {
+export function ProviderRow({ workspaceId, p, onChange }: { workspaceId: string; p: ProviderStatus; onChange: (next?: ProviderStatus) => void }) {
   const id = useId();
   const base = `/workspaces/${encodeURIComponent(workspaceId)}/credentials/${encodeURIComponent(p.provider)}`;
   const [key, setKey] = useState("");
@@ -434,7 +461,7 @@ function ProviderRow({ workspaceId, p, onChange }: { workspaceId: string; p: Pro
           <p className="text-xs text-zinc-600 dark:text-zinc-400">
             {SOURCE_LABEL[p.source]}
             {p.keyHint && <> · key <span className="font-mono">{p.keyHint}</span></>}
-            {p.model && <> · model <span className="font-mono">{p.model}</span></>}
+            {p.model && !isModelSelectable(p.provider) && <> · model <span className="font-mono">{p.model}</span></>}
           </p>
           <p className="text-xs text-zinc-600 dark:text-zinc-400">
             Last test:{" "}
@@ -516,6 +543,7 @@ function ProviderRow({ workspaceId, p, onChange }: { workspaceId: string; p: Pro
             </span>
           ))}
       </form>
+      {isModelSelectable(p.provider) && <ProviderModelRow workspaceId={workspaceId} p={{ ...p, provider: p.provider }} typedKey={key} onChange={(next) => onChange(next)} />}
       <div aria-live="polite" className="mt-2 text-xs">
         {test.data && (
           <span className={test.data.ok ? "text-emerald-800 dark:text-emerald-300" : "text-red-700 dark:text-red-400"}>

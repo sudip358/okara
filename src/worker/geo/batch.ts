@@ -257,7 +257,8 @@ async function runOne(ctx: RunContext, provider: GeoProvider, prompt: PromptRow,
   if (outcome !== "not_sent") {
     await ctx.calls.record({
       provider: provider.id,
-      model: answer.model || provider.model,
+      // A custom lane always records its configured model (the host's reported model is untrusted).
+      model: custom ? provider.model : answer.model || provider.model,
       purpose: "geo_answer",
       status: outcome === "ok" ? "ok" : outcome === "timeout" ? "timeout" : outcome === "rejected" || outcome === "server_error" ? "error" : "unknown",
       requestId: answer.requestId,
@@ -327,7 +328,8 @@ async function persistObservation(
 ): Promise<string> {
   const now = iso(ctx.clock());
   const id = newId("gobs");
-  const model = answer.model || provider.model;
+  // A custom lane's cohort is fixed by the owner's configured model, never by what its host reports.
+  const model = isCustomGeoId(provider.id) ? provider.model : answer.model || provider.model;
   const groundingMode = answer.groundingMode || provider.groundingMode;
   const samplingOptions = (provider as { samplingOptions?: Record<string, unknown> }).samplingOptions ?? null;
   const cohort = await cohortKey({ promptSetVersion, provider: provider.id, model, groundingMode, samplingOptions });

@@ -149,6 +149,16 @@ export interface IntegrationsStatus {
      * cost is recorded as unknown (null), never guessed. null when not applicable (writer, no model).
      */
     rateKnown?: boolean | null;
+    /**
+     * The workspace's stored model selection, also when it is not in effect (TypeSafe on the operator key);
+     * null when none. Lets the owner reset it.
+     */
+    workspaceModel?: string | null;
+    /**
+     * Plain-text note about the model in effect, e.g. why a workspace-chosen model cannot run on the operator
+     * key (then `state` is setup_required) or that the operator key ignores a TypeSafe selection. null when none.
+     */
+    modelNote?: string | null;
     dataSent: string; // disclosure: what project data goes to this provider
   }>;
 }
@@ -1154,4 +1164,292 @@ export interface RunActivity {
 
 export interface CurrentActivityResponse {
   runs: Array<{ id: string; agent: "seo" | "geo"; status: string }>;
+}
+
+// ---------------------------------------------------------------------------
+// Live view (UI spec docs/live-view-design.md; endpoints docs/api.md "Live view").
+// Run-scoped feeds that RunActivity does not carry as structured fields. Every row is a stored row of
+// ONE run; nothing is simulated, interpolated or projected. Steps, page reads, lanes, queued pairs,
+// spend and elapsed time stay in RunActivity; project-level panels reuse EngineBoardResponse,
+// CompetitorPageAssessment, AnswerCoverageRow, CitationEvidenceRow, PageSkipFactors, RewritePlan,
+// LinkSuggestionReport and SeoOverview as they are.
+// ---------------------------------------------------------------------------
+
+/**
+ * What a judged row is about. The mapping from question ids, Choice options and audit rule ids lives in
+ * ONE worker constant: `LIVE_SEO_ELEMENT_MAP` (src/worker/live/elements.ts).
+ */
+export type LiveSeoElement =
+  | "Title"
+  | "Meta"
+  | "Title + meta"
+  | "H1"
+  | "Headings"
+  | "Intro"
+  | "Section"
+  | "Compare table"
+  | "Content"
+  | "Topics"
+  | "Freshness"
+  | "Schema"
+  | "Intent"
+  | "Page"
+  | "Duplicate"
+  | "Links"
+  | "Canonical"
+  | "Indexing"
+  | "Status"
+  | "Sitemap"
+  | "New page";
+
+/**
+ * Computed by code from the STORED tier and raw answer (or the rule class), never from Jev text.
+ * Rows still to come in a replay are a client-only "pending" state; the server never sends one.
+ */
+export type LiveSeoVerdict = "keep" | "change" | "review";
+
+/** Jev's stored judgment for one question: real provider fields only (Noul has no confidence field). */
+export interface LiveJevJudgment {
+  /** Base question id, e.g. "seo.title_matches_query"; "links.should_exist" for reused link suggestions. */
+  questionId: string;
+  /** Stored tier (policy at decision time); null when none was stored. */
+  tier: Tier | null;
+  /** Noul yes-probability; null for Choice answers or when no usable answer was stored. */
+  noul: number | null;
+  /** Choice answers only: the chosen option and the provider's confidence for it. */
+  choice: string | null;
+  confidence: number | null;
+  /** True provider name ("typesafe" or the real fallback); never relabelled. */
+  provider: string | null;
+  model: string | null;
+}
+
+/** Measured Search Console figures for one page or query (latest usable sync, current window). */
+export interface LiveGscMetrics {
+  clicks: number;
+  impressions: number;
+  /**
+   * Impression-weighted average position of the stored rows (an approximation for pages; GSC's own value
+   * for a single query row); null without impressions.
+   */
+  position: number | null;
+  window: DateWindow;
+  /** page_rows = page-dimension rows; query_page_rows = sum of query+page rows (lower bound); query_rows = query rows. */
+  basis: "page_rows" | "query_page_rows" | "query_rows";
+}
+
+/** Panel "Every SEO element, judged one by one": one stored judgment (Jev decision or audit rule finding). */
+export interface LiveSeoElementRow {
+  /** "dec:<decision_records.id>" (same id as the RunActivity jev_decision item) or "find:<audit_findings.id>". */
+  id: string;
+  at: string;
+  /**
+   * element = an element-specific question; action = the candidate's seo.action_choice (the UI shows it as
+   * its own row only when the candidate has no element row); rule = an audit finding of the run's crawl.
+   */
+  role: "element" | "action" | "rule";
+  /** decision_records.candidate_key (groups the rows of one candidate); null for rule rows. */
+  candidateKey: string | null;
+  /** URL path of the judged page (plain text); null for template- or site-scoped targets. */
+  pagePath: string | null;
+  url: string | null;
+  pageId: string | null;
+  /** Always set, e.g. "/products/oak-table", "Template: product pages (3 URLs)", "Site". Plain text. */
+  targetLabel: string;
+  element: LiveSeoElement;
+  /** Base question id for jev rows; the audit rule id (e.g. "SEO-META-DESC-MISSING") for rule rows. */
+  questionId: string;
+  /**
+   * Current stored value of the element from the page's snapshot in this run's crawl (else the latest
+   * snapshot), plain text clipped to 160; null when the element has no stored value.
+   */
+  now: string | null;
+  /** The candidate's drafted text (recommendations.suggested_snippet, clipped to 160); null until drafted or when none. */
+  proposed: string | null;
+  gsc: LiveGscMetrics | null;
+  /** null for rule rows. */
+  jev: LiveJevJudgment | null;
+  rule: { ruleId: string; severity: Severity; class: "fact" | "heuristic" } | null;
+  verdict: LiveSeoVerdict;
+  /** How the verdict was computed, plain text, e.g. "Noul 0.12, act tier: confident no", "Rule (fact)". */
+  verdictBasis: string;
+  /** Decision outcome; null for rule rows. */
+  outcome: "selected" | "rejected" | null;
+  reasonCode: string | null;
+  recommendationId: string | null;
+  /** Set when the row reused an internal link suggestion (candidate kind internal_link_suggestion). */
+  linkSuggestionId: string | null;
+}
+
+export type LiveQueryQuestion = "seo.query_relevance" | "seo.buyer_query" | "seo.buyer_ready" | "seo.query_intent";
+
+/** Panel "Queries classified by Jev": one stored answer about one search query. Group rows by `queryKey`. */
+export interface LiveSeoQueryRow {
+  /** "dec:<decision_records.id>". */
+  id: string;
+  at: string;
+  /** decision_records.candidate_key of the query (rows of one query share it). */
+  queryKey: string;
+  /** Plain text, clipped to 160 (stored answer_json.query, else parsed from the stored candidate key). */
+  query: string;
+  questionId: LiveQueryQuestion;
+  /** Noul band under the stored tier: act -> yes/no, flag -> middle; null for Choice answers or no usable answer. */
+  band: "yes" | "no" | "middle" | null;
+  jev: LiveJevJudgment;
+  gsc: LiveGscMetrics | null;
+}
+
+/** A recommendation created by the run (both agents). Stage and status are as stored at read time. */
+export interface LiveRecommendationRow {
+  /** "rec:<recommendations.id>". */
+  id: string;
+  recommendationId: string;
+  at: string; // created_at
+  agent: AgentKind;
+  scope: Scope;
+  issueType: string;
+  /** URL path, "Template: <name> (N URLs)" or "Site". Plain text. */
+  targetLabel: string;
+  url: string | null;
+  /** Plain text, clipped to 200. */
+  action: string;
+  suggestedSnippet: string | null;
+  stage: RecommendationStage;
+  status: RecommendationStatus;
+  /** Code-computed priority and its formula version (never a Jev value). */
+  priority: number;
+  priorityVersion: string;
+  effort: Level;
+  uncertainty: Level;
+  tier: Tier | null;
+  evidenceCount: number;
+  writer: { provider: string | null; model: string | null };
+}
+
+/** Candidates -> judged -> drafted -> approval, counted from the run's stored rows (whole run). */
+export interface LivePipelineTotals {
+  /** Distinct candidate keys with a decision row in this run (query-batch keys excluded). */
+  candidates: number;
+  /** Of those, candidates with at least one stored provider answer. */
+  judged: number;
+  /** Rejected candidates by stored reason_code (e.g. low_fit, duplicate, budget). */
+  rejectedByReason: Record<string, number>;
+  /** Recommendations created by this run, by current stage and status. */
+  created: number;
+  byStage: Record<RecommendationStage, number>;
+  byStatus: Record<RecommendationStatus, number>;
+}
+
+/** The run's Search Console sync (gsc_syncs.run_id), latest attempt. */
+export interface LiveGscSync {
+  id: string;
+  source: "api" | "csv_import" | "demo";
+  status: "running" | "completed" | "partial" | "failed" | "no_data";
+  window: DateWindow;
+  previousWindow: DateWindow;
+  rowsFetched: number;
+  rowCap: number;
+  truncated: boolean;
+  syncedAt: string;
+  /** Plain text, clipped to 200; null when none. */
+  error: string | null;
+}
+
+export interface LiveBandCounts {
+  yes: number;
+  no: number;
+  middle: number;
+  /** Stored without a usable answer (drop tier or no answer). */
+  unanswered: number;
+}
+
+/** GET /projects/:pid/live/seo?runId=&after=&limit= */
+export interface LiveSeoBoardResponse {
+  run: RunActivity["run"];
+  active: boolean;
+  /** Each list ascending by (at, id); merge pages by id. */
+  elements: LiveSeoElementRow[];
+  queries: LiveSeoQueryRow[];
+  recommendations: LiveRecommendationRow[];
+  gscSync: LiveGscSync | null;
+  /** Whole run, regardless of `after`. */
+  totals: {
+    elements: {
+      judged: number;
+      keep: number;
+      change: number;
+      review: number;
+      byElement: Partial<Record<LiveSeoElement, { keep: number; change: number; review: number }>>;
+    };
+    queries: { distinct: number; relevance: LiveBandCounts; buyer: LiveBandCounts; buyerReady: LiveBandCounts; intent: Record<string, number> };
+    pipeline: LivePipelineTotals;
+    /** True when a whole-run scan hit its cap (docs/api.md "Live view"); counts are then lower bounds. */
+    truncated: boolean;
+  };
+  /** Opaque; pass as ?after= for newer rows only. */
+  cursor: string | null;
+  labels: string[];
+}
+
+/** One stored engine answer of the run, with the fields the engine columns need. */
+export interface LiveGeoAnswerRow {
+  /** "obs:<geo_observations.id>" (same id as the RunActivity engine_answer item). */
+  id: string;
+  observationId: string;
+  at: string;
+  provider: BoardLaneProviderId;
+  promptId: string | null;
+  /** Plain text, clipped to 300. */
+  promptText: string;
+  /** Same definition as RunActivity (answerOutcome); null = stored but not analysed yet (genuinely pending). */
+  outcome: "cited" | "named" | "missing" | "failed" | null;
+  grounded: boolean;
+  latencyMs: number | null;
+  cost: CostUsd;
+  /** Self brand row list_rank, only for a real ordered list. */
+  position: number | null;
+  sentiment: { value: Sentiment; method: string } | null;
+  recommendationStatus: RecommendationStatusInAnswer | null;
+  /** First non-own citation by position. */
+  citedInstead: { host: string; url: string | null; sourceType: SourceType } | null;
+  /** First own-site citation URL, when cited. */
+  ownCitedUrl: string | null;
+  citationCount: number;
+  /** Engine search queries stored for this answer; null when the provider does not expose them. */
+  searchQueryCount: number | null;
+  /** Our best page for the prompt (coverage/answer-coverage.ts matchPrompt over the latest crawl); null when none matches. */
+  matchedPage: { pageId: string | null; url: string; method: "engine_search_query" | "title_heading_overlap"; score: number } | null;
+}
+
+/** This run's answers of one engine lane, by outcome (lanes themselves come from RunActivity). */
+export interface LiveGeoLaneTotals {
+  provider: BoardLaneProviderId;
+  cited: number;
+  named: number;
+  missing: number;
+  failed: number;
+  /** Stored 'ok' answers not analysed yet. */
+  pending: number;
+  /** Sum of the run's observation costs for this lane; value null when any is unknown. */
+  cost: CostUsd;
+  /** Host most often first-cited in this lane's missing or named answers; answers = how many. */
+  citedInstead: { host: string; sourceType: SourceType; answers: number } | null;
+}
+
+/** GET /projects/:pid/live/geo?runId=&after=&limit= */
+export interface LiveGeoBoardResponse {
+  run: RunActivity["run"];
+  active: boolean;
+  /** Ascending by (at, id); merge pages by id (a held answer can arrive later with its outcome, same id). */
+  answers: LiveGeoAnswerRow[];
+  /**
+   * Prompts the run samples (same selection as geo/batch.ts: approved prompts of the run's set by position,
+   * capped per run). Sent only when `after` is absent; null on later pages or when unknown.
+   */
+  plannedPrompts: Array<{ promptId: string; text: string }> | null;
+  recommendations: LiveRecommendationRow[];
+  /** Whole run, regardless of `after`. */
+  totals: { lanes: LiveGeoLaneTotals[]; pipeline: LivePipelineTotals; truncated: boolean };
+  cursor: string | null;
+  labels: string[];
 }

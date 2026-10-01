@@ -14,6 +14,7 @@ import { Link } from "react-router";
 import { projectPath } from "@web/lib/project-context";
 import { agentLabel } from "@web/lib/format";
 import { cx } from "@web/components/ui";
+import { CUSTOM_ENGINE_NOTE, apiSampledTipFor, isCustomEngine, lanesApiSampledTip } from "@web/pages/geo/board/lib";
 import {
   LABELS,
   LANE_STATE,
@@ -352,6 +353,9 @@ export function LaneCard({
           >
             {[clip(lane.label, 80), model].filter(Boolean).join(" · ")}
           </p>
+          {isCustomEngine(lane.provider) && (
+            <p className="text-[11px] font-medium leading-snug text-amber-800 dark:text-amber-300">{CUSTOM_ENGINE_NOTE}</p>
+          )}
         </div>
       </div>
       <div className="mt-2.5">
@@ -507,7 +511,7 @@ export function Lanes({
         AI engines
         <span
           className="text-[11px] font-normal text-zinc-500 dark:text-zinc-400"
-          title={LABELS.apiSampledTip}
+          title={lanesApiSampledTip(lanes)}
         >
           {LABELS.apiSampled}
         </span>
@@ -611,7 +615,7 @@ export function FeedItem({
           <span>{meta}</span>
           {latency && <time dateTime={item.at}>{timeOf(item.at)}</time>}
           {item.kind === "engine_answer" && (
-            <span title={LABELS.apiSampledTip}>{LABELS.apiSampled}</span>
+            <span title={apiSampledTipFor(item.provider)}>{LABELS.apiSampled}</span>
           )}
         </p>
       )}

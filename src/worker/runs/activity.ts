@@ -27,7 +27,6 @@ import type {
   ActivityItem,
   ActivityLane,
   ActivityQueuedItem,
-  GeoEngineProviderId,
   RunActivity,
 } from "@shared/types";
 import type { Db } from "../lib/db";
@@ -39,6 +38,7 @@ import { selfDomains } from "../geo/detect";
 import { BOARD_LANES, LANE_LABELS } from "../geo/board";
 import { DEFAULT_PROMPTS_PER_RUN } from "../geo/batch";
 import { isGeoEngineId } from "../geo/engines";
+import { CUSTOM_GEO_NOTE, customGeoLabelFor, customGeoLabels, isCustomGeoId } from "../geo/custom-lanes";
 
 export const ACTIVITY_DEFAULT_LIMIT = 80;
 export const ACTIVITY_MAX_LIMIT = 200;
@@ -342,7 +342,8 @@ interface CitationInfo {
 
 function obsItem(r: ObsRow, cites: CitationInfo | undefined, latencyMs: number | null): ActivityItem {
   const outcome = answerOutcome({ status: r.status, analysed: r.analysed === 1, selfCited: r.self_cited === 1, selfMentioned: r.self_mentioned === 1 });
-  const engine = ENGINE_NAME[r.provider] ?? r.provider;
+  const custom = isCustomGeoId(r.provider);
+  const engine = ENGINE_NAME[r.provider] ?? (custom ? "Custom engine" : r.provider);
   const prompt = clip(r.prompt_text, TITLE_MAX);
   const verb = outcome === "failed" ? (r.status === "incomplete" ? "returned an incomplete answer" : "failed") : "answered";
   const title = clip(`${engine} ${verb}: "${prompt}"`, TITLE_MAX);
@@ -369,6 +370,8 @@ function obsItem(r: ObsRow, cites: CitationInfo | undefined, latencyMs: number |
       detail = "Answer stored · awaiting analysis";
       status = "info";
   }
+  // A custom GEO engine requests no web search: say so on every answer it gave.
+  if (custom) detail = `${detail} · ${CUSTOM_GEO_NOTE}`;
   return {
     id: `obs:${r.id}`,
     at: r.created_at,
@@ -434,8 +437,11 @@ export interface BuildActivityOptions {
   after?: ActivityCursor | null;
   limit?: number;
   now: Date;
-  /** GEO engines configured for the workspace now (presence only); used for lanes of an active run. */
-  configuredEngines?: readonly GeoEngineProviderId[];
+  /**
+   * GEO engines configured for the workspace now (presence only), including custom GEO engines
+   * ("custom_geo:<id>"); used for lanes of an active run.
+   */
+  configuredEngines?: readonly string[];
 }
 
 /** Returns null when the run does not exist in this workspace + project. */
@@ -721,7 +727,7 @@ async function buildLanes(
   obs: ObsRow[],
   laneEvents: LaneEventRow[],
   latencyOf: (o: ObsRow) => number | null,
-  configured: readonly GeoEngineProviderId[],
+  configured: readonly string[],
 ): Promise<{ lanes: ActivityLane[]; queued: ActivityQueuedItem[] }> {
   // Events arrive in ascending order; state is ASSIGNED per event (not latched) so a retried step that
   // logs 'started' again after an earlier failed/partial attempt reads as asking again.
@@ -744,9 +750,12 @@ async function buildLanes(
       finished.add(p);
     }
   }
-  const seen = new Set<string>([...obs.map((o) => o.provider), ...started, ...finished].filter(isGeoEngineId));
+  const seen = new Set<string>([...obs.map((o) => o.provider), ...started, ...finished].filter((p) => isGeoEngineId(p) || isCustomGeoId(p)));
   const include = new Set<string>([...seen, ...(active ? configured : [])]);
-  const order = BOARD_LANES.filter((p) => include.has(p));
+  const customIds = [...include].filter(isCustomGeoId).sort();
+  const order: string[] = [...BOARD_LANES.filter((p) => include.has(p)), ...customIds];
+  const customLabels = customIds.length > 0 ? await customGeoLabels(db, ws) : new Map<string, string>();
+  const laneLabel = (p: string) => (isGeoEngineId(p) ? LANE_LABELS[p] : customGeoLabelFor(p, customLabels));
 
   // The run's prompt set: the one its answers were sampled from; while active and before any answer, the
   // project's active set (the one geo/batch.ts reads).
@@ -810,7 +819,7 @@ async function buildLanes(
     else if (!active || batchFinished) state = rows.length > 0 ? "done" : "idle";
     else if (started.has(provider) || rows.length > 0) state = "asking";
     else state = "queued";
-    return { provider, label: LANE_LABELS[provider], state, done: rows.length, planned, lastLatencyMs };
+    return { provider, label: laneLabel(provider), state, done: rows.length, planned, lastLatencyMs };
   });
 
   const queued: ActivityQueuedItem[] = [];

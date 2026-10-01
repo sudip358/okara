@@ -30,6 +30,7 @@ export type BadgeTone = "neutral" | "success" | "warning" | "danger" | "info" | 
 export const LABELS = {
   apiSampled: "API-sampled",
   apiSampledTip: "Answers from the provider's API with web search; consumer apps may answer differently.",
+  customApiSampledTip: "Answers from the custom provider's API, without web search; consumer apps may answer differently.",
   measured: "Measured from crawl",
   heuristic: "Heuristic",
   jev: "Jev judgment",
@@ -52,15 +53,54 @@ const ENGINE_META: Record<GeoEngineProviderId, { name: string; vendor: string; g
   perplexity: { name: "Perplexity", vendor: "Perplexity", glyph: "P" },
 };
 
+/** Workspace custom GEO engine lanes ("custom_geo:<id>"): ungrounded, mention rate only. */
+export const CUSTOM_ENGINE_NOTE = "Custom · no web search proof · mention rate only";
+export function isCustomEngine(provider: string): boolean {
+  return provider.startsWith("custom_geo:");
+}
+const CUSTOM_META = { name: "Custom engine", vendor: "the custom provider", glyph: "C" };
+
+/** Body note for a custom lane: only the prompt feed is shown (no citation-based sections). */
+export const CUSTOM_LANE_BODY_NOTE =
+  "Custom engine: no web search is requested, so cited pages, skip factors and rewrite plans are not available for this lane (mention rate only).";
+/** Replaces the citation gauge on a custom lane. */
+export const CUSTOM_CITATION_NOT_MEASURED = "Citation rate: not measured (no web search proof)";
+
+/** "API-sampled" tooltip for a lane: custom engines get their own (no web search). */
+export function apiSampledTipFor(provider: string | null | undefined): string {
+  return provider && isCustomEngine(provider) ? LABELS.customApiSampledTip : LABELS.apiSampledTip;
+}
+
+/**
+ * "API-sampled" tooltip for a group of lanes (activity window): built-in engines use web search, custom GEO
+ * engines do not, so a group with custom lanes never claims web search for them.
+ */
+export function lanesApiSampledTip(lanes: ReadonlyArray<{ provider: string }>): string {
+  const custom = lanes.some((l) => isCustomEngine(l.provider));
+  const builtIn = lanes.some((l) => !isCustomEngine(l.provider));
+  if (custom && !builtIn) return LABELS.customApiSampledTip;
+  if (custom) return `${LABELS.apiSampledTip} Custom engines: ${LABELS.customApiSampledTip}`;
+  return LABELS.apiSampledTip;
+}
+
+/** Mention stat for a custom lane: "Named in X of Y", or unavailable without valid answers (never 0 of 0). */
+export function mentionStatText(r: Ratio): string {
+  if (r.denominator <= 0) return "Unavailable (no valid answers)";
+  return `Named in ${formatNumber(r.numerator)} of ${formatNumber(r.denominator)}`;
+}
+
 /** API name of the engine. Never "ChatGPT" / "Claude app": these are API answers. */
 export function engineName(provider: string): string {
+  if (isCustomEngine(provider)) return CUSTOM_META.name;
   return (ENGINE_META as Record<string, { name: string }>)[provider]?.name ?? provider;
 }
 export function engineVendor(provider: string): string {
+  if (isCustomEngine(provider)) return CUSTOM_META.vendor;
   return (ENGINE_META as Record<string, { vendor: string }>)[provider]?.vendor ?? provider;
 }
 /** Plain monochrome glyph letter per vendor (no brand logos). */
 export function engineGlyph(provider: string): string {
+  if (isCustomEngine(provider)) return CUSTOM_META.glyph;
   return (ENGINE_META as Record<string, { glyph: string }>)[provider]?.glyph ?? (provider.charAt(0).toUpperCase() || "?");
 }
 

@@ -13,9 +13,13 @@
  *
  * The host is chosen by the workspace owner, not the operator: `fetchImpl` must be the guarded API fetch with
  * only that host admitted (redirects are never followed), the body read is capped, provider error bodies are
- * never stored (only the HTTP status), and the key is scrubbed from every message.
+ * never stored (only the HTTP status), and the key is scrubbed from every message. The response's `model`
+ * and `id` are untrusted too: every answer records the CONFIGURED model (so the cohort key, and with it the
+ * trend series, is fixed by the owner's selection and not by what the host reports), and the request id is
+ * kept only when it is at most 200 characters without control characters.
  */
 import { readCapped } from "../lib/read-capped";
+import { cleanModelId } from "../platform/custom-providers";
 import type { GeoAnswerWithOutcome, GeoCallOutcome, GeoProviderAdapter } from "./rates";
 import { GEO_CALL_TIMEOUT_MS, neutralInstruction, scrub } from "./rates";
 import { CUSTOM_GEO_GROUNDING_MODE } from "../geo/custom-lanes";
@@ -64,7 +68,8 @@ export function parseCustomGeoResponse(body: unknown): ParsedCustomGeo {
   const text = typeof content === "string" ? content : null;
   const finishReason = str(choice?.finish_reason);
   const usage = { inputTokens: num(b.usage?.prompt_tokens), outputTokens: num(b.usage?.completion_tokens) };
-  const base = { model: str(b.model), requestId: str(b.id), finishReason, usage };
+  // Untrusted host strings: bounded (200 characters, no control characters) or dropped.
+  const base = { model: cleanModelId(b.model), requestId: cleanModelId(b.id), finishReason: cleanModelId(choice?.finish_reason), usage };
   if (!choice) return { ...base, status: "failed", text: null, error: "Custom provider returned no choices." };
   if (str(choice.message?.refusal) && !text?.trim()) return { ...base, status: "failed", text: null, error: "The custom provider's model declined to answer." };
   if (!text || !text.trim()) return { ...base, status: "failed", text: null, error: "Custom provider returned no answer text." };
@@ -162,7 +167,8 @@ export function createCustomGeoProvider(cfg: CustomGeoProviderConfig): GeoProvid
         status: p.status,
         outcome: "ok",
         text: p.text,
-        model: p.model ?? model,
+        // The configured model, never the host-reported one (see the header).
+        model,
         requestId: p.requestId,
         usage: { inputTokens: p.usage.inputTokens, outputTokens: p.usage.outputTokens, searchRequests: null },
         error: p.error ? scrub(p.error, cfg.apiKey) : null,

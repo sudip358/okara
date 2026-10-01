@@ -3,11 +3,12 @@
  * Secrets are never exported: no oauth_connections.refresh_token_enc, no provider_credentials, no OAuth
  * states, no project verification token, no custom provider key (key_enc) or key hint. `_json` columns are
  * decoded for readability. The workspace's custom providers (base URL, model, writer selection) are
- * included as workspace-level integration metadata, selected column by column.
+ * included as workspace-level integration metadata, selected column by column, as is the workspace's model
+ * selection for the built-in providers (workspace_provider_models: provider and model id only).
  */
 import type { Db, Row } from "../lib/db";
 import { iso } from "../lib/time";
-import { isMissingTableError } from "./custom-providers";
+import { isMissingRoleColumnError, isMissingTableError } from "./custom-providers";
 
 export const EXPORT_FORMAT = "okara-project-export";
 export const EXPORT_VERSION = 1;
@@ -81,15 +82,30 @@ export async function exportProject(db: Db, workspaceId: string, projectId: stri
   );
   tables.oauth_connections = integrations;
   // Workspace-level custom providers: configuration only; key_enc and key_hint are never selected.
+  // role (0011) says whether a row is a writer or a custom GEO engine.
+  const customCols = (withRole: boolean) =>
+    `SELECT id, ${withRole ? "role" : "'writer' AS role"}, label, base_url, host, model, is_writer, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at
+       FROM workspace_custom_providers WHERE workspace_id = ? ORDER BY created_at, id`;
   try {
-    tables.workspace_custom_providers = await db.all(
-      `SELECT id, label, base_url, host, model, is_writer, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at
-         FROM workspace_custom_providers WHERE workspace_id = ? ORDER BY created_at, id`,
+    try {
+      tables.workspace_custom_providers = await db.all(customCols(true), workspaceId);
+    } catch (e) {
+      if (!isMissingRoleColumnError(e)) throw e;
+      tables.workspace_custom_providers = await db.all(customCols(false), workspaceId);
+    }
+  } catch (e) {
+    if (!isMissingTableError(e)) throw e;
+    tables.workspace_custom_providers = [];
+  }
+  // Workspace model selection (0011): provider and model id only.
+  try {
+    tables.workspace_provider_models = await db.all(
+      "SELECT provider, model, updated_at FROM workspace_provider_models WHERE workspace_id = ? ORDER BY provider",
       workspaceId,
     );
   } catch (e) {
     if (!isMissingTableError(e)) throw e;
-    tables.workspace_custom_providers = [];
+    tables.workspace_provider_models = [];
   }
   return {
     format: EXPORT_FORMAT,

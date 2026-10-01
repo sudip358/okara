@@ -1,8 +1,29 @@
-/** Lane header (design §2): engine name, exact model, grounding, citation-rate gauge, stats. No brand logos. */
+/**
+ * Lane header (design §2): engine name, exact model, grounding, citation-rate gauge, stats. No brand logos.
+ * A custom GEO engine lane has no web search, so it shows its mention rate instead of a citation gauge and no
+ * citation-based stats ("Citation rate: not measured").
+ */
 import type { EngineLaneSummary, Ratio } from "@shared/types";
 import { formatDateTime, formatNumber, formatRelative } from "@web/lib/format";
 import { Badge, StateBadge } from "@web/components/ui";
-import { GAUGE, LABELS, citedInsteadShare, costDisplay, countsLine, engineGlyph, engineName, gaugeAriaLabel, gaugePaths, gaugeText, searchQueriesLine } from "./lib";
+import {
+  CUSTOM_CITATION_NOT_MEASURED,
+  CUSTOM_ENGINE_NOTE,
+  GAUGE,
+  LABELS,
+  apiSampledTipFor,
+  citedInsteadShare,
+  costDisplay,
+  countsLine,
+  engineGlyph,
+  engineName,
+  gaugeAriaLabel,
+  gaugePaths,
+  gaugeText,
+  isCustomEngine,
+  mentionStatText,
+  searchQueriesLine,
+} from "./lib";
 
 export function CitationGauge({ rate }: { rate: Ratio }) {
   const g = gaugePaths(rate);
@@ -38,6 +59,7 @@ function Stat({ label, value, title, sub }: { label: string; value: string; titl
 export function LaneHeader({ lane, showMetrics }: { lane: EngineLaneSummary; showMetrics: boolean }) {
   const cost = costDisplay(lane.costUsd);
   const name = engineName(lane.provider);
+  const custom = isCustomEngine(lane.provider);
   return (
     <header className="min-w-0 space-y-3">
       <div className="flex min-w-0 items-start gap-2">
@@ -59,9 +81,14 @@ export function LaneHeader({ lane, showMetrics }: { lane: EngineLaneSummary; sho
       </div>
       <div className="flex flex-wrap items-center gap-1.5">
         <StateBadge state={lane.state} />
-        <Badge tone="info" title={LABELS.apiSampledTip}>
+        <Badge tone="info" title={apiSampledTipFor(lane.provider)}>
           {LABELS.apiSampled}
         </Badge>
+        {custom && (
+          <Badge tone="warning" className="whitespace-normal" title="No web search is requested; answers count toward mention rate only, never citation rate.">
+            {CUSTOM_ENGINE_NOTE}
+          </Badge>
+        )}
         {lane.smallSampleWarning && (
           <Badge tone="warning" className="whitespace-normal">
             Small sample – do not read changes as trends
@@ -72,7 +99,19 @@ export function LaneHeader({ lane, showMetrics }: { lane: EngineLaneSummary; sho
         </span>
       </div>
 
-      {showMetrics && (
+      {showMetrics && custom && (
+        <>
+          <dl className="grid grid-cols-2 gap-x-3 gap-y-2">
+            <Stat label="Mention rate" value={mentionStatText(lane.mentionRate)} title="Valid answers that name your brand" />
+            <Stat label="Answers skipping us" value={formatNumber(lane.answersSkippingUs)} title="Valid answers that do not name you" />
+            <Stat label="Cost (latest cohort)" value={cost.value} sub={cost.basis} />
+          </dl>
+          <p className="text-[11px] text-zinc-600 dark:text-zinc-400">{CUSTOM_CITATION_NOT_MEASURED}</p>
+          <p className="text-[11px] text-zinc-600 dark:text-zinc-400">{countsLine(lane.counts)}</p>
+          {lane.cohortKey && <p className="break-all text-[11px] text-zinc-500 dark:text-zinc-400">Cohort {lane.cohortKey}</p>}
+        </>
+      )}
+      {showMetrics && !custom && (
         <>
           <CitationGauge rate={lane.citationRate} />
           <dl className="grid grid-cols-2 gap-x-3 gap-y-2">

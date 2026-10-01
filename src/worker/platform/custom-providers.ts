@@ -1,7 +1,9 @@
 /**
  * Workspace custom providers: an OpenAI-compatible endpoint (OpenRouter, Groq, Together, DeepSeek, Mistral,
  * a self-hosted gateway, ...) that the workspace owner adds with a base URL, an API key and a model id, and
- * selects as the workspace's writer. Table: workspace_custom_providers (migration 0010).
+ * selects as the workspace's writer (role 'writer'), or adds as a custom GEO engine lane (role 'geo', at most
+ * 2; ungrounded, mention rate only; see geo/custom-lanes.ts). Table: workspace_custom_providers (migrations
+ * 0010, 0011 adds `role`). A GEO row is never the writer.
  *
  * Safety rules (CLAUDE.md, build kit SSRF rules):
  *  - The base URL is validated before it is stored and again before every use: https only, no credentials,
@@ -43,9 +45,13 @@ export function isMissingTableError(e: unknown): boolean {
   return /no such table/i.test(String((e as Error)?.message ?? e));
 }
 
-/** True when workspace_custom_providers has no `role` column yet (code deployed before migration 0011). */
+/**
+ * True when workspace_custom_providers has no `role` column yet (code deployed before migration 0011). SQLite
+ * (and D1) report a missing column as "no such column: role" in a SELECT / WHERE, but as "table ... has no
+ * column named role" in an INSERT column list; both must take the pre-0011 fallback.
+ */
 export function isMissingRoleColumnError(e: unknown): boolean {
-  return /no such column:?\s*"?role/i.test(String((e as Error)?.message ?? e));
+  return /no such column:?\s*"?role\b|has no column named "?role\b/i.test(String((e as Error)?.message ?? e));
 }
 
 // ------------------------------------------------------------------ base URL validation
@@ -325,10 +331,16 @@ export async function fetchModelList(fetchImpl: typeof fetch, baseUrl: string, a
 }
 
 /** Test-button semantics (same as the other key tests), plus a note when the saved model is not listed. */
-export async function testCustomProvider(fetchImpl: typeof fetch, baseUrl: string, apiKey: string, model: string): Promise<{ ok: boolean | null; detail: string }> {
+export async function testCustomProvider(
+  fetchImpl: typeof fetch,
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  finalCheck = "the first draft",
+): Promise<{ ok: boolean | null; detail: string }> {
   const r = await fetchModelList(fetchImpl, baseUrl, apiKey);
   if (r.ok !== true) return { ok: r.ok, detail: r.detail };
-  let detail = "Model list request succeeded; the key was not rejected (some providers list models without checking the key, so the first draft is the final check).";
+  let detail = `Model list request succeeded; the key was not rejected (some providers list models without checking the key, so ${finalCheck} is the final check).`;
   if (r.models.length > 0 && !r.truncated && !r.models.includes(model)) {
     detail += ` The saved model id is not in the provider's model list; check it.`;
   } else if (r.models.includes(model)) {

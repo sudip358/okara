@@ -205,7 +205,7 @@ describe("GEO_ENGINE_IDS drives GEO readiness, results lanes and the checklist p
     const pid2 = await seedProject(bare, u2.workspaceId);
     await seedPromptSet(bare, { id: pid2, workspaceId: u2.workspaceId }, ["Where can I buy solid brass cabinet hardware?"]);
     const none = (await makeApp(bare, u2.userId)("GET", `/projects/${pid2}/geo/results`)).json.data as GeoResults;
-    expect(none.labels).toContain("Setup required: configure a GEO provider key and model (OpenAI, Anthropic, Gemini or Perplexity).");
+    expect(none.labels).toContain("Setup required: configure a GEO provider key and model (OpenAI, Anthropic, Gemini or Perplexity), or add a custom GEO engine.");
   });
 
   it("checklist GEO data lists every GEO engine provider and nothing else", async () => {

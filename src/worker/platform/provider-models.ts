@@ -27,6 +27,15 @@
  *
  * A list cannot prove that a model supports the feature a lane needs (web search, grounding): no capability
  * flag is invented. The UI says "Must support <feature>; the Test run will tell you".
+ *
+ * Operator-key spend guard (modelForKeySource): before this feature only the operator chose the model that
+ * runs on the operator's key. A model without a verified price in providers/rates.ts reserves and settles a
+ * flat UNKNOWN_RATE_RESERVE_USD_MICROS per call whatever it really costs, so the operator's
+ * GLOBAL_USD_MICROS_PER_DAY cap would undercount. On the operator key a workspace's selection is therefore
+ * honoured only when its price is verified (or it is the operator's own env model); otherwise no lane is built
+ * and the card shows setup_required ("add your own key"). TypeSafe on the operator key ignores the workspace's
+ * selection (TYPESAFE_MODEL, else jev-latest). Model lists fetched with the operator key show only priced ids
+ * (and, for OpenAI, no fine-tuned or org-owned models), so the operator's private model names never leak.
  */
 import type { ModelSelectableProviderId, ModelSource, ProviderModelList, ProviderModelOption } from "@shared/types";
 import type { Env } from "../env";
@@ -52,6 +61,15 @@ export const MODEL_ENV: Record<ModelSelectableProviderId, "TYPESAFE_MODEL" | "GE
   perplexity: "PERPLEXITY_MODEL",
   openai_geo: "OPENAI_GEO_MODEL",
   anthropic_geo: "ANTHROPIC_GEO_MODEL",
+};
+
+/** Vendor names used in list details and guard messages. */
+const NAME: Record<ModelSelectableProviderId, string> = {
+  typesafe: "TypeSafe",
+  gemini: "Gemini",
+  perplexity: "Perplexity",
+  openai_geo: "OpenAI",
+  anthropic_geo: "Anthropic",
 };
 
 /** The feature each lane needs from the model (shown as "Must support <feature>"); null = nothing special. */
@@ -161,6 +179,74 @@ export function rateKnownFor(provider: ModelSelectableProviderId, model: string 
   return findRate(provider, model, at) !== null;
 }
 
+// ------------------------------------------------------------------ operator-key spend guard
+
+/** Which key a provider would use for the workspace (platform/credentials.ts); null or "none" = no key. */
+export type ModelKeySource = "workspace_key" | "operator_key" | "none" | null;
+
+export interface ModelInUse extends ResolvedModel {
+  /**
+   * Plain-text reason why the workspace's selection cannot run on the operator key (no lane is built; the
+   * card and the board show setup_required with this text). null when the model can be used.
+   */
+  blocked: string | null;
+  /** TypeSafe only: the workspace's selection, which the operator key ignores. null otherwise. */
+  ignoredSelection: string | null;
+}
+
+/** "<Vendor> model <id> has no verified price and this workspace uses the operator key; add your own <Vendor> key to use it." */
+export function operatorKeyUnpricedMessage(provider: ModelSelectableProviderId, model: string): string {
+  return `${NAME[provider]} model ${model} has no verified price and this workspace uses the operator key; add your own ${NAME[provider]} key to use it.`;
+}
+
+/** Shown when a TypeSafe selection is ignored because the operator key is in use. */
+export function typesafeOperatorKeyNote(selection: string): string {
+  return `This workspace's TypeSafe model (${selection}) applies only with your own TypeSafe key; with the operator key the operator's model is used.`;
+}
+
+/**
+ * The model a provider really uses with `keySource` (workspace selection > env > none, TypeSafe > jev-latest),
+ * applying the operator-key spend guard:
+ *   - workspace key, or no key: the resolved model as is;
+ *   - operator key and a workspace selection equal to the operator's env model: allowed (the operator chose it);
+ *   - operator key and a TypeSafe selection: ignored, the operator's model (TYPESAFE_MODEL, else jev-latest);
+ *   - operator key and a GEO engine selection without a verified rate (providers/rates.ts findRate at `at`):
+ *     blocked (unpriced calls would reserve and settle only the flat unknown-rate amount against the
+ *     operator's global usd cap).
+ */
+export function modelForKeySource(
+  env: Partial<Pick<Env, (typeof MODEL_ENV)[ModelSelectableProviderId]>>,
+  saved: WorkspaceModels,
+  provider: ModelSelectableProviderId,
+  keySource: ModelKeySource | undefined,
+  at: Date = new Date(),
+): ModelInUse {
+  const r = resolveModel(env, saved, provider);
+  const usable = (m: ResolvedModel, ignoredSelection: string | null = null): ModelInUse => ({ ...m, blocked: null, ignoredSelection });
+  if (keySource !== "operator_key" || r.source !== "workspace" || !r.model) return usable(r);
+  const operator = resolveModel(env, {}, provider);
+  if (operator.model === r.model) return usable(r);
+  if (provider === "typesafe") return usable(operator, r.model);
+  if (findRate(provider, r.model, at) !== null) return usable(r);
+  return { ...r, blocked: operatorKeyUnpricedMessage(provider, r.model), ignoredSelection: null };
+}
+
+/**
+ * Save-time check for PUT /credentials/:provider/model when the workspace has no key of its own and the
+ * operator key would be used: null = allowed; otherwise the 400 reason and message (never echoing the id).
+ */
+export function operatorKeyModelRefusal(
+  env: Partial<Pick<Env, (typeof MODEL_ENV)[ModelSelectableProviderId]>>,
+  provider: ModelSelectableProviderId,
+  model: string,
+  at: Date = new Date(),
+): { reason: "operator_key_unpriced" | "operator_key_model"; message: string } | null {
+  const use = modelForKeySource(env, { [provider]: model }, provider, "operator_key", at);
+  if (use.blocked) return { reason: "operator_key_unpriced", message: "Add your own API key to use a model without a verified price." };
+  if (use.ignoredSelection) return { reason: "operator_key_model", message: "TypeSafe uses the operator's model with the operator key; add your own TypeSafe API key to choose a model." };
+  return null;
+}
+
 // ------------------------------------------------------------------ model lists
 
 export type ModelListCore = Omit<ProviderModelList, "keySource" | "mustSupport">;
@@ -191,11 +277,39 @@ const cleanLabelText = (v: unknown): string | null => {
   return t ? t.slice(0, MAX_LABEL_CHARS) : null;
 };
 
+/** OpenAI `owned_by` values of OpenAI's own models; anything else ("org-...", "user-...") is an account's own model. */
+const OPENAI_FIRST_PARTY_OWNERS: ReadonlySet<string> = new Set(["openai", "system", "openai-internal"]);
+
+/**
+ * Whether a listed id may be shown when the list was fetched with the OPERATOR key: only ids with a verified
+ * rate (the only ones a workspace may run on that key), and for OpenAI never a fine-tuned ("ft:") or
+ * account-owned model (its name would disclose the operator's organisation and private models).
+ */
+function listableWithOperatorKey(provider: ModelSelectableProviderId, id: string, entry: Record<string, unknown>, at: Date): boolean {
+  if (provider === "openai_geo") {
+    if (id.toLowerCase().startsWith("ft:")) return false;
+    if (typeof entry.owned_by !== "string" || !OPENAI_FIRST_PARTY_OWNERS.has(entry.owned_by)) return false;
+  }
+  return findRate(provider, id, at) !== null;
+}
+
+export interface ModelListParseOptions {
+  /** The list was fetched with the operator's key: keep only ids listableWithOperatorKey allows. */
+  operatorKey?: boolean;
+  /** Date for the rate lookup (default now). */
+  at?: Date;
+}
+
 /**
  * Model options from a provider's documented list body. `recognized` is false when the body does not have
  * the documented shape (then it is not a model list). `more` is true when the provider says more pages exist.
+ * `filtered` counts distinct valid ids left out by the operator-key rule.
  */
-export function parseProviderModelList(provider: ModelSelectableProviderId, json: unknown): { options: ProviderModelOption[]; total: number; truncated: boolean; recognized: boolean; more: boolean } {
+export function parseProviderModelList(
+  provider: ModelSelectableProviderId,
+  json: unknown,
+  opts: ModelListParseOptions = {},
+): { options: ProviderModelOption[]; total: number; truncated: boolean; recognized: boolean; more: boolean; filtered: number } {
   const o = json && typeof json === "object" && !Array.isArray(json) ? (json as Record<string, unknown>) : null;
   let items: unknown[] | null = null;
   let more = false;
@@ -208,8 +322,10 @@ export function parseProviderModelList(provider: ModelSelectableProviderId, json
       if (provider === "anthropic_geo" && o.has_more === true) more = true;
     }
   }
-  if (!items) return { options: [], total: 0, truncated: false, recognized: false, more: false };
+  if (!items) return { options: [], total: 0, truncated: false, recognized: false, more: false, filtered: 0 };
+  const at = opts.at ?? new Date();
   const byId = new Map<string, string>();
+  const filtered = new Set<string>();
   for (const it of items.slice(0, MAX_ENTRIES_SCANNED)) {
     if (!it || typeof it !== "object") continue;
     const r = it as Record<string, unknown>;
@@ -235,6 +351,10 @@ export function parseProviderModelList(provider: ModelSelectableProviderId, json
     }
     const id = normalizeModelId(provider, rawId);
     if (!id || byId.has(id)) continue;
+    if (opts.operatorKey && !listableWithOperatorKey(provider, id, r, at)) {
+      filtered.add(id);
+      continue;
+    }
     byId.set(id, label && label !== id ? `${label} (${id})` : id);
   }
   const sorted = [...byId.entries()]
@@ -244,22 +364,23 @@ export function parseProviderModelList(provider: ModelSelectableProviderId, json
       const lb = b.id.toLowerCase();
       return la < lb ? -1 : la > lb ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
     });
-  return { options: sorted.slice(0, MAX_MODELS_RETURNED), total: sorted.length, truncated: sorted.length > MAX_MODELS_RETURNED, recognized: true, more };
+  return { options: sorted.slice(0, MAX_MODELS_RETURNED), total: sorted.length, truncated: sorted.length > MAX_MODELS_RETURNED, recognized: true, more, filtered: filtered.size };
 }
 
-const NAME: Record<ModelSelectableProviderId, string> = {
-  typesafe: "TypeSafe",
-  gemini: "Gemini",
-  perplexity: "Perplexity",
-  openai_geo: "OpenAI",
-  anthropic_geo: "Anthropic",
-};
+export const OPERATOR_KEY_LIST_NOTE = "Only models with a verified price are listed with the operator key; add your own key to see all models.";
 
 /**
  * GET the provider's model list with `apiKey`. `fetchImpl` must be the guarded API fetch. The key goes only
- * in a header. The body is never echoed; only validated ids and display names are returned.
+ * in a header. The body is never echoed; only validated ids and display names are returned. With
+ * `operatorKey` (the key is the operator's) only ids a workspace may run on that key are returned.
  */
-export async function listProviderModels(provider: ModelSelectableProviderId, apiKey: string, fetchImpl: typeof fetch, timeoutMs = MODEL_LIST_TIMEOUT_MS): Promise<ModelListCore> {
+export async function listProviderModels(
+  provider: ModelSelectableProviderId,
+  apiKey: string,
+  fetchImpl: typeof fetch,
+  opts: { operatorKey?: boolean; timeoutMs?: number; at?: Date } = {},
+): Promise<ModelListCore> {
+  const timeoutMs = opts.timeoutMs ?? MODEL_LIST_TIMEOUT_MS;
   const fail = (ok: boolean | null, detail: string): ModelListCore => ({ ok, detail, models: [], total: 0, truncated: false });
   const { url, headers } = listRequest(provider, apiKey);
   const name = NAME[provider];
@@ -305,17 +426,24 @@ export async function listProviderModels(provider: ModelSelectableProviderId, ap
   } catch {
     return fail(false, `${name} did not return a model list (not JSON).`);
   }
-  const parsed = parseProviderModelList(provider, json);
+  const parsed = parseProviderModelList(provider, json, { operatorKey: opts.operatorKey, at: opts.at });
   if (!parsed.recognized) return fail(false, `${name} did not return a model list in its documented shape.`);
+  const filteredNote = parsed.filtered > 0 ? ` ${OPERATOR_KEY_LIST_NOTE}` : "";
   if (parsed.options.length === 0) {
-    return { ok: true, detail: `${name} listed no usable model ids${provider === "gemini" ? " that support generateContent" : ""}; type a model id.`, models: [], total: 0, truncated: false };
+    return {
+      ok: true,
+      detail: `${name} listed no usable model ids${provider === "gemini" ? " that support generateContent" : ""}; type a model id.${filteredNote}`,
+      models: [],
+      total: 0,
+      truncated: false,
+    };
   }
   const notes: string[] = [];
   if (parsed.truncated) notes.push(`showing the first ${MAX_MODELS_RETURNED}`);
   if (parsed.more) notes.push("the provider has more models than one page; type the id if yours is missing");
   return {
     ok: true,
-    detail: `${name} listed ${parsed.total} model${parsed.total === 1 ? "" : "s"}${provider === "gemini" ? " supporting generateContent" : ""}${notes.length ? ` (${notes.join("; ")})` : ""}.`,
+    detail: `${name} listed ${parsed.total} model${parsed.total === 1 ? "" : "s"}${provider === "gemini" ? " supporting generateContent" : ""}${notes.length ? ` (${notes.join("; ")})` : ""}.${filteredNote}`,
     models: parsed.options,
     total: parsed.total,
     truncated: parsed.truncated || parsed.more,

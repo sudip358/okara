@@ -41,6 +41,7 @@ import { getActivePromptSet } from "./prompts";
 import { normalizeQuery } from "./analyze";
 import { isSourceType } from "./source-type";
 import { GEO_ENGINE_IDS, isGeoEngineId } from "./engines";
+import { CUSTOM_GEO_NOTE, customGeoLabelFor, customGeoLabels, isCustomGeoId } from "./custom-lanes";
 
 export const OBSERVATION_LOAD_LIMIT = 2000;
 export const API_PROVIDERS = GEO_ENGINE_IDS;
@@ -63,6 +64,7 @@ export const GEO_LABELS = {
   smallSample: `Small sample: fewer than ${SMALL_SAMPLE_MIN} responses in a denominator; do not draw conclusions from these rates.`,
   demo: "Demo data - simulated run",
   noCausal: "Rates describe sampled answers only; they do not show that a specific change caused a difference.",
+  customLanes: `Custom GEO engines (${CUSTOM_GEO_NOTE}): no web search is requested, so their answers are ungrounded and count toward mention rate and share of voice only; their citation rate is unavailable.`,
 } as const;
 
 interface ObsRow {
@@ -231,9 +233,14 @@ function latestCohortRows(rows: ObsRow[]): ObsRow[] {
 export async function buildGeoResults(env: Env, db: Db, project: ProjectRow): Promise<GeoResults> {
   const ws = project.workspace_id;
   const pid = project.id;
-  const [promptSet, presence, loaded] = await Promise.all([getActivePromptSet(db, ws, pid), capabilityPresence(env, db, ws), loadProjectObservations(db, ws, pid)]);
+  const [promptSet, presence, loaded, customLabels] = await Promise.all([
+    getActivePromptSet(db, ws, pid),
+    capabilityPresence(env, db, ws),
+    loadProjectObservations(db, ws, pid),
+    customGeoLabels(db, ws),
+  ]);
   const isDemo = project.is_demo === 1;
-  const configured = new Set(API_PROVIDERS.filter((p) => presence[p]));
+  const configured = new Set<string>([...API_PROVIDERS.filter((p) => presence[p]), ...presence.customGeoEngines]);
   const approved = promptSet?.prompts.filter((p) => p.approved) ?? [];
   const labels: string[] = [];
   if (isDemo) labels.push(GEO_LABELS.demo);
@@ -261,10 +268,14 @@ export async function buildGeoResults(env: Env, db: Db, project: ProjectRow): Pr
     const latest = rows[0];
     lanes.push({
       provider,
-      label: isGeoEngineId(provider) ? PROVIDER_LABELS[provider] : `${provider} API (API-sampled)`,
+      label: isGeoEngineId(provider)
+        ? PROVIDER_LABELS[provider]
+        : isCustomGeoId(provider)
+          ? customGeoLabelFor(provider, customLabels)
+          : `${provider} API (API-sampled)`,
       model: latest?.model ?? null,
       groundingMode: latest?.grounding_mode ?? null,
-      state: isDemo ? "demo" : isGeoEngineId(provider) && configured.has(provider) ? "ready" : "setup_required",
+      state: isDemo ? "demo" : (isGeoEngineId(provider) || isCustomGeoId(provider)) && configured.has(provider) ? "ready" : "setup_required",
       cohortKey: latest?.cohort_key ?? null,
       promptsRun: new Set(disc.map((o) => o.promptId ?? o.id)).size,
       counts: laneCounts(disc),
@@ -304,6 +315,7 @@ export async function buildGeoResults(env: Env, db: Db, project: ProjectRow): Pr
     });
   }
   if (surfaces.length > 0) labels.push(GEO_LABELS.manual);
+  if (lanes.some((l) => isCustomGeoId(l.provider))) labels.push(GEO_LABELS.customLanes);
   if (anySmall) labels.push(GEO_LABELS.smallSample);
   if (pending > 0) labels.push(`${pending} successful response(s) are awaiting analysis and are not yet counted.`);
 
@@ -349,7 +361,7 @@ export async function buildGeoResults(env: Env, db: Db, project: ProjectRow): Pr
   if (isDemo) state = "demo";
   else if (approved.length === 0 || configured.size === 0) state = "setup_required";
   if (!isDemo && approved.length === 0) labels.push("Setup required: approve at least one prompt.");
-  if (!isDemo && configured.size === 0) labels.push("Setup required: configure a GEO provider key and model (OpenAI, Anthropic, Gemini or Perplexity).");
+  if (!isDemo && configured.size === 0) labels.push("Setup required: configure a GEO provider key and model (OpenAI, Anthropic, Gemini or Perplexity), or add a custom GEO engine.");
 
   return { state, promptSetVersion: promptSet?.version ?? null, lanes, shareOfVoice: sov, trend, prompts, labels };
 }

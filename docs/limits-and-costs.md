@@ -75,11 +75,29 @@ What each caller reserves:
 | TypeSafe (Jev) | **Unknown** (NULL): no verified per-call price is configured. Bounded by `provider_calls` / `jev_calls` caps |
 | Writers (Anthropic / OpenAI-compatible) | **Unknown** (NULL): the model id is configuration and no verified rate table exists for it. Bounded by call and `writer_tokens` caps |
 | Workspace custom writer (OpenAI-compatible, owner-entered base URL) | **Unknown** (NULL), even if the response carries a cost field. Spend is on the workspace's own key: project `writer_tokens` / `provider_calls` limits apply, the `GLOBAL_*` operator caps do not |
+| Workspace custom GEO engine (`custom_geo:<id>`, owner-entered base URL) | **Unknown** (NULL). Spend is on the workspace's own key: `geo_prompts` / `provider_calls` project limits apply, no `usd_micros` reservation, the `GLOBAL_*` operator caps do not |
 
 Rates live in `src/worker/providers/rates.ts` (`RATE_VERSION = "geo-rates-2026-09-30.1"`), each with its
 official pricing URL and validity window. Estimates use paid Standard-tier list prices and ignore free
 allowances, so they are conservative upper bounds, not invoices. A model outside every rate window is
 treated as unknown until the table is re-verified and the version bumped.
+
+Workspace-chosen models on the operator key (2026-10-01; `modelForKeySource` in
+`src/worker/platform/provider-models.ts`). A GEO call whose model has no verified rate reserves and settles a
+flat `UNKNOWN_RATE_RESERVE_USD_MICROS` ($0.15, `providers/rates.ts`) whatever it really costs, so the
+`GLOBAL_USD_MICROS_PER_DAY` cap cannot bound spend on such a model. Before workspaces could pick models, only
+the operator chose the model that runs on the operator's key. The rule now:
+
+- On the operator key a workspace's GEO engine model must have a verified rate (or be the operator's own
+  `*_MODEL`). Otherwise the lane is not built (a `runtime` run event says why), the Integrations card and the
+  AI engines board show `setup_required` ("add your own <Vendor> key to use it"), and
+  `PUT /workspaces/:wid/credentials/:provider/model` refuses it (400 `operator_key_unpriced`).
+- On the operator key a workspace's TypeSafe model is ignored (`TYPESAFE_MODEL`, else `jev-latest`); the
+  PUT refuses it (400 `operator_key_model`).
+- Model lists fetched with the operator key show only priced ids (and no fine-tuned or org-owned OpenAI
+  models).
+- With the workspace's own key any valid model may run; its spend is bounded by the project limits and its
+  cost is recorded as unknown (NULL) when the model has no verified rate.
 
 Output budgets that count thinking/reasoning tokens:
 

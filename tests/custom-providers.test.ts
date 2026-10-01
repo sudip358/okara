@@ -777,6 +777,7 @@ describe("migration 0010 and export", () => {
       "last_test_detail",
       "created_at",
       "updated_at",
+      "role", // migration 0011 (custom GEO engines); existing rows default to 'writer'
     ]);
     const row = (id: string, isWriter: number) => ({
       id,
@@ -822,6 +823,48 @@ describe("migration 0010 and export", () => {
     const res = await app.request(`/api/projects/${pid}/export`, { headers: authHeaders(u.sessionToken, u.csrfToken) }, env);
     expect(res.status).toBe(200);
     expect(((await res.json()) as { data: { tables: Record<string, unknown[]> } }).data.tables.workspace_custom_providers).toEqual([]);
+  });
+
+  it("before migration 0011 (no role column): writers keep working, GEO engines are setup_required", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const pid = await seedProject(env, u.workspaceId);
+    // Rebuild the table exactly as migration 0010 created it (no role column, no role index).
+    await u.db.run("DROP INDEX idx_custom_providers_role");
+    await u.db.run(
+      `CREATE TABLE wcp_0010 AS SELECT id, workspace_id, label, base_url, host, model, key_enc, key_hint, is_writer, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at FROM workspace_custom_providers`,
+    );
+    await u.db.run("DROP TABLE workspace_custom_providers");
+    await u.db.run("ALTER TABLE wcp_0010 RENAME TO workspace_custom_providers");
+    expect((await u.db.all<{ name: string }>("SELECT name FROM pragma_table_info('workspace_custom_providers')")).map((c) => c.name)).not.toContain("role");
+    // The INSERT error is "table ... has no column named role" (not "no such column"): the fallback must catch both.
+    await expect(u.db.run("INSERT INTO workspace_custom_providers (id, role) VALUES ('x', 'geo')")).rejects.toThrow(/has no column named role/);
+
+    const created = await call(env, u, "POST", cp(u), { baseUrl: BASE, apiKey: SECRET, model: "meta/llama-3.3-70b" });
+    expect(created.status).toBe(201);
+    const data = created.json!.data as CustomProvidersResponse;
+    expect(data.providers).toHaveLength(1);
+    expect(data.providers[0]).toMatchObject({ role: "writer", isWriter: true });
+    const geo = await call(env, u, "POST", cp(u), { baseUrl: BASE, apiKey: SECRET, model: "m", role: "geo" });
+    expect(geo.status).toBe(412);
+    expect(geo.json!.error).toMatchObject({ code: "setup_required", message: expect.stringMatching(/migration 0011/) });
+    const list = await call(env, u, "GET", cp(u));
+    expect(list.status).toBe(200);
+    expect((list.json!.data as CustomProvidersResponse).providers.map((p) => p.role)).toEqual(["writer"]);
+    const id = data.providers[0]!.id;
+    const back = await call(env, u, "PUT", `/workspaces/${u.workspaceId}/writer-source`, { source: "default" });
+    expect(back.status).toBe(200);
+    expect((back.json!.data as CustomProvidersResponse).writerSource).toBe("default");
+    const again = await call(env, u, "PUT", `/workspaces/${u.workspaceId}/writer-source`, { source: `custom:${id}` });
+    expect((again.json!.data as CustomProvidersResponse).writerSource).toBe(`custom:${id}`);
+    expect((await call(env, u, "PATCH", `${cp(u)}/${id}`, { model: "deepseek/deepseek-chat" })).status).toBe(200);
+    // Runs: the custom writer is used, no GEO engine lanes exist.
+    const { runId } = await createRun(u.db, { workspaceId: u.workspaceId, projectId: pid, agent: "seo", trigger: "manual", idempotencyKey: "k0011", createdBy: null, now: FIXED_NOW });
+    const ctx = await buildRunContext(env, runId, { fetchImpl: fakeFetch() });
+    expect(ctx.writer?.model).toBe("deepseek/deepseek-chat");
+    expect(ctx.geoProviders).toHaveLength(0);
+    expect((await capabilityPresence(env, u.db, u.workspaceId)).customGeoEngines).toEqual([]);
+    expect(JSON.stringify(bodies)).not.toContain(SECRET);
   });
 
   it("project export includes the workspace's custom providers without key material", async () => {

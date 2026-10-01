@@ -6,7 +6,7 @@
  * workspace, otherwise 404. No provider call, no Jev, no budget.
  */
 import { Hono } from "hono";
-import type { CurrentActivityResponse, GeoEngineProviderId } from "@shared/types";
+import type { CurrentActivityResponse } from "@shared/types";
 import type { AppEnv } from "../app";
 import { notFound } from "../lib/errors";
 import { requireProject } from "../platform/access";
@@ -26,7 +26,7 @@ activityRoutes.get("/projects/:pid/runs/:runId/activity", async (c) => {
   const runId = c.req.param("runId");
 
   // Configured engines (presence only) shape the lanes of an active GEO run; demo projects use fixtures only.
-  let configuredEngines: GeoEngineProviderId[] = [];
+  let configuredEngines: string[] = [];
   if (project.is_demo !== 1) {
     const run = await db.first<{ agent: string; status: string }>(
       "SELECT agent, status FROM agent_runs WHERE workspace_id = ? AND project_id = ? AND id = ?",
@@ -37,7 +37,7 @@ activityRoutes.get("/projects/:pid/runs/:runId/activity", async (c) => {
     if (!run) throw notFound("Run");
     if (run.agent === "geo" && (run.status === "pending" || run.status === "running")) {
       const presence = await capabilityPresence(c.env, db, project.workspace_id);
-      configuredEngines = GEO_ENGINE_IDS.filter((p) => presence[p]);
+      configuredEngines = [...GEO_ENGINE_IDS.filter((p) => presence[p]), ...presence.customGeoEngines];
     }
   }
 

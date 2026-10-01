@@ -327,3 +327,94 @@ export const DEMO_ANSWERS: DemoAnswer[][] = [
     },
   ],
 ];
+
+// ------------------------------------------------------------------ SEO judgments (Live view replay)
+/**
+ * Fictional Jev answers of the demo SEO run, one entry per candidate, in the runtime decision format
+ * (recommend/generate.ts recordOutcome: `{answer, candidate, questionTier, key?}`). They feed the Live view
+ * panel "Every SEO element, judged one by one" of the labelled demo replay. The seed computes each tier with
+ * the real policy (runs/policy.ts tierFor), so tiers and verdicts are consistent with production rules.
+ * Kinds and questions follow recommend/decide.ts (e.g. weak_ctr asks title/meta-match, gate kinds ask only
+ * their gate question). `path` is relative to DEMO_ORIGIN; `minutesAgo` falls inside the demo run's
+ * "decisions" step. `recKey` marks the candidate a demo recommendation was drafted from (its dedup key).
+ */
+export type DemoJevAnswer =
+  | { type: "noul"; noul: number }
+  | { type: "choice"; choice: string; confidence: number; probabilities: Record<string, number> };
+
+export interface DemoSeoJudgment {
+  kind: "weak_ctr" | "answer_clarity" | "freshness" | "schema_mismatch" | "declining" | "coverage_gap";
+  path: string;
+  recKey?: "url:sofas:meta";
+  outcome: "selected" | "rejected";
+  reason: "low_fit" | "budget" | null;
+  minutesAgo: number;
+  questions: Array<{ id: string; key?: string; answer: DemoJevAnswer }>;
+}
+
+const noul = (n: number): DemoJevAnswer => ({ type: "noul", noul: n });
+const pick = (choice: string, confidence: number, other: string): DemoJevAnswer => ({
+  type: "choice",
+  choice,
+  confidence,
+  probabilities: { [choice]: confidence, [other]: Math.round((1 - confidence) * 100) / 100 },
+});
+
+export const DEMO_SEO_JUDGMENTS: DemoSeoJudgment[] = [
+  { kind: "answer_clarity", path: "/blog/how-to-choose-a-washable-sofa", outcome: "rejected", reason: "low_fit", minutesAgo: 120.76, questions: [{ id: "seo.answer_is_direct", answer: noul(0.91) }] },
+  {
+    kind: "weak_ctr", path: "/products/brass-table-lamp", outcome: "rejected", reason: "budget", minutesAgo: 120.72,
+    questions: [
+      { id: "seo.query_page_relevance", answer: noul(0.9) },
+      { id: "seo.action_choice", answer: pick("rewrite_title_meta", 0.72, "no_action") },
+      { id: "seo.title_matches_query", answer: noul(0.88) },
+      { id: "seo.meta_matches_query", answer: noul(0.58) },
+    ],
+  },
+  { kind: "freshness", path: "/blog/how-to-choose-a-washable-sofa", outcome: "rejected", reason: "low_fit", minutesAgo: 120.68, questions: [{ id: "seo.outdated_information", answer: noul(0.07) }] },
+  { kind: "schema_mismatch", path: "/products/oak-side-table", outcome: "rejected", reason: "budget", minutesAgo: 120.64, questions: [{ id: "seo.schema_content_match", answer: noul(0.34) }] },
+  {
+    kind: "weak_ctr", path: "/collections/sofas", recKey: "url:sofas:meta", outcome: "selected", reason: null, minutesAgo: 120.6,
+    questions: [
+      { id: "seo.query_page_relevance", answer: noul(0.94) },
+      { id: "seo.title_matches_query", answer: noul(0.83) },
+    ],
+  },
+  {
+    kind: "declining", path: "/products/oak-side-table", outcome: "rejected", reason: "budget", minutesAgo: 120.56,
+    questions: [
+      { id: "seo.action_choice", answer: pick("improve_intro_answer", 0.83, "add_section") },
+      { id: "seo.page_action", answer: pick("update", 0.62, "keep") },
+    ],
+  },
+  {
+    kind: "coverage_gap", path: "/blog/how-to-choose-a-washable-sofa", outcome: "rejected", reason: "budget", minutesAgo: 120.52,
+    questions: [
+      { id: "seo.action_choice", answer: pick("add_section", 0.86, "no_action") },
+      { id: "seo.covers_topic", key: "seo.covers_topic#t1", answer: noul(0.14) },
+      { id: "seo.covers_topic", key: "seo.covers_topic#t2", answer: noul(0.93) },
+    ],
+  },
+  {
+    kind: "weak_ctr", path: "/products/linen-slipcover-sofa", outcome: "rejected", reason: "low_fit", minutesAgo: 120.45,
+    questions: [
+      { id: "seo.query_page_relevance", answer: noul(0.96) },
+      { id: "seo.action_choice", answer: pick("no_action", 0.88, "rewrite_title_meta") },
+      { id: "seo.title_matches_query", answer: noul(0.95) },
+      { id: "seo.meta_matches_query", answer: noul(0.9) },
+    ],
+  },
+  { kind: "answer_clarity", path: "/collections/table-lamps", outcome: "rejected", reason: "budget", minutesAgo: 120.4, questions: [{ id: "seo.answer_is_direct", answer: noul(0.09) }] },
+];
+
+/** Fictional query relevance answers (Noul) for the demo GSC queries, judged before candidates. */
+export const DEMO_QUERY_RELEVANCE: Array<[string, number]> = [
+  ["washable linen sofa", 0.96],
+  ["linen slipcover sofa", 0.97],
+  ["oak side table", 0.93],
+  ["brass table lamp", 0.95],
+  ["how to choose a washable sofa", 0.88],
+  ["demo furnishings", 0.98],
+  ["table lamps for reading", 0.84],
+  ["pet friendly sofa fabric", 0.61],
+];

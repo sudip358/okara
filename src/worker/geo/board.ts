@@ -2,7 +2,9 @@
  * AI engine board [A6-A8, A11] (docs/api.md "GET /projects/:pid/geo/board", UI docs/geo-board-design.md).
  * Stored data only: no provider call, no Jev, no budget. Every query filters by workspace_id + project_id.
  *
- * One lane per engine in fixed order (openai_geo, anthropic_geo, gemini, perplexity), always present:
+ * One lane per engine in fixed order (openai_geo, anthropic_geo, gemini, perplexity), always present, then
+ * one lane per custom GEO engine ("custom_geo:<id>": configured ones, then removed ones with history in this
+ * project; ungrounded, so their citation rate is unavailable and they count toward mention rate only):
  *   - metrics over the engine's LATEST cohort (geo_observations with measurement_type 'api', same
  *     cohort_key), with the metrics.ts definitions used by GeoResults lanes (discovery prompts; 'ok' rows
  *     not analysed yet are excluded and reported in labels): citationRate, mentionRate, laneCounts;
@@ -20,6 +22,7 @@
  * stored error) > ready. A configured engine that never ran is 'ready' with an empty feed and zero counts.
  */
 import type {
+  BoardLaneProviderId,
   CapabilityState,
   CostUsd,
   EngineBoardResponse,
@@ -33,7 +36,9 @@ import type { Env } from "../env";
 import type { Db } from "../lib/db";
 import { parseJson } from "../lib/db";
 import type { ProjectRow } from "../platform/access";
-import { capabilityPresence } from "../runs/runtime";
+import { capabilityPresence, type CapabilityPresence } from "../runs/runtime";
+import { resolveWorkspaceModels, type ResolvedModels } from "../platform/provider-models";
+import { CUSTOM_GEO_NOTE, customGeoLabelFor, customGeoLabels, isCustomGeoId } from "./custom-lanes";
 import { answerOutcome } from "../runs/activity";
 import { inChunks } from "../coverage/common";
 import { resolveCitation } from "../coverage/geo-data";
@@ -98,18 +103,18 @@ interface SelfRow {
   method: string;
 }
 
-/** Which engines are configured (presence only, no decryption). Every board lane has an adapter. */
-async function enginePresence(env: Env, db: Db, ws: string): Promise<Record<GeoEngineProviderId, boolean>> {
-  const p = await capabilityPresence(env, db, ws);
-  return { openai_geo: p.openai_geo, anthropic_geo: p.anthropic_geo, gemini: p.gemini, perplexity: p.perplexity };
+/** Max custom lanes shown (configured ones plus removed ones with history). */
+const MAX_CUSTOM_BOARD_LANES = 6;
+
+function setupDetail(provider: GeoEngineProviderId, models: ResolvedModels): string {
+  const modelVar = MODEL_ENV[provider];
+  const article = VENDOR[provider] === "OpenAI" || VENDOR[provider] === "Anthropic" ? "an" : "a";
+  const key = `${article} ${VENDOR[provider]} API key`;
+  if (!models[provider].model) return `Choose ${article} ${VENDOR[provider]} model on the Integrations page (or set ${modelVar}) and add ${key}`;
+  return `Add ${key} (or check that the ${VENDOR[provider]} model id is valid)`;
 }
 
-function setupDetail(env: Env, provider: GeoEngineProviderId): string {
-  const modelVar = MODEL_ENV[provider];
-  const key = `${VENDOR[provider] === "OpenAI" || VENDOR[provider] === "Anthropic" ? "an" : "a"} ${VENDOR[provider]} API key`;
-  if (!(env[modelVar] ?? "").trim()) return `Set ${modelVar} and ${key}`;
-  return `Add ${key} (or check that ${modelVar} is a valid model id)`;
-}
+export const CUSTOM_LANE_BOARD_LABEL = `Custom GEO engines (${CUSTOM_GEO_NOTE}): no web search is requested, so their answers count toward mention rate only; citation rate is unavailable.`;
 
 export function laneCost(rows: Array<{ cost_usd: number | null; cost_is_estimate: number }>): CostUsd {
   if (rows.length === 0) return { value: null, isEstimate: true };
@@ -130,13 +135,28 @@ export async function buildEngineBoard(env: Env, db: Db, project: ProjectRow, no
   const ws = project.workspace_id;
   const pid = project.id;
   const isDemo = project.is_demo === 1;
-  const [presence, promptSet, laneEntries] = await Promise.all([
-    enginePresence(env, db, ws),
+  const [presence, models, customLabels, customHistory] = await Promise.all([
+    capabilityPresence(env, db, ws, now) as Promise<CapabilityPresence>,
+    resolveWorkspaceModels(env, db, ws),
+    customGeoLabels(db, ws),
+    db.all<{ provider: string }>(
+      `SELECT DISTINCT provider FROM geo_observations WHERE workspace_id = ? AND project_id = ? AND measurement_type = 'api' AND provider LIKE 'custom_geo:%' LIMIT ${MAX_CUSTOM_BOARD_LANES}`,
+      ws,
+      pid,
+    ),
+  ]);
+  const configuredCustom = new Set(presence.customGeoEngines);
+  const customLanes = [...new Set<string>([...presence.customGeoEngines, ...customHistory.map((r) => r.provider).filter(isCustomGeoId).sort()])].slice(
+    0,
+    MAX_CUSTOM_BOARD_LANES,
+  ) as BoardLaneProviderId[];
+  const allLanes: BoardLaneProviderId[] = [...BOARD_LANES, ...customLanes];
+  const [promptSet, laneEntries] = await Promise.all([
     getActivePromptSet(db, ws, pid),
     // Per lane: its latest cohort, then that cohort's rows (newest first). Queried per engine so one busy
     // engine can never push another engine's latest cohort out of a shared row cap.
     Promise.all(
-      BOARD_LANES.map(async (provider): Promise<[GeoEngineProviderId, ObsRow[]]> => {
+      allLanes.map(async (provider): Promise<[BoardLaneProviderId, ObsRow[]]> => {
         const latest = await db.first<{ cohort_key: string }>(
           `SELECT cohort_key FROM geo_observations WHERE workspace_id = ? AND project_id = ? AND measurement_type = 'api' AND provider = ?
             ORDER BY created_at DESC, rowid DESC LIMIT 1`,
@@ -159,7 +179,7 @@ export async function buildEngineBoard(env: Env, db: Db, project: ProjectRow, no
       }),
     ),
   ]);
-  const laneRows = new Map<GeoEngineProviderId, ObsRow[]>(laneEntries);
+  const laneRows = new Map<BoardLaneProviderId, ObsRow[]>(laneEntries);
   const cohortIds = [...laneRows.values()].flatMap((rs) => rs.map((r) => r.id));
   const okIds = [...laneRows.values()].flatMap((rs) => rs.filter((r) => r.status === "ok").map((r) => r.id));
   const requestIds = [...new Set([...laneRows.values()].flatMap((rs) => rs.map((r) => r.request_id).filter((x): x is string => !!x)))];
@@ -224,9 +244,10 @@ export async function buildEngineBoard(env: Env, db: Db, project: ProjectRow, no
 
   let pendingTotal = 0;
   let anySmall = false;
-  const lanes: EngineLaneSummary[] = BOARD_LANES.map((provider) => {
+  const lanes: EngineLaneSummary[] = allLanes.map((provider) => {
     const lrows = laneRows.get(provider) ?? [];
-    const configured = presence[provider];
+    const custom = isCustomGeoId(provider);
+    const configured = custom ? configuredCustom.has(provider) : presence[provider];
 
     // Metric observations (ok rows without analysis are pending, not absences).
     const metric: MetricObservation[] = [];
@@ -312,7 +333,11 @@ export async function buildEngineBoard(env: Env, db: Db, project: ProjectRow, no
     if (isDemo) state = "demo";
     else if (!configured) {
       state = "setup_required";
-      stateDetail = setupDetail(env, provider);
+      stateDetail = custom
+        ? customLabels.has(provider)
+          ? "Check this custom GEO engine's base URL and model on the Integrations page"
+          : "This custom GEO engine was removed; its earlier answers are shown"
+        : (presence.modelBlocked[provider as GeoEngineProviderId] ?? setupDetail(provider as GeoEngineProviderId, models));
     } else if (latest) {
       const lastRun = lrows.filter((r) => (latest.run_id ? r.run_id === latest.run_id : r.created_at.slice(0, 10) === latest.created_at.slice(0, 10)));
       if (lastRun.length > 0 && lastRun.every((r) => r.status === "failed")) {
@@ -322,11 +347,11 @@ export async function buildEngineBoard(env: Env, db: Db, project: ProjectRow, no
       }
     }
 
-    const envModel = (env[MODEL_ENV[provider]] ?? "").trim();
+    const configuredModel = custom ? null : models[provider as GeoEngineProviderId].model;
     return {
       provider,
-      label: LANE_LABELS[provider],
-      model: latest?.model ?? (configured && envModel ? envModel : null),
+      label: custom ? customGeoLabelFor(provider, customLabels) : LANE_LABELS[provider as GeoEngineProviderId],
+      model: latest?.model ?? (configured && configuredModel ? configuredModel : null),
       groundingMode: latest?.grounding_mode ?? null,
       state,
       stateDetail,
@@ -347,6 +372,7 @@ export async function buildEngineBoard(env: Env, db: Db, project: ProjectRow, no
     };
   });
 
+  if (customLanes.length > 0) labels.push(CUSTOM_LANE_BOARD_LABEL);
   if (anySmall) labels.push(`Small sample: fewer than ${SMALL_SAMPLE_MIN} answers in a denominator; do not draw conclusions from these rates.`);
   if (pendingTotal > 0) labels.push(`${pendingTotal} successful answer(s) are awaiting analysis and are not yet counted.`);
 
@@ -354,7 +380,7 @@ export async function buildEngineBoard(env: Env, db: Db, project: ProjectRow, no
   if (isDemo) state = "demo";
   else if (approved.length === 0 || !lanes.some((l) => l.state === "ready" || l.state === "error")) state = "setup_required";
   if (!isDemo && approved.length === 0) labels.push("Setup required: approve at least one prompt.");
-  if (!isDemo && !BOARD_LANES.some((p) => presence[p])) labels.push("Setup required: configure at least one AI engine (key and model).");
+  if (!isDemo && !BOARD_LANES.some((p) => presence[p]) && configuredCustom.size === 0) labels.push("Setup required: configure at least one AI engine (key and model).");
 
   return { state, promptSetVersion: promptSet?.version ?? null, generatedAt: now.toISOString(), lanes, labels };
 }
