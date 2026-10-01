@@ -6,9 +6,16 @@
  *                                                                   unless useAsWriter is false, selects it as writer;
  *                                                                   role "geo" adds a custom GEO engine lane instead
  *                                                                   (max 2; never the writer)
- *   PATCH  /workspaces/:wid/custom-providers/:id          owner  -> body {label?, baseUrl?, model?, apiKey?}; a new host needs a new key
- *   DELETE /workspaces/:wid/custom-providers/:id          owner  -> removes it (the writer reverts to the default when it was selected)
- *   POST   /workspaces/:wid/custom-providers/:id/test     member -> {ok, detail}; GET {base}/models with the saved key, result recorded
+ *   PATCH  /workspaces/:wid/custom-providers/:id          owner  -> body {label?, baseUrl?, model?, apiKey?, keepKeyForNewHost?};
+ *                                                                   a new host needs a new key, or keepKeyForNewHost: true
+ *                                                                   (the owner confirmed sending the saved key there),
+ *                                                                   else 400 key_required_for_new_host; a default name
+ *                                                                   (the host) follows a new host; every change is
+ *                                                                   recorded (migration 0012 change log)
+ *   DELETE /workspaces/:wid/custom-providers/:id          owner  -> removes it and its change log (the writer reverts to the default
+ *                                                                   when it was selected)
+ *   POST   /workspaces/:wid/custom-providers/:id/test     member -> {ok, detail, modelListed}; GET {base}/models with the saved key,
+ *                                                                   result recorded (modelListed: is the saved model in the list)
  *   POST   /workspaces/:wid/custom-providers/models       owner  -> body {baseUrl, apiKey} | {providerId}; CustomProviderModelList
  *   PUT    /workspaces/:wid/writer-source                 owner  -> body {source: "default" | "custom:<id>"}
  * Outbound requests: only the validated provider host is admitted to the guarded API fetch, 10 s timeout,
@@ -17,7 +24,7 @@
  */
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import type { CustomProviderModelList, CustomProviderRole, CustomProvidersResponse, WriterSource } from "@shared/types";
+import type { CustomProviderChange, CustomProviderModelList, CustomProviderRole, CustomProvidersResponse, WriterSource } from "@shared/types";
 import type { AppEnv } from "../app";
 import type { Env } from "../env";
 import type { Db } from "../lib/db";
@@ -34,13 +41,17 @@ import {
   cleanLabel,
   cleanModelId,
   customProviderAad,
+  customProviderChangeStatement,
   fetchModelList,
   isMissingTableError,
+  listCustomProviderChanges,
   listCustomProviders,
   testCustomProvider,
   toCustomProviderStatus,
   validateCustomBaseUrl,
+  type CustomProviderChangeField,
   type CustomProviderRow,
+  type CustomProviderTestResult,
 } from "../platform/custom-providers";
 import { rateLimit } from "../platform/rate-limit";
 import { createApiFetch } from "../runs/runtime";
@@ -121,9 +132,10 @@ function parseLabel(raw: unknown, fallback: string): string {
 
 async function responseFor(db: Db, workspaceId: string, canManage: boolean): Promise<CustomProvidersResponse> {
   const rows = await tableGuard(() => listCustomProviders(db, workspaceId));
+  const changes = rows.length > 0 ? await listCustomProviderChanges(db, workspaceId) : new Map<string, CustomProviderChange[]>();
   const writer = rows.find((r) => r.is_writer === 1);
   return {
-    providers: rows.map(toCustomProviderStatus),
+    providers: rows.map((r) => toCustomProviderStatus(r, changes.get(r.id) ?? [])),
     writerSource: writer ? `custom:${writer.id}` : "default",
     maxProviders: MAX_CUSTOM_PROVIDERS,
     canManage,
@@ -272,6 +284,9 @@ customProviderRoutes.post(
   },
 );
 
+/** True when the change-log table (migration 0012) is missing; the change itself then proceeds unlogged. */
+const isMissingChangeLog = (e: unknown) => /no such table:?\s*"?workspace_custom_provider_changes\b/i.test(String((e as Error)?.message ?? e));
+
 customProviderRoutes.patch(
   "/workspaces/:wid/custom-providers/:id",
   rateLimit({ key: userBucket("cprov_write"), limit: 20, windowSeconds: 60 }),
@@ -282,15 +297,39 @@ customProviderRoutes.patch(
     await requireWorkspaceOwner(db, user.id, wid);
     const row = await loadRow(db, wid, c.req.param("id"));
     const body = objectBody(await jsonBody(c));
-    onlyKeys(body, ["label", "baseUrl", "model", "apiKey"]);
+    onlyKeys(body, ["label", "baseUrl", "model", "apiKey", "keepKeyForNewHost"]);
+    if (body.keepKeyForNewHost !== undefined && typeof body.keepKeyForNewHost !== "boolean") {
+      throw fieldError("keepKeyForNewHost", "invalid", "keepKeyForNewHost must be true or false.");
+    }
     const next = { baseUrl: row.base_url, host: row.host, model: row.model, label: row.label };
     if (body.baseUrl !== undefined) Object.assign(next, parseBaseUrl(c.env, body.baseUrl));
     if (body.model !== undefined) next.model = parseModel(body.model);
     if (body.label !== undefined) next.label = parseLabel(body.label, next.host);
     const apiKey = body.apiKey !== undefined ? parseKey(body.apiKey) : null;
-    // A saved key is only ever sent to the host it was saved for.
-    if (next.host !== row.host && apiKey === null) {
-      throw fieldError("apiKey", "key_required", "Re-enter the API key when changing the provider's host; a saved key is only sent to the host it was saved for.");
+    const hostChanged = next.host !== row.host;
+    // A provider saved without a name is labelled with its host; after a move (tunnels rotate hosts) that
+    // default name follows the new host instead of naming the old one. A name the owner chose is kept, and a
+    // label sent unchanged (older clients resend the prefilled name) counts as no label.
+    if (hostChanged && row.label === row.host && next.label === row.label) {
+      next.label = next.host;
+    }
+    // A saved key is only sent to a new host when the owner says so (tunnel hosts change on every restart);
+    // never silently. The flag is ignored when the host is unchanged or a new key is given.
+    let keyKeptForNewHost = false;
+    if (hostChanged && apiKey === null) {
+      if (body.keepKeyForNewHost !== true) {
+        throw fieldError(
+          "apiKey",
+          "key_required_for_new_host",
+          "The new base URL is on a different host. Re-enter the API key, or confirm sending the saved key to the new host; a saved key is never sent to a new host without that confirmation.",
+        );
+      }
+      // The AAD binds workspace and row, not the host: the kept envelope stays valid as is. Make sure it can
+      // still be decrypted, so the owner is not told the key moved when it is unusable.
+      if ((await savedKey(c.env, row)) === null) {
+        throw fieldError("apiKey", "key_unreadable", "The saved API key could not be decrypted; re-enter it to use the new host.");
+      }
+      keyKeptForNewHost = true;
     }
     const now = iso(c.get("now"));
     let keyEnc = row.key_enc;
@@ -300,8 +339,13 @@ customProviderRoutes.patch(
       keyEnc = await encryptSecret(c.env, apiKey, customProviderAad(wid, row.id));
       keyHint = apiKey.slice(-4);
     }
+    const fields: CustomProviderChangeField[] = [];
+    if (next.label !== row.label) fields.push("label");
+    if (next.baseUrl !== row.base_url) fields.push("baseUrl");
+    if (next.model !== row.model) fields.push("model");
+    if (apiKey !== null) fields.push("apiKey");
     const configChanged = apiKey !== null || next.baseUrl !== row.base_url || next.model !== row.model;
-    await db.run(
+    const update: [string, ...unknown[]] = [
       `UPDATE workspace_custom_providers
           SET label = ?, base_url = ?, host = ?, model = ?, key_enc = ?, key_hint = ?, updated_at = ?,
               last_tested_at = CASE WHEN ? THEN NULL ELSE last_tested_at END,
@@ -320,7 +364,29 @@ customProviderRoutes.patch(
       configChanged ? 1 : 0,
       wid,
       row.id,
-    );
+    ];
+    if (fields.length === 0) {
+      await db.run(...update);
+    } else {
+      const urlChanged = fields.includes("baseUrl");
+      const change = customProviderChangeStatement(newId("cpchg"), {
+        workspaceId: wid,
+        providerId: row.id,
+        changedBy: user.id,
+        changedAt: now,
+        fields,
+        from: urlChanged ? { baseUrl: row.base_url, host: row.host } : null,
+        to: urlChanged ? { baseUrl: next.baseUrl, host: next.host } : null,
+        keyKeptForNewHost,
+      });
+      // One transaction: the change and its audit entry land together.
+      try {
+        await db.batch([update, change]);
+      } catch (e) {
+        if (!isMissingChangeLog(e)) throw e;
+        await db.run(...update); // before migration 0012: the change still applies, unlogged
+      }
+    }
     return c.json({ data: await responseFor(db, wid, true) });
   },
 );
@@ -334,7 +400,14 @@ customProviderRoutes.delete(
     const db = c.get("db");
     await requireWorkspaceOwner(db, user.id, wid);
     const row = await loadRow(db, wid, c.req.param("id"));
-    await db.run("DELETE FROM workspace_custom_providers WHERE workspace_id = ? AND id = ?", wid, row.id);
+    const remove: [string, ...unknown[]] = ["DELETE FROM workspace_custom_providers WHERE workspace_id = ? AND id = ?", wid, row.id];
+    try {
+      // The provider's change log goes with it (no foreign key on provider_id, see migration 0012).
+      await db.batch([["DELETE FROM workspace_custom_provider_changes WHERE workspace_id = ? AND provider_id = ?", wid, row.id], remove]);
+    } catch (e) {
+      if (!isMissingChangeLog(e)) throw e;
+      await db.run(...remove);
+    }
     return c.json({ data: await responseFor(db, wid, true) });
   },
 );
@@ -348,14 +421,14 @@ customProviderRoutes.post(
     const db = c.get("db");
     await requireWorkspaceMember(db, user.id, wid);
     const row = await loadRow(db, wid, c.req.param("id"));
-    let result: { ok: boolean | null; detail: string };
+    let result: CustomProviderTestResult;
     const check = validateCustomBaseUrl(row.base_url, c.env.APP_ORIGIN);
-    if (!check.ok || check.host !== row.host) result = { ok: false, detail: "The saved base URL is no longer accepted; re-enter it." };
+    if (!check.ok || check.host !== row.host) result = { ok: false, detail: "The saved base URL is no longer accepted; re-enter it.", modelListed: null };
     else {
       const key = await savedKey(c.env, row);
       result =
         key === null
-          ? { ok: false, detail: "Saved key could not be decrypted; please re-enter it." }
+          ? { ok: false, detail: "Saved key could not be decrypted; please re-enter it.", modelListed: null }
           : await testCustomProvider(providerFetch(c.env, check.host), check.baseUrl, key, row.model, row.role === "geo" ? "the first GEO run" : "the first draft");
     }
     const now = iso(c.get("now"));

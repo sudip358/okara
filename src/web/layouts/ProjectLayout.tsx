@@ -5,10 +5,12 @@ import { ApiError } from "@web/lib/api";
 import { ProjectProvider, projectPath, useProjectLoader } from "@web/lib/project-context";
 import { useSession } from "@web/lib/session";
 import { ActivityLauncher } from "@web/components/activity/ActivityWindow";
+import { LiveNavDot } from "@web/pages/live/LiveNavDot";
 import { Badge, DemoBanner, EmptyState, ErrorState, LoadingState, buttonClass, cx } from "@web/components/ui";
 
 const NAV: Array<{ to: string; label: string; end?: boolean; group?: string }> = [
   { to: "", label: "Overview", end: true },
+  { to: "live", label: "Live" },
   { to: "checklists", label: "Checklists" },
   { to: "seo", label: "SEO audit", group: "SEO" },
   { to: "internal-links", label: "Internal links" },
@@ -96,6 +98,7 @@ export function ProjectLayout() {
                     }
                   >
                     {item.label}
+                    {item.to === "live" && <LiveNavDot projectId={projectId} />}
                   </NavLink>
                 </li>
               ))}

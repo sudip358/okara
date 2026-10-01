@@ -2,11 +2,13 @@
  * Runtime assembly: builds the RunContext every agent step receives.
  * - Credentials resolve through resolveProviderKey (workspace BYO key, then operator key).
  * - Providers are constructed only when both a key and a model exist; otherwise they are null / absent and
- *   steps report setup_required. Nothing is ever faked. Models resolve through platform/provider-models.ts:
- *   the workspace's selection > the operator env var > none (TypeSafe: > the documented jev-latest alias).
+ *   steps report setup_required. Nothing is ever faked. GEO engine models resolve through
+ *   platform/provider-models.ts: the workspace's selection > the operator env var > none. TypeSafe (Jev) is
+ *   not workspace-selectable: it always runs TYPESAFE_MODEL, else the documented jev-latest alias
+ *   (providers/typesafe.ts resolveTypeSafeModel); a stored TypeSafe selection is ignored.
  *   Operator-key spend guard (provider-models.ts modelForKeySource): on the operator's key a workspace-chosen
  *   GEO engine model runs only when providers/rates.ts has a verified price for it (otherwise no lane, a run
- *   event says why); a workspace-chosen TypeSafe model is ignored on the operator key.
+ *   event says why).
  * - Custom GEO engines (workspace custom providers with role 'geo') become extra GEO lanes, each with its
  *   own guarded fetch that admits only that provider's host (never the shared apiFetch).
  * - `apiFetch` is an allowlisted fetch for provider APIs only; `crawlFetch` is the platform fetch,
@@ -210,8 +212,9 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
 
   // The model each provider really uses with the key it resolved to (operator-key spend guard applied).
   const modelInUse = (provider: ModelSelectableProviderId, key: ResolvedKey | null): ModelInUse => modelForKeySource(env, savedModels, provider, key?.source ?? null, clock());
+  // TypeSafe always runs the operator's model (TYPESAFE_MODEL, else jev-latest): never a workspace selection.
   const decisions = typesafeKey
-    ? createTypeSafeProvider({ apiKey: typesafeKey, model: modelInUse("typesafe", typesafe).model ?? undefined, fetchImpl: apiFetch, calls, budget: budgetFor(budget, "typesafe") })
+    ? createTypeSafeProvider({ apiKey: typesafeKey, model: env.TYPESAFE_MODEL, fetchImpl: apiFetch, calls, budget: budgetFor(budget, "typesafe") })
     : null;
   // Provider views: global operator-key caps apply only when that provider uses the operator key.
   const writerHooks = { calls, budget: budgetFor(budget, "writer") };

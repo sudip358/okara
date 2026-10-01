@@ -1,13 +1,19 @@
 /**
- * Per-workspace model selection for the built-in providers (typesafe, gemini, perplexity, openai_geo,
- * anthropic_geo). Table: workspace_provider_models (migration 0011). The writer is not here: it has its own
- * custom provider flow (platform/custom-providers.ts).
+ * Per-workspace model selection for the built-in GEO engines (gemini, perplexity, openai_geo, anthropic_geo).
+ * Table: workspace_provider_models (migration 0011). The writer is not here: it has its own custom provider
+ * flow (platform/custom-providers.ts).
+ *
+ * TypeSafe (Jev) is NOT workspace-selectable (owner decision 2026-10-01: "TypeSafe will perform as it is"): it
+ * always runs TYPESAFE_MODEL, else the documented `jev-latest` alias (providers/typesafe.ts
+ * resolveTypeSafeModel), whichever key is used. The model routes refuse it (400 model_not_selectable) and a
+ * stored 'typesafe' row (saved while the picker briefly existed) is ignored by loadWorkspaceModels and
+ * resolveModel; the row itself is harmless and left in place. "typesafe" stays in MODEL_PROVIDERS only so
+ * statuses can report its operator/default model through the same resolution.
  *
  * Resolution (runtime, statuses, presence): the workspace's selection > the operator env var
- * (GEMINI_MODEL, PERPLEXITY_MODEL, OPENAI_GEO_MODEL, ANTHROPIC_GEO_MODEL, TYPESAFE_MODEL) > none, which is
- * setup_required ("choose a model"). TypeSafe alone keeps its documented `jev-latest` alias as the last step
- * (providers/typesafe.ts resolveTypeSafeModel). Nothing is ever invented: a model id is only what the owner
- * picked or typed, or what the operator configured.
+ * (GEMINI_MODEL, PERPLEXITY_MODEL, OPENAI_GEO_MODEL, ANTHROPIC_GEO_MODEL) > none, which is setup_required
+ * ("choose a model"). TypeSafe: TYPESAFE_MODEL > jev-latest, never a workspace selection. Nothing is ever
+ * invented: a model id is only what the owner picked or typed, or what the operator configured.
  *
  * Model lists are fetched server-side with the provider's own documented list endpoint (verified 2026-10-01,
  * cited in docs/provider-contracts.md "Workspace model selection"):
@@ -20,6 +26,7 @@
  *   perplexity    GET https://api.perplexity.ai/v1/models  (Bearer) -> {object: "list", data: [{id, ...}]};
  *                 ids are "provider/model" (Agent API models)
  *   typesafe      GET https://api.typesafe.ai/v1/models  (Bearer) -> {models: [{name, description, release_date}]}
+ *                 (documented here for reference; the model routes no longer list TypeSafe models)
  * Requests go through the guarded API fetch (allowlisted hosts), `redirect: "manual"` (a 3xx is reported,
  * never followed), a 10 s timeout covering headers and body, and a bounded body read. Provider bodies are
  * never echoed; ids are untrusted strings (validated per provider, at most 200 characters, no control
@@ -33,8 +40,7 @@
  * flat UNKNOWN_RATE_RESERVE_USD_MICROS per call whatever it really costs, so the operator's
  * GLOBAL_USD_MICROS_PER_DAY cap would undercount. On the operator key a workspace's selection is therefore
  * honoured only when its price is verified (or it is the operator's own env model); otherwise no lane is built
- * and the card shows setup_required ("add your own key"). TypeSafe on the operator key ignores the workspace's
- * selection (TYPESAFE_MODEL, else jev-latest). Model lists fetched with the operator key show only priced ids
+ * and the card shows setup_required ("add your own key"). Model lists fetched with the operator key show only priced ids
  * (and, for OpenAI, no fine-tuned or org-owned models), so the operator's private model names never leak.
  */
 import type { ModelSelectableProviderId, ModelSource, ProviderModelList, ProviderModelOption } from "@shared/types";
@@ -85,6 +91,17 @@ export function isModelProvider(p: string): p is ModelSelectableProviderId {
   return (MODEL_PROVIDERS as readonly string[]).includes(p);
 }
 
+/** Providers whose model a workspace may choose (TypeSafe is excluded: it always runs the operator's model). */
+export const WORKSPACE_MODEL_PROVIDERS: readonly ModelSelectableProviderId[] = ["gemini", "perplexity", "openai_geo", "anthropic_geo"];
+
+export function isWorkspaceModelProvider(p: string): p is ModelSelectableProviderId {
+  return (WORKSPACE_MODEL_PROVIDERS as readonly string[]).includes(p);
+}
+
+/** 400 message of the model routes for TypeSafe (any key source). */
+export const TYPESAFE_MODEL_NOT_SELECTABLE =
+  "TypeSafe (Jev) always uses the operator's model (TYPESAFE_MODEL, else the documented jev-latest alias); a TypeSafe model cannot be chosen per workspace.";
+
 /** TypeSafe model ids go into a JSON body via the SDK; same plain-id rule as OpenAI ids. */
 function isValidTypeSafeModelId(model: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._:\-]{0,99}$/.test(model);
@@ -127,12 +144,15 @@ export const MODEL_ID_FORMAT: Record<ModelSelectableProviderId, string> = {
 
 export type WorkspaceModels = Partial<Record<ModelSelectableProviderId, string>>;
 
-/** The workspace's selections ({} when none, or before migration 0011). */
+/**
+ * The workspace's selections ({} when none, or before migration 0011). A stored TypeSafe row is ignored
+ * (TypeSafe is not workspace-selectable); it stays in the table, harmless.
+ */
 export async function loadWorkspaceModels(db: Db, workspaceId: string): Promise<WorkspaceModels> {
   try {
     const rows = await db.all<{ provider: string; model: string }>("SELECT provider, model FROM workspace_provider_models WHERE workspace_id = ?", workspaceId);
     const out: WorkspaceModels = {};
-    for (const r of rows) if (isModelProvider(r.provider)) out[r.provider] = r.model;
+    for (const r of rows) if (isWorkspaceModelProvider(r.provider)) out[r.provider] = r.model;
     return out;
   } catch (e) {
     if (isMissingTableError(e)) return {};
@@ -145,9 +165,12 @@ export interface ResolvedModel {
   source: ModelSource | null;
 }
 
-/** workspace selection > env var > none (TypeSafe: > jev-latest alias). Invalid stored ids are skipped. */
+/**
+ * workspace selection > env var > none. TypeSafe: TYPESAFE_MODEL > jev-latest alias, never a workspace
+ * selection (even one passed in `saved`). Invalid stored ids are skipped.
+ */
 export function resolveModel(env: Partial<Pick<Env, (typeof MODEL_ENV)[ModelSelectableProviderId]>>, saved: WorkspaceModels, provider: ModelSelectableProviderId): ResolvedModel {
-  const ws = saved[provider];
+  const ws = isWorkspaceModelProvider(provider) ? saved[provider] : undefined;
   const wsModel = ws !== undefined ? normalizeModelId(provider, ws) : null;
   if (wsModel) return { model: wsModel, source: "workspace" };
   const raw = env[MODEL_ENV[provider]];
@@ -190,8 +213,6 @@ export interface ModelInUse extends ResolvedModel {
    * card and the board show setup_required with this text). null when the model can be used.
    */
   blocked: string | null;
-  /** TypeSafe only: the workspace's selection, which the operator key ignores. null otherwise. */
-  ignoredSelection: string | null;
 }
 
 /** "<Vendor> model <id> has no verified price and this workspace uses the operator key; add your own <Vendor> key to use it." */
@@ -199,17 +220,11 @@ export function operatorKeyUnpricedMessage(provider: ModelSelectableProviderId, 
   return `${NAME[provider]} model ${model} has no verified price and this workspace uses the operator key; add your own ${NAME[provider]} key to use it.`;
 }
 
-/** Shown when a TypeSafe selection is ignored because the operator key is in use. */
-export function typesafeOperatorKeyNote(selection: string): string {
-  return `This workspace's TypeSafe model (${selection}) applies only with your own TypeSafe key; with the operator key the operator's model is used.`;
-}
-
 /**
- * The model a provider really uses with `keySource` (workspace selection > env > none, TypeSafe > jev-latest),
- * applying the operator-key spend guard:
+ * The model a provider really uses with `keySource` (workspace selection > env > none; TypeSafe always
+ * TYPESAFE_MODEL > jev-latest, whatever the key), applying the operator-key spend guard:
  *   - workspace key, or no key: the resolved model as is;
  *   - operator key and a workspace selection equal to the operator's env model: allowed (the operator chose it);
- *   - operator key and a TypeSafe selection: ignored, the operator's model (TYPESAFE_MODEL, else jev-latest);
  *   - operator key and a GEO engine selection without a verified rate (providers/rates.ts findRate at `at`):
  *     blocked (unpriced calls would reserve and settle only the flat unknown-rate amount against the
  *     operator's global usd cap).
@@ -222,13 +237,12 @@ export function modelForKeySource(
   at: Date = new Date(),
 ): ModelInUse {
   const r = resolveModel(env, saved, provider);
-  const usable = (m: ResolvedModel, ignoredSelection: string | null = null): ModelInUse => ({ ...m, blocked: null, ignoredSelection });
+  const usable = (m: ResolvedModel): ModelInUse => ({ ...m, blocked: null });
   if (keySource !== "operator_key" || r.source !== "workspace" || !r.model) return usable(r);
   const operator = resolveModel(env, {}, provider);
   if (operator.model === r.model) return usable(r);
-  if (provider === "typesafe") return usable(operator, r.model);
   if (findRate(provider, r.model, at) !== null) return usable(r);
-  return { ...r, blocked: operatorKeyUnpricedMessage(provider, r.model), ignoredSelection: null };
+  return { ...r, blocked: operatorKeyUnpricedMessage(provider, r.model) };
 }
 
 /**
@@ -240,10 +254,9 @@ export function operatorKeyModelRefusal(
   provider: ModelSelectableProviderId,
   model: string,
   at: Date = new Date(),
-): { reason: "operator_key_unpriced" | "operator_key_model"; message: string } | null {
+): { reason: "operator_key_unpriced"; message: string } | null {
   const use = modelForKeySource(env, { [provider]: model }, provider, "operator_key", at);
   if (use.blocked) return { reason: "operator_key_unpriced", message: "Add your own API key to use a model without a verified price." };
-  if (use.ignoredSelection) return { reason: "operator_key_model", message: "TypeSafe uses the operator's model with the operator key; add your own TypeSafe API key to choose a model." };
   return null;
 }
 

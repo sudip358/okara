@@ -1,14 +1,17 @@
 /**
- * Pure helpers for the "Model" row on built-in provider cards (Gemini, Perplexity, OpenAI, Anthropic,
- * TypeSafe) and for custom GEO engines. The server is authoritative (routes/credentials.ts model routes,
- * platform/provider-models.ts). Model ids and display names come from provider lists: untrusted plain text.
+ * Pure helpers for the "Model" row on built-in GEO engine cards (Gemini, Perplexity, OpenAI, Anthropic) and
+ * for custom GEO engines. TypeSafe (Jev) has no model row: it always runs the operator's model (TYPESAFE_MODEL,
+ * else jev-latest) and its card shows that model as before. The server is authoritative (routes/credentials.ts
+ * model routes refuse TypeSafe; platform/provider-models.ts). Model ids and display names come from provider
+ * lists: untrusted plain text.
  */
 import type { CustomProviderStatus, CustomProvidersResponse, IntegrationsStatus, ModelSelectableProviderId, ModelSource, ProviderModelOption } from "@shared/types";
 import { MODEL_OPTIONS_SHOWN } from "./custom-writer-lib";
 
 type ProviderStatus = IntegrationsStatus["providers"][number];
 
-export const MODEL_SELECTABLE: readonly ModelSelectableProviderId[] = ["typesafe", "gemini", "perplexity", "openai_geo", "anthropic_geo"];
+/** Cards with a model picker row. Not TypeSafe: "TypeSafe will perform as it is" (no model selection). */
+export const MODEL_SELECTABLE: readonly ModelSelectableProviderId[] = ["gemini", "perplexity", "openai_geo", "anthropic_geo"];
 export const GEO_ENGINE_PROVIDERS: readonly string[] = ["gemini", "perplexity", "openai_geo", "anthropic_geo"];
 
 export function isModelSelectable(provider: string): provider is ModelSelectableProviderId {
@@ -61,7 +64,6 @@ export function modelSummary(p: Pick<ProviderStatus, "model" | "modelSource">): 
  */
 export function operatorKeyHint(p: Pick<ProviderStatus, "provider" | "source">): string | null {
   if (p.source !== "operator_key") return null;
-  if (p.provider === "typesafe") return "With the operator key TypeSafe uses the operator's model; add your own TypeSafe key to choose one.";
   if (GEO_ENGINE_PROVIDERS.includes(p.provider)) return "With the operator key only models with a verified price can be used; add your own key to use any model.";
   return null;
 }

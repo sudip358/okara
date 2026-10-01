@@ -4,7 +4,8 @@
  * states, no project verification token, no custom provider key (key_enc) or key hint. `_json` columns are
  * decoded for readability. The workspace's custom providers (base URL, model, writer selection) are
  * included as workspace-level integration metadata, selected column by column, as is the workspace's model
- * selection for the built-in providers (workspace_provider_models: provider and model id only).
+ * selection for the built-in providers (workspace_provider_models: provider and model id only) and the
+ * custom provider change log (workspace_custom_provider_changes: hosts, fields, user id; no key material).
  */
 import type { Db, Row } from "../lib/db";
 import { iso } from "../lib/time";
@@ -96,6 +97,18 @@ export async function exportProject(db: Db, workspaceId: string, projectId: stri
   } catch (e) {
     if (!isMissingTableError(e)) throw e;
     tables.workspace_custom_providers = [];
+  }
+  // Custom provider change log (0012): when a base URL / model / label / key changed, by which user id, and
+  // whether a saved key was kept for a new host. Configuration only; it never holds key material.
+  try {
+    tables.workspace_custom_provider_changes = await db.all(
+      `SELECT provider_id, changed_at, changed_by, fields, old_base_url, new_base_url, old_host, new_host, key_kept_for_new_host
+         FROM workspace_custom_provider_changes WHERE workspace_id = ? ORDER BY changed_at, id`,
+      workspaceId,
+    );
+  } catch (e) {
+    if (!isMissingTableError(e)) throw e;
+    tables.workspace_custom_provider_changes = [];
   }
   // Workspace model selection (0011): provider and model id only.
   try {

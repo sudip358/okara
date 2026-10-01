@@ -56,7 +56,7 @@ export function LiveHeader({
   replaying: boolean;
   extra?: ReactNode;
 }) {
-  const chips = dedupeLabels([...labels, agent === "geo" ? LIVE_TEXT.apiSampled : null]);
+  const chips = dedupeLabels([...labels, agent === "geo" && !labels.some((l) => /api-sampled/i.test(l)) ? LIVE_TEXT.apiSampled : null]);
   return (
     <header className="min-w-0 space-y-2">
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2">

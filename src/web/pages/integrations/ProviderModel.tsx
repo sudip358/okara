@@ -1,5 +1,5 @@
 /**
- * "Model" row on a built-in provider card (Gemini, Perplexity, OpenAI, Anthropic, TypeSafe): shows the model
+ * "Model" row on a built-in GEO engine card (Gemini, Perplexity, OpenAI, Anthropic; never TypeSafe): shows the model
  * the runtime uses and where it comes from, and lets the owner choose one for this workspace: "Fetch models"
  * (listed server-side with the typed key, else the saved workspace key, else the operator key), a searchable
  * dropdown, a typed-id fallback, and Save. Model ids and names are untrusted plain text. OWNED BY: web-shell.

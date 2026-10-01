@@ -3,14 +3,16 @@
  * (base URL + API key + Fetch models + model picker, the same form as the custom writer) as an extra GEO
  * lane. The prompt is sent without tools, so nothing proves a web search: these lanes are labelled
  * "Custom · no web search proof · mention rate only" everywhere, are stored ungrounded and never count
- * toward citation rate. Keys are write-only. Untrusted names and model ids render as plain text.
+ * toward citation rate. Keys are write-only. Untrusted names and model ids render as plain text. Base URL
+ * changes (tunnels) work as for the custom writer: "Quick update URL" or "Edit URL or key", with the required
+ * "Send my saved key to <new host>" confirmation, then an automatic Test (CustomWriter.tsx).
  * OWNED BY: web-shell.
  */
 import { useId, useState } from "react";
 import type { CustomProvidersResponse } from "@shared/types";
 import { useApi } from "@web/lib/hooks";
 import { Button, ErrorState, LoadingState } from "@web/components/ui";
-import { CustomProviderForm, SavedProviderItem, providersPath } from "./CustomWriter";
+import { CustomProviderForm, SavedProviderItem, providersPath, type SavedInfo } from "./CustomWriter";
 import { CUSTOM_GEO_NOTE, geoEngines } from "./model-lib";
 
 const mutedText = "text-xs text-zinc-600 dark:text-zinc-400";
@@ -21,12 +23,18 @@ export function CustomGeoEngines({ workspaceId, onChange }: { workspaceId: strin
   const list = useApi<CustomProvidersResponse>(providersPath(workspaceId));
   /** null: no form; "new": add form; otherwise the id being edited. */
   const [editing, setEditing] = useState<string | null>(null);
+  /** A base URL typed in "Quick update URL" and handed to the full form ("Enter a new key instead"). */
+  const [prefillUrl, setPrefillUrl] = useState<string | undefined>(undefined);
+  /** Engine whose Test re-runs once its card is back (after its URL or key changed). */
+  const [retestId, setRetestId] = useState<string | null>(null);
   const data = list.data;
   const engines = geoEngines(data);
   const max = data?.maxGeoEngines ?? DEFAULT_MAX_GEO_ENGINES;
-  const apply = (next: CustomProvidersResponse) => {
+  const apply = (next: CustomProvidersResponse, info?: SavedInfo) => {
     list.setData(next);
     setEditing(null);
+    setPrefillUrl(undefined);
+    if (info) setRetestId(info.retestId);
     onChange?.();
   };
 
@@ -66,7 +74,19 @@ export function CustomGeoEngines({ workspaceId, onChange }: { workspaceId: strin
                 .filter((p) => p.id !== editing)
                 .map((p) => (
                   <li key={p.id}>
-                    <SavedProviderItem workspaceId={workspaceId} p={p} canManage={data.canManage} apply={apply} reload={list.reload} onEdit={() => setEditing(p.id)} />
+                    <SavedProviderItem
+                      workspaceId={workspaceId}
+                      p={p}
+                      canManage={data.canManage}
+                      apply={(next) => apply(next)}
+                      reload={list.reload}
+                      onEdit={(url) => {
+                        setPrefillUrl(url);
+                        setEditing(p.id);
+                      }}
+                      autoTest={retestId === p.id}
+                      onAutoTested={() => setRetestId(null)}
+                    />
                   </li>
                 ))}
             </ul>
@@ -76,8 +96,12 @@ export function CustomGeoEngines({ workspaceId, onChange }: { workspaceId: strin
                 workspaceId={workspaceId}
                 role="geo"
                 initial={editing === "new" ? null : (engines.find((p) => p.id === editing) ?? null)}
+                initialBaseUrl={editing === "new" ? undefined : prefillUrl}
                 onSaved={apply}
-                onCancel={() => setEditing(null)}
+                onCancel={() => {
+                  setEditing(null);
+                  setPrefillUrl(undefined);
+                }}
               />
             )}
             {data.canManage &&

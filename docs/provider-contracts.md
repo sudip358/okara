@@ -90,7 +90,7 @@ entering a base URL and an API key, fetching the provider's models, and picking 
 | Base URL | Validated before saving and before every use: https, no credentials, no IP literal, public hostname (dot, LDH labels, alphabetic or IDN TLD, no local/reserved suffix, no cluster service-discovery suffix such as `.svc` / `.cluster` / `.consul` / `.docker`, no loopback wildcard-DNS service such as `nip.io` / `sslip.io` / `xip.io` / `localtest.me` / `lvh.me`, no IPv4 address spelled in the name such as `127.0.0.1.example.com` or `10-0-0-1.example.com`), default port, no query/fragment, not the app's own host. Names are **not resolved**: the residual risk (a public name whose DNS points at a private address) is covered by Workers egress, which cannot reach private addresses, the same as the crawler note in `src/worker/seo/ssrf.ts`. Under local `npm run dev` that egress protection does not exist, so only use trusted base URLs there. See docs/api.md "Custom providers" |
 | Hosts | Only the selected provider's host, only for its workspace, joins `ctx.apiFetch` (`createApiFetch(env, fetch, [host])`); `redirect: "manual"`, a 3xx is a failure |
 | Timeouts and sizes | Model list and test: 10 s (headers and body), body capped at 8 MiB. Drafting: the writer's 90 s per attempt, 2 retries (408/429/5xx/network); the response body is capped at 2 MiB per attempt (`CUSTOM_WRITER_MAX_RESPONSE_BYTES`; output is already bounded by `max_completion_tokens`): a larger body is cancelled, recorded as `Response exceeded 2097152 bytes.` and not retried (status `unknown` for a 2xx, since the provider may bill for it, so the `writer_tokens` reservation is kept) |
-| Keys | AES-GCM envelope, AAD `workspace_custom_providers:<workspace_id>:<id>`; never returned, logged or exported; a stored key is only sent to the host it was saved for (a host change requires re-entering the key). A provider error body that echoes the key (in any format, e.g. `gsk_...`, also JSON-escaped or URL-encoded) has the key replaced by `[redacted]` before it is stored in `provider_calls.error` or reaches run events (`requestJson` `secrets`, on top of the generic `redact()` patterns; applies to every OpenAI-compatible writer) |
+| Keys | AES-GCM envelope, AAD `workspace_custom_providers:<workspace_id>:<id>` (workspace and row; the host is not part of the AAD); never returned, logged or exported; a stored key is only sent to the host it was saved for, unless the owner explicitly moves it: a PATCH to a new host needs a new key or `keepKeyForNewHost: true` (the owner ticked "Send my saved key to <new host>"), else 400 `key_required_for_new_host` (see "Base URL changes" below). A provider error body that echoes the key (in any format, e.g. `gsk_...`, also JSON-escaped or URL-encoded) has the key replaced by `[redacted]` before it is stored in `provider_calls.error` or reaches run events (`requestJson` `secrets`, on top of the generic `redact()` patterns; applies to every OpenAI-compatible writer) |
 | Cost | Unknown (`cost_usd` NULL): the model and its price are third-party configuration and no rate table exists. A `usage.cost` field in a response is not read |
 | Budget | `provider_calls` and `writer_tokens` reserved per attempt like every writer, attributed to the workspace's own key: project limits apply, the operator `GLOBAL_*` caps do not |
 
@@ -102,15 +102,44 @@ then reports the HTTP status of `/models`). Outputs are validated with zod and t
 every writer draft. Data sent is the writer's disclosure (`DATA_SENT.writer`): stored evidence, confirmed
 context documents, brand and competitor names; never credentials or raw Search Console exports.
 
+Base URL changes (added 2026-10-01, owner request: "the custom base URL keeps on changing"). Tunnels such as
+Cloudflare quick tunnels (`*.trycloudflare.com`), ngrok (`*.ngrok-free.app`) and localtunnel (`*.loca.lt`)
+get a new hostname on every restart. They validate like any public hostname; a tunnel name that spells an
+IPv4 address in four groups is refused like every such name, including ngrok's random names for IPv4 clients
+(`<hex>-203-0-113-5.ngrok-free.app`); the error says so and suggests a tunnel URL without an embedded IP (an
+ngrok static domain, a `trycloudflare.com` URL). Moving a
+saved provider (writer or GEO engine) to a new host keeps its key only on explicit confirmation
+(`keepKeyForNewHost: true` from the "Send my saved key to <new host>" checkbox, unchecked by default, in
+"Edit URL or key" and the inline "Quick update URL"); without it the server answers 400
+`key_required_for_new_host`, so a saved key is never forwarded to another host silently. Because the AAD binds
+workspace and row (not the host), the stored envelope stays valid and is not re-encrypted; the server checks
+that it still decrypts before accepting the move. The new host is re-validated (SSRF rules above), only that
+host is admitted to the guarded fetch, and the old host is no longer reachable with the key. Each change is
+recorded in `workspace_custom_provider_changes` (migration 0012: when, which owner, which fields, old and new
+host, whether the key was kept; no key material) and shown on the card ("URL changed ..."). After the save the
+UI re-runs Test; the test result's `modelListed: false` (the saved model is not in the new host's complete
+model list) makes the card offer "Change model". A provider saved without a name is labelled with its host; that
+default name follows the new host (a chosen name is kept). Runs read the base URL, host, model and key of a
+custom provider in one statement just before use (`resolveCustomProviderRow`), so a move that lands while a
+run starts can never pair the old host with a new key. Risk of claimable tunnel names: scheduled runs and the
+automatic Test send the saved key to whatever host is saved. A tunnel name that someone else can claim when
+your tunnel is down (e.g. a chosen `*.loca.lt` subdomain, first come, first served) will receive the saved key,
+and the writer evidence or GEO prompts, on the next run or Test; prefer random or reserved names (Cloudflare
+quick tunnel, an ngrok reserved domain), and when you stop the tunnel, update the URL, remove the provider, or
+rotate the key. The "Send my saved key to <host>" confirmation shows a short form of this note.
+
 ## Workspace model selection — built-in providers (`workspace_provider_models`)
 
-Added 2026-10-01 (owner request). The owner picks the model per workspace for `typesafe`, `gemini`,
-`perplexity`, `openai_geo` and `anthropic_geo` on the Integrations page. Rules:
+Added 2026-10-01 (owner request). The owner picks the model per workspace for `gemini`, `perplexity`,
+`openai_geo` and `anthropic_geo` on the Integrations page. TypeSafe (Jev) is not selectable (owner decision
+2026-10-01, "TypeSafe will perform as it is"): its card has no model row, both model routes answer 400
+`model_not_selectable` for it whatever the key source, and it always runs `TYPESAFE_MODEL`, else the
+documented `jev-latest` alias (a stored `typesafe` row from the short-lived picker is ignored). Rules:
 `src/worker/platform/provider-models.ts`; routes: `src/worker/routes/credentials.ts`
 (`POST /workspaces/:wid/credentials/:provider/models`, `PUT /workspaces/:wid/credentials/:provider/model`).
-Resolution: workspace selection > operator env var > none (`setup_required`, "choose a model"); TypeSafe's
-last step is its documented `jev-latest` alias. List endpoints, verified against the official docs on
-2026-10-01:
+Resolution: workspace selection > operator env var > none (`setup_required`, "choose a model"). List
+endpoints, verified against the official docs on 2026-10-01 (the TypeSafe row is reference only; the model
+routes no longer call it):
 
 | Provider | List request | Response used | Official docs |
 |---|---|---|---|
@@ -142,8 +171,6 @@ operator key is used:
   no verified price and this workspace uses the operator key; add your own <Vendor> key to use it.", and
   the card and the board show `setup_required` with that text. `PUT .../model` refuses such a choice
   up front (400, `reason: "operator_key_unpriced"`);
-- a workspace-chosen TypeSafe model is ignored (`TYPESAFE_MODEL`, else `jev-latest`); `PUT .../model`
-  refuses it (400, `reason: "operator_key_model"`), and the TypeSafe list is not fetched with the operator key;
 - a model list fetched with the operator key returns only ids with a verified rate. For OpenAI it also
   drops fine-tuned (`ft:`) models and models whose `owned_by` is not `openai`, `system` or
   `openai-internal`, so the operator's private model and organisation names are never shown to a tenant.

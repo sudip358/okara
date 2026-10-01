@@ -9,8 +9,11 @@
  * Element and verdict come from LIVE_SEO_ELEMENT_MAP (elements.ts): code over the stored tier and raw answer,
  * never Jev text. Paging uses per-source rowid high-water marks (cursor.ts), as runs/activity.ts does, so rows
  * stamped out of order are never missed; `k` (crawl attempt) restarts the finding mark when a retried crawl
- * rewrote its findings. Rows read but not shown advance their mark; when a whole read is hidden rows, the next
- * rows are read in the same request (bounded), so empty lists mean "nothing new right now".
+ * rewrote its findings. The SQL reads only rows that become list rows (element/action questions, query answers
+ * with stored query text, reused link suggestions, mapped rules), so an empty page means "nothing new right
+ * now". Should a read row still be hidden (e.g. whitespace-only query text), it advances its mark, and reading
+ * continues in the same request (at most MAX_READ_ROUNDS reads) until the page is full or every source is
+ * drained, so a page shorter than `limit` means nothing more is stored right now.
  *
  * Enrichment is batched over the page's rows only (lookups.ts). Totals always cover the whole run and are
  * grouped queries capped at LIVE_TOTALS_GROUP_CAP groups (`truncated` when a cap was hit).
@@ -76,7 +79,7 @@ import {
 } from "./lookups";
 
 export const LIVE_TOTALS_GROUP_CAP = 500;
-/** Extra reads in one request when everything read so far was hidden rows (see the module note). */
+/** Reads per request while hidden rows keep a page from filling (see the module note). */
 const MAX_READ_ROUNDS = 5;
 /** Query-batch cache keys (seo/recommend/query-batch.ts): relevance pre-filter and buyer-query view. */
 const QUERY_BATCH_PREFIXES = ["qrel:", "buyer:"] as const;
@@ -123,7 +126,9 @@ const LINK_ROW_SQL = `(question_id IS NULL AND json_type(${A}, '$.linkSuggestion
   .map(() => "?")
   .join(", ")}))`;
 const LINK_KINDS = LIVE_SEO_ELEMENT_MAP.linkSuggestion.kinds;
-const FEED_QUESTION_IDS = uniq([...ELEMENT_QUESTION_IDS, ...ACTION_QUESTION_IDS, ...QUERY_QUESTION_IDS]);
+const ROW_QUESTION_IDS = uniq([...ELEMENT_QUESTION_IDS, ...ACTION_QUESTION_IDS]);
+/** Query answers are listed only with their stored query text (storedQueryText); the rest are never read. */
+const QUERY_ROW_SQL = `(question_id IN (${QUERY_QUESTION_IDS.map(() => "?").join(", ")}) AND json_type(${A}, '$.query') = 'text' AND trim(json_extract(${A}, '$.query')) <> '')`;
 const ph = (n: number) => Array.from({ length: n }, () => "?").join(", ");
 
 // ------------------------------------------------------------------ rows
@@ -344,23 +349,27 @@ export async function buildLiveSeo(db: Db, project: ProjectRow, runId: string, o
   const start = { d: cursor?.d ?? 0, f: (cursor?.k ?? 0) === crawlKey ? (cursor?.f ?? 0) : 0, r: cursor?.r ?? 0 };
 
   // ---------------------------------------------------------------- read + merge (bounded rounds)
+  // Reads continue until the page is full or every source is drained, so a page shorter than `limit` means
+  // nothing more is stored right now (hidden rows never shorten a page while more rows exist).
   let marks = { ...start };
-  let taken: Array<{ source: SourceKey; entry: MarkedEntry<Payload> & { payload: Payload } }> = [];
-  for (let round = 0; round < MAX_READ_ROUNDS; round++) {
+  const taken: Array<{ source: SourceKey; entry: MarkedEntry<Payload> & { payload: Payload } }> = [];
+  for (let round = 0; round < MAX_READ_ROUNDS && taken.length < limit; round++) {
+    const want = limit - taken.length;
     const [dRows, fRows, rRows] = await Promise.all([
       db.all<DecisionRaw>(
         `SELECT rowid AS rid, id, candidate_key, question_id, provider, model, tier, outcome, reason_code, answer_json, created_at
            FROM decision_records
           WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND rowid > ?
-            AND (question_id IN (${ph(FEED_QUESTION_IDS.length)}) OR ${LINK_ROW_SQL})
+            AND (question_id IN (${ph(ROW_QUESTION_IDS.length)}) OR ${QUERY_ROW_SQL} OR ${LINK_ROW_SQL})
           ORDER BY rowid LIMIT ?`,
         ws,
         pid,
         run.id,
         marks.d,
-        ...FEED_QUESTION_IDS,
+        ...ROW_QUESTION_IDS,
+        ...QUERY_QUESTION_IDS,
         ...LINK_KINDS,
-        limit,
+        want,
       ),
       crawl
         ? db.all<FindingRaw>(
@@ -372,7 +381,7 @@ export async function buildLiveSeo(db: Db, project: ProjectRow, runId: string, o
             crawl.id,
             marks.f,
             ...ELEMENT_RULE_IDS,
-            limit,
+            want,
           )
         : Promise.resolve([] as FindingRaw[]),
       db.all<RecRaw>(
@@ -384,7 +393,7 @@ export async function buildLiveSeo(db: Db, project: ProjectRow, runId: string, o
         pid,
         run.id,
         marks.r,
-        limit,
+        want,
       ),
     ]);
     const merged = mergeMarked<SourceKey, Payload>(
@@ -394,13 +403,13 @@ export async function buildLiveSeo(db: Db, project: ProjectRow, runId: string, o
         r: rRows.map((r) => ({ rid: r.rid, at: r.created_at, id: `rec:${r.id}`, payload: { kind: "rec", r } as Payload })),
       },
       marks,
-      limit,
+      want,
     );
     marks = merged.marks;
-    taken = merged.taken;
-    // Stop unless every row read was hidden AND some source may have more (a full read).
-    if (taken.length > 0 || !merged.exhausted) break;
-    if (dRows.length < limit && fRows.length < limit && rRows.length < limit) break;
+    taken.push(...merged.taken);
+    // Stopped at the limit, or every source was read to its end: nothing more to read now.
+    if (!merged.exhausted) break;
+    if (dRows.length < want && fRows.length < want && rRows.length < want) break;
   }
 
   const crawlChanged = (cursor?.k ?? 0) !== crawlKey;
@@ -430,10 +439,15 @@ export async function buildLiveSeo(db: Db, project: ProjectRow, runId: string, o
   const recByKey = new Map<string, { id: string; target_json: string; suggested_snippet: string | null }>();
   if (candidateKeys.length > 0) {
     const rows = await inChunks(candidateKeys, (chunk, p) =>
+      // The newest recommendation per candidate key (one row per key).
       db.all<{ id: string; dedup_key: string; target_json: string; suggested_snippet: string | null }>(
         `SELECT id, dedup_key, target_json, suggested_snippet FROM recommendations
-          WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND dedup_key IN (${p})
-          ORDER BY created_at DESC, rowid DESC LIMIT ${chunk.length * 2}`,
+          WHERE workspace_id = ? AND project_id = ?
+            AND rowid IN (SELECT MAX(rowid) FROM recommendations
+                           WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND dedup_key IN (${p}) GROUP BY dedup_key)
+          LIMIT ${chunk.length}`,
+        ws,
+        pid,
         ws,
         pid,
         run.id,
@@ -448,10 +462,15 @@ export async function buildLiveSeo(db: Db, project: ProjectRow, runId: string, o
   const snippetKeys = candidateKeys.filter((k) => recByKey.get(k)?.suggested_snippet);
   if (snippetKeys.length > 0) {
     const rows = await inChunks(snippetKeys, (chunk, p) =>
+      // The newest stored action choice per candidate (one row per key).
       db.all<{ candidate_key: string; tier: string | null; answer_json: string | null }>(
         `SELECT candidate_key, tier, answer_json FROM decision_records
-          WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND question_id = ? AND candidate_key IN (${p})
-          ORDER BY rowid DESC LIMIT ${chunk.length * 2}`,
+          WHERE workspace_id = ? AND project_id = ?
+            AND rowid IN (SELECT MAX(rowid) FROM decision_records
+                           WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND question_id = ? AND candidate_key IN (${p}) GROUP BY candidate_key)
+          LIMIT ${chunk.length}`,
+        ws,
+        pid,
         ws,
         pid,
         run.id,

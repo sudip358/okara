@@ -70,7 +70,7 @@ export function Panel({
       )}
     >
       <header className="flex min-w-0 flex-wrap items-start justify-between gap-x-4 gap-y-1 px-4 pt-3 pb-2">
-        <div className="min-w-0 flex-1">
+        <div className="min-w-[min(100%,15rem)] flex-1">
           <h2 id={id} className="flex min-w-0 items-center gap-2.5 text-lg leading-tight font-bold tracking-tight text-zinc-950 sm:text-xl dark:text-zinc-50">
             <span aria-hidden="true" className={cx("inline-flex h-6 min-w-8 shrink-0 items-center justify-center rounded px-1.5 font-mono text-xs font-semibold", a.chip)}>
               {num}
@@ -81,7 +81,7 @@ export function Panel({
           {subtitle && <p className="mt-1 line-clamp-2 text-xs text-zinc-600 dark:text-zinc-400">{subtitle}</p>}
         </div>
         {counter && (
-          <div className="shrink-0 text-right">
+          <div className="ml-auto shrink-0 text-right">
             <p className="flex items-baseline justify-end gap-1.5">
               <AnimatedNumber value={counter.value} reduced={reduced} className={cx("font-mono text-3xl leading-none font-bold tracking-tight sm:text-4xl", a.text)} />
               <span className="font-mono text-xs text-zinc-600 dark:text-zinc-400">{counter.suffix}</span>
@@ -249,7 +249,7 @@ export function PanelEmpty({ children }: { children: ReactNode }) {
 /** Table header cell (mono, muted) for the dense live tables. */
 export function LTH({ children, className, title }: { children?: ReactNode; className?: string; title?: string }) {
   return (
-    <th scope="col" title={title} className={cx("px-1.5 py-1.5 text-left font-mono text-[11px] font-normal whitespace-nowrap text-zinc-500 first:pl-0 last:pr-0 dark:text-zinc-400", className)}>
+    <th scope="col" title={title} className={cx("overflow-hidden px-1.5 py-1.5 text-left align-bottom font-mono text-[11px] font-normal text-ellipsis whitespace-nowrap text-zinc-500 first:pl-0 last:pr-0 dark:text-zinc-400", className)}>
       {children}
     </th>
   );

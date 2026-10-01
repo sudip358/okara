@@ -17,13 +17,13 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | PUT | /workspaces/:wid/credentials/:provider | platform-auth | body `{apiKey}`; `:provider` is `typesafe`, `gemini`, `perplexity`, `openai_geo`, `anthropic_geo` or `writer` (migration 0008 widens the CHECK); stores encrypted; returns provider status |
 | POST | /workspaces/:wid/credentials/:provider/test | platform-auth | body `{apiKey?}` (tests the typed key if given, else saved); `{ok, detail}` |
 | DELETE | /workspaces/:wid/credentials/:provider | platform-auth | `{ok:true}` |
-| POST | /workspaces/:wid/credentials/:provider/models | platform-auth | owner; body `{apiKey?}`; `ProviderModelList` from the provider's documented list endpoint (see "Workspace model selection"); `:provider` is `typesafe`, `gemini`, `perplexity`, `openai_geo` or `anthropic_geo` |
-| PUT | /workspaces/:wid/credentials/:provider/model | platform-auth | owner; body `{model: string \| null}`; the workspace's model for that provider (`null` = back to the operator default); returns provider status |
+| POST | /workspaces/:wid/credentials/:provider/models | platform-auth | owner; body `{apiKey?}`; `ProviderModelList` from the provider's documented list endpoint (see "Workspace model selection"); `:provider` is `gemini`, `perplexity`, `openai_geo` or `anthropic_geo` (`typesafe`: 400 `model_not_selectable`) |
+| PUT | /workspaces/:wid/credentials/:provider/model | platform-auth | owner; body `{model: string \| null}`; the workspace's model for that provider (`null` = back to the operator default); returns provider status; `typesafe`: 400 `model_not_selectable` |
 | GET | /workspaces/:wid/custom-providers | platform-auth | `CustomProvidersResponse` (member; never keys, only `keyHint`). See "Custom providers" |
 | POST | /workspaces/:wid/custom-providers | platform-auth | owner; body `CustomProviderInput` `{label?, baseUrl, model, apiKey, useAsWriter?}`; 201 `CustomProvidersResponse`; 409 over 5 per workspace |
-| PATCH | /workspaces/:wid/custom-providers/:id | platform-auth | owner; body `{label?, baseUrl?, model?, apiKey?}` (key optional = keep; required when the host changes); `CustomProvidersResponse` |
-| DELETE | /workspaces/:wid/custom-providers/:id | platform-auth | owner; `CustomProvidersResponse` (the writer reverts to the default when it was selected) |
-| POST | /workspaces/:wid/custom-providers/:id/test | platform-auth | member; `GET {base}/models` with the saved key; `{ok, detail}` (recorded as last test) |
+| PATCH | /workspaces/:wid/custom-providers/:id | platform-auth | owner; body `CustomProviderPatchInput` `{label?, baseUrl?, model?, apiKey?, keepKeyForNewHost?}` (key optional = keep; a base URL on a new host needs a new `apiKey` or `keepKeyForNewHost: true`, else 400 `key_required_for_new_host`); every change is logged (see "Base URL changes"); `CustomProvidersResponse` |
+| DELETE | /workspaces/:wid/custom-providers/:id | platform-auth | owner; `CustomProvidersResponse` (the writer reverts to the default when it was selected; its change log is removed too) |
+| POST | /workspaces/:wid/custom-providers/:id/test | platform-auth | member; `GET {base}/models` with the saved key; `{ok, detail, modelListed}` (recorded as last test) |
 | POST | /workspaces/:wid/custom-providers/models | platform-auth | owner; body `{baseUrl, apiKey}` or `{providerId}`; `CustomProviderModelList` |
 | PUT | /workspaces/:wid/writer-source | platform-auth | owner; body `{source: "default" \| "custom:<id>"}`; `CustomProvidersResponse` |
 | GET | /workspaces/:wid/projects | platform-projects | `Project[]` |
@@ -124,8 +124,8 @@ docs/provider-contracts.md, "Custom OpenAI-compatible provider".
   name pointing at a private address is covered by Workers egress (see docs/provider-contracts.md).
   Normalised: lowercase punycode host (IDN accepted), trailing slashes and a pasted `/chat/completions`,
   `/completions` or `/models` suffix removed. Re-validated before every use.
-- Other 400s name their field: `apiKey` (8-400 printable ASCII; `key_required` when a PATCH changes the
-  host without a new key: a saved key is only ever sent to the host it was saved for), `model` (1-200
+- Other 400s name their field: `apiKey` (8-400 printable ASCII; `key_required_for_new_host` and
+  `key_unreadable`, see "Base URL changes" below), `keepKeyForNewHost` (`invalid` unless a boolean), `model` (1-200
   characters, no control characters), `label` (optional, up to 60 characters; defaults to the host). Input
   values are never echoed. Unknown fields are 400. 412 `setup_required` without `TOKEN_ENCRYPTION_KEY_V1` or
   before migration 0010 is applied.
@@ -143,7 +143,9 @@ docs/provider-contracts.md, "Custom OpenAI-compatible provider".
   provider's body is never echoed; model ids are untrusted plain text. With `{providerId}` the stored key is
   decrypted and sent only to the stored host. Rate limit 10 per minute per user and workspace.
 - `POST .../:id/test` has the same outcomes, records `last_tested_*`, and notes whether the saved model is
-  listed. Members may test; every write and the model fetch are owner-only. Every route checks
+  listed: `modelListed` true (listed), false (not in a complete, non-empty list: the UI offers "Change model")
+  or null (unknown: no list, an empty or truncated list, or a failed request). Members may test; every write
+  and the model fetch are owner-only. Every route checks
   `requireWorkspaceMember` / `requireWorkspaceOwner` and filters by `workspace_id`; another workspace's id is
   404.
 - Runs and request-scoped writers (`runs/runtime.ts` `buildRunContext`, `buildWriterForWorkspace`): a selected,
@@ -159,7 +161,52 @@ docs/provider-contracts.md, "Custom OpenAI-compatible provider".
   generic redaction does not know.
 - Export: `GET /projects/:pid/export` includes `tables.workspace_custom_providers` (id, label, base URL, host,
   model, writer flag, last test, timestamps); `key_enc` and `key_hint` are never selected. Rows are deleted
-  with their workspace (`ON DELETE CASCADE`).
+  with their workspace (`ON DELETE CASCADE`). It also includes `tables.workspace_custom_provider_changes`
+  (provider id, `changed_at`, `changed_by` user id, `fields`, old/new base URL and host,
+  `key_kept_for_new_host`; never key material).
+
+### Base URL changes (tunnels) and the change log
+
+Added 2026-10-01 (owner request: "the custom base URL keeps on changing", for tunnels such as
+`*.trycloudflare.com`, `*.ngrok-free.app`, `*.loca.lt`). Same rules for writer and GEO rows.
+
+- `PATCH .../custom-providers/:id` with a `baseUrl` on the same host (another path) keeps the saved key; no
+  flag needed.
+- A `baseUrl` on a NEW host with a new `apiKey`: the new key is encrypted and stored (`keepKeyForNewHost` is
+  ignored).
+- A `baseUrl` on a NEW host without a new key: 400 `bad_request`, `details: {field: "apiKey", reason:
+  "key_required_for_new_host"}`, nothing changes, unless the body has `keepKeyForNewHost: true` (the owner
+  ticked "Send my saved key to <new host>"). Then the saved key is kept for the new host: the envelope's
+  AES-GCM AAD is `workspace_custom_providers:<workspace_id>:<id>` (workspace and row, not the host), so the
+  stored `key_enc` stays valid and bound to the row without re-encryption. The server first checks that the
+  saved key still decrypts (else 400 `reason: "key_unreadable"`, re-enter it). A saved key is never sent to a
+  new host without this explicit flag.
+- `keepKeyForNewHost` on an unchanged host is ignored. Any base URL, model or key change resets
+  `last_tested_*`; the UI then re-runs Test and offers "Change model" when `modelListed` is false.
+- Change log (migration 0012, `workspace_custom_provider_changes`): every PATCH that changes something writes
+  one row in the same batch as the update: `changed_at`, `changed_by` (the owner's user id), `fields`
+  (`label`, `base_url`, `model`, `api_key`), old/new base URL and host (when the base URL changed) and
+  `key_kept_for_new_host`. No key material. `CustomProviderStatus.changes` (GET and every write response) lists
+  the newest 5 per provider, newest first: `{at, by (name, else email; null when the user is gone), fields
+  (label | baseUrl | model | apiKey), fromBaseUrl, toBaseUrl, fromHost, toHost, keyKeptForNewHost}`. Members
+  see it too. Before migration 0012 the PATCH still applies (unlogged) and `changes` is `[]`. DELETE removes
+  the provider's log rows in the same batch; rows also go with their workspace.
+- Tunnel names validate like any other public hostname (`abc-def-123.trycloudflare.com`,
+  `1a2b-34-56.ngrok-free.app`, `my-gpu.loca.lt`); IP literals, `localhost`/`.local` names and names that spell
+  an IPv4 address in four groups (for example `127-0-0-1.trycloudflare.com`, or ngrok's random names for IPv4
+  clients such as `7c3e-103-21-58-191.ngrok-free.app`) are still refused; that error message suggests a tunnel
+  URL without an embedded IP (an ngrok static domain, a `trycloudflare.com` URL). The same base URL rules apply
+  with `keepKeyForNewHost: true` (400 `details.field: "baseUrl"`, nothing stored, nothing fetched).
+- A provider saved without a name is labelled with its host. When the host changes and the label is still the
+  old host (no `label` in the body, or the same label sent back), the label follows the new host and the change
+  log lists `label`; a chosen name is kept. The web form sends `label` only when the owner changed it.
+- Claimable tunnel names: runs and Test send the saved key to the saved host automatically. A tunnel name that
+  someone else can claim when your tunnel is down (e.g. a chosen `*.loca.lt` subdomain) will receive the saved
+  key on the next run or Test; prefer random or reserved names (Cloudflare quick tunnel, an ngrok reserved
+  domain), and when you stop the tunnel, update the URL, remove the provider, or rotate the key.
+- Runs read a custom provider's base URL, host, model and key in one statement right before use, so a PATCH
+  that lands while a run starts never pairs the old host with a new key.
+- Other workspaces get 404, members 403; the key is never echoed.
 
 ## Workspace model selection (built-in providers)
 
@@ -168,12 +215,22 @@ Routes: `src/worker/routes/credentials.ts`; rules: `src/worker/platform/provider
 `ProviderModelOption`, `ProviderModelList` in `src/shared/types.ts`. Contract: docs/provider-contracts.md
 "Workspace model selection".
 
-- Providers: `typesafe`, `gemini`, `perplexity`, `openai_geo`, `anthropic_geo` (not `writer`: 404; the writer
-  has the custom provider flow below). Unknown providers 404.
-- Resolution (runtime `buildRunContext`, `buildDecisionsForWorkspace`, `capabilityPresence`, provider
-  statuses): workspace selection > the operator env var (`TYPESAFE_MODEL`, `GEMINI_MODEL`, `PERPLEXITY_MODEL`,
-  `OPENAI_GEO_MODEL`, `ANTHROPIC_GEO_MODEL`) > none = `setup_required` ("choose a model"); TypeSafe falls
-  back to its documented `jev-latest` alias. `GET /workspaces/:wid/credentials` rows add `modelSource`
+- Providers: `gemini`, `perplexity`, `openai_geo`, `anthropic_geo` (not `writer`: 404; the writer has the
+  custom provider flow below). Unknown providers 404.
+- TypeSafe (Jev) is not workspace-selectable (owner decision 2026-10-01, "TypeSafe will perform as it is"):
+  both model routes answer 400 `bad_request` "TypeSafe (Jev) always uses the operator's model
+  (TYPESAFE_MODEL, else the documented jev-latest alias); a TypeSafe model cannot be chosen per workspace."
+  (`details: {field: "provider", reason: "model_not_selectable"}`) for every key source (operator key, the
+  workspace's own key, a typed key, no key), after the owner check (members 403, non-members 404), and
+  nothing is fetched or stored. The runtime (`buildRunContext`, `buildDecisionsForWorkspace`) always passes
+  `TYPESAFE_MODEL` (else `jev-latest`), whichever key is used; a `typesafe` row left in
+  `workspace_provider_models` by the short-lived picker is ignored (never loaded, never reported as
+  `workspaceModel`) and is harmless. The TypeSafe card shows its model in the summary line as before, with
+  no model row.
+- Resolution (runtime `buildRunContext`, `capabilityPresence`, provider statuses): workspace selection > the
+  operator env var (`GEMINI_MODEL`, `PERPLEXITY_MODEL`, `OPENAI_GEO_MODEL`, `ANTHROPIC_GEO_MODEL`) > none =
+  `setup_required` ("choose a model"); TypeSafe: `TYPESAFE_MODEL` > its documented `jev-latest` alias
+  (`modelSource` `"operator"` or `"default"`). `GET /workspaces/:wid/credentials` rows add `modelSource`
   (`"workspace" | "operator" | "default" | null`), `rateKnown` (false = no verified rate in
   `providers/rates.ts`, cost recorded as unknown; null for TypeSafe, the writer, or no model),
   `workspaceModel` (the stored selection, also when it is not in effect; null when none) and `modelNote`
@@ -184,8 +241,7 @@ Routes: `src/worker/routes/credentials.ts`; rules: `src/worker/platform/provider
   `runtime` run event, and the provider row shows `state: "setup_required"` with `modelNote` "<Vendor> model
   <id> has no verified price and this workspace uses the operator key; add your own <Vendor> key to use it."
   (the same text is the board lane's `stateDetail`; `capabilityPresence` reports the engine as not
-  configured). A workspace-chosen TypeSafe model is ignored on the operator key (`TYPESAFE_MODEL`, else
-  `jev-latest`; `modelNote` says so). Reason: an unpriced call reserves and settles only the flat
+  configured). Reason: an unpriced call reserves and settles only the flat
   unknown-rate amount, so the operator's `GLOBAL_USD_MICROS_PER_DAY` would undercount (docs/limits-and-costs.md).
 - `POST .../credentials/:provider/models` (owner, CSRF, 10 per minute per user and workspace): key = the typed
   `apiKey` (8-400 printable ASCII; never stored), else the saved workspace key (decrypted server-side), else
@@ -202,15 +258,13 @@ Routes: `src/worker/routes/credentials.ts`; rules: `src/worker/platform/provider
   the Test run will tell you". With `keySource: "operator_key"` only ids a workspace may run on that key are
   returned (verified rate; for OpenAI no `ft:` models and only `owned_by` `openai`, `system` or
   `openai-internal`), and `detail` adds "Only models with a verified price are listed with the operator key;
-  add your own key to see all models." when anything was left out. TypeSafe is not listed with the operator
-  key (`ok: null`, no request is made). Perplexity's list endpoint needs no authentication, so a successful
+  add your own key to see all models." when anything was left out. Perplexity's list endpoint needs no authentication, so a successful
   list does not prove a Perplexity key works.
 - `PUT .../credentials/:provider/model` (owner, CSRF): `{model}` validated per provider (400 `bad_request`,
   `details: {field: "model", reason: "invalid_model"}`, value never echoed; unknown fields 400); `null` deletes
   the selection. Without a saved workspace key, while the operator key is set: a GEO engine model without a
   verified rate is 400 "Add your own API key to use a model without a verified price." (`details: {field:
-  "model", reason: "operator_key_unpriced"}`) unless it is the operator's env model, and a TypeSafe model is
-  400 (`reason: "operator_key_model"`) unless it is the operator's model. 412 before migration 0011. Returns
+  "model", reason: "operator_key_unpriced"}`) unless it is the operator's env model. 412 before migration 0011. Returns
   the provider status. Another workspace's id is 404 (non-members) or 403 (members who are not the owner).
 - A model change changes the cohort key (prompt-set version, provider, model, grounding, sampling options),
   so trend series split by model and are never compared across models.
@@ -461,9 +515,12 @@ stay in `GET /runs/:runId/activity`, which is the view's 2 s heartbeat.
 - **Unknown cost** is null, never $0.
 
 **Implementation files:**
-- Builders: `src/worker/live/seo.ts`, `src/worker/live/geo.ts`.
+- Builders: `src/worker/live/seo-board.ts` (`buildLiveSeo`), `src/worker/live/geo-board.ts` (`buildLiveGeo`).
+- Cursor and merge: `src/worker/live/cursor.ts`. Batched lookups (pages, snapshots, Search Console, link
+  suggestions): `src/worker/live/lookups.ts`.
 - Element map: `src/worker/live/elements.ts` (`LIVE_SEO_ELEMENT_MAP`).
 - Routes: `src/worker/routes/live.ts`, mounted with one line in `app.ts`.
+- Tests: `tests/live-elements.test.ts`, `tests/live-worker-*.test.ts`.
 
 **Parameters (both routes):**
 - `runId` is required: 400 `bad_request` (`details: {field: "runId"}`) when missing.
@@ -481,7 +538,13 @@ stay in `GET /runs/:runId/activity`, which is the view's 2 s heartbeat.
 - Each source selects rows with `rowid` above its mark, in `rowid` order, with a `LIMIT`. The sources are
   merged by repeatedly taking the head with the smallest `(at, id)` until `limit`, so each mark advances
   exactly over the rows read.
-- Rows read but not shown, such as a decision for a question with no element, still advance their mark.
+- The source queries read only rows that become list rows (for example, decisions of non-element questions
+  and rules without an element are never read). Should a read row still be hidden (a whitespace-only stored
+  query), it advances its mark and reading continues in the same request until the page is full or every
+  source is drained (at most 5 reads). So a page shorter than `limit` means nothing more is stored right now;
+  the one exception is a run of more hidden rows than 5 reads cover, which returns a short page whose
+  cursor still moves on. GEO answers are only shortened by the hold below, while the run is active.
+- The `limit` counts the rows of all lists together.
 - Each list in the response is ascending by `(at, id)`. Clients merge pages by `id`: an item can be older
   than items of a previous page.
 - With nothing new, the request's cursor is echoed (null when none was given). Without `after`, rows start
@@ -490,9 +553,10 @@ stay in `GET /runs/:runId/activity`, which is the view's 2 s heartbeat.
 **Totals:**
 - `totals` always cover the whole run, regardless of `after`.
 - They are computed with grouped queries, never by loading every row. For example, element verdicts group
-  by `question_id`, `tier`, and the band or option taken with
-  `COALESCE(json_extract(answer_json,'$.answer.noul'), json_extract(answer_json,'$.noul'))` and the
-  `$.answer.choice` / `$.choice` equivalents.
+  by `question_id`, `tier`, the stored answer type, the Noul side (`noul >= 0.5`) and the Choice option,
+  read from `answer_json` the same way as the rows (a top-level string `type` is a bare answer, else
+  `$.answer`; malformed JSON is treated as no answer). Code then applies the element map to each group, so
+  totals and rows always agree.
 - Each grouped query is limited to 500 groups. `totals.truncated` is true when any cap was hit; counts are
   then lower bounds.
 
@@ -500,75 +564,149 @@ stay in `GET /runs/:runId/activity`, which is the view's 2 s heartbeat.
 - No rate limit. The UI fetches a feed only after the heartbeat reports new rows of that kind, or every 6 s
   while the run is active, and never while the tab is hidden.
 - Demo projects return their seeded demo runs' rows, with `labels` including "Demo data - simulated run".
+  The demo SEO run seeds Jev element judgments for 6 demo pages (title, meta, intro, schema, freshness,
+  topics, page action and action choice, in the runtime `answer_json` format with policy tiers) and query
+  relevance answers for its 8 Search Console queries, so the labelled replay fills "Every SEO element,
+  judged one by one" and "Queries classified by Jev" (`src/worker/demo/fixtures.ts` `DEMO_SEO_JUDGMENTS`,
+  `DEMO_QUERY_RELEVANCE`).
 
 ### GET /projects/:pid/live/seo?runId=&after=&limit= → `LiveSeoBoardResponse`
 
-Sources and cursor keys `{d, f, r, k?}`:
+Builder `src/worker/live/seo-board.ts`. Sources and cursor keys `{d, f, r, k?}`:
 
 | List | Source (key) | id | at | Notes |
 |---|---|---|---|---|
-| `elements` (role element/action) | `decision_records` of the run (`d`) | `dec:<id>` | `created_at` | Ids are the same as the `jev_decision` activity items. Element and verdict come from `LIVE_SEO_ELEMENT_MAP` using the STORED `tier` and raw `answer_json` (code, never Jev text). Question-less rows whose `answer_json.kind` is `internal_link_suggestion` become `Links` rows with the suggester's stored tier and Noul and `linkSuggestionId`. Rows of non-element questions are skipped |
-| `queries` | same rows (`d`) | `dec:<id>` | `created_at` | Questions `seo.query_relevance`, `seo.buyer_query`, `seo.buyer_ready`, `seo.query_intent`. `query` from `answer_json.query`, else the readable candidate key; a row with no recoverable query text is skipped. `band`: act → yes/no (noul ≥ 0.5), flag → middle, else null |
-| `elements` (role rule) | `audit_findings` of the run's crawl attempt (`f`, plus `k` = `crawl_runs.started_at` as in "Run activity", so a retried crawl restarts the mark) | `find:<id>` | `created_at` | Rules mapped in `LIVE_SEO_ELEMENT_MAP.rules`; class fact → change, heuristic → review; unmapped rules skipped |
-| `recommendations` | `recommendations` of the run (`r`) | `rec:<id>` | `created_at` | Stage and status as stored at read time (`totals.pipeline` carries current counts) |
+| `elements` (role element/action) | `decision_records` of the run (`d`) | `dec:<id>` | `created_at` | Ids are the same as the `jev_decision` activity items. Questions mapped in `LIVE_SEO_ELEMENT_MAP` only; element and verdict from the STORED `tier` and raw `answer_json` (code, never Jev text). Question-less rows that reused an internal link suggestion (`answer_json.linkSuggestionId` set and `answer_json.kind` `internal_link`, the kind recommend/generate.ts stores, or `internal_link_suggestion`) become `Links` rows with the suggester's stored tier and Noul (`links.should_exist`) |
+| `queries` | same rows (`d`) | `dec:<id>` | `created_at` | Questions `seo.query_relevance`, `seo.buyer_query`, `seo.buyer_ready`, `seo.query_intent`, listed only with the query text the row stores (`answer_json.query`, written by the query batches). Readable candidate keys hold a token bag (`text.ts queryKey`: sorted words without stopwords), not the typed query, so an in-candidate `seo.query_intent` answer is not listed; it is still counted in `totals.queries.intent`. `queryKey` is the normalized query (`normalizeDemandQuery`), so the rows of one query share it. `band`: act → yes/no (noul ≥ 0.5), flag → middle, else null |
+| `elements` (role rule) | `audit_findings` of the run's crawl attempt (`f`, plus `k` = `crawl_runs.started_at` as in "Run activity", so a retried crawl restarts the mark) | `find:<id>` | `created_at` | Rules mapped in `LIVE_SEO_ELEMENT_MAP.rules`; class (rule registry) fact → change, heuristic → review; unmapped rules (for example `AI-SEARCH-CRAWLER-BLOCKED`) are not read |
+| `recommendations` | `recommendations` of the run (`r`) | `rec:<id>` | `created_at` | Stage and status as stored at read time (`totals.pipeline` carries current counts). `action` clipped to 200, `suggestedSnippet` to 400 |
 
-- **Row enrichment:** one batched query per kind for the rows of the page only.
-  - **Target:** the candidate's recommendation (`recommendations.dedup_key = decision_records.candidate_key`,
-    same run), via `target_json`. Fallback: the first http(s) segment of the readable candidate key in
-    `answer_json.candidate`. Fallback: the finding's `url` or `template`.
-  - **`pageId`:** `pages` by normalized URL.
-  - **`now`:** the element's value in the page's snapshot from this run's crawl (else the latest
-    snapshot): title, meta description, first H1, first paragraph, JSON-LD types, word count,
-    last updated, canonical, robots meta, status code. Clipped to 160.
-  - **`proposed`:** `suggested_snippet` of the candidate's recommendation, clipped to 160.
-  - **`gsc` (elements):** page metrics from the latest usable sync's current window (`pageMetrics`;
-    `basis` page_rows, or query_page_rows as a lower bound).
-  - **`gsc` (queries):** query rows of the same window.
-  - **`jev`:** carries only stored fields: `noul` for Noul, and `choice`/`confidence` for Choice. A
-    Noul never has a confidence.
+**Verdicts** (`src/worker/live/elements.ts`; keep = the stored answer says the element needs no change):
+
+| Question | Keep when | Change when | Review |
+|---|---|---|---|
+| `seo.title_matches_query`, `seo.meta_matches_query`, `seo.answer_is_direct`, `seo.schema_content_match`, `seo.covers_topic#t<n>` | act tier, noul ≥ 0.5 | act tier, noul < 0.5 | flag, drop, n/a or no usable answer |
+| `seo.outdated_information`, `seo.thin_content#e<n>`, `seo.page_overlap#<k>` (inverted) | act tier, noul < 0.5 | act tier, noul ≥ 0.5 | same |
+| `seo.intent_page_fit` (Choice) | act, `fits` | act, `mismatch` | `partial_fit`, `insufficient_context`, flag, drop |
+| `seo.page_action` (Choice) | act, `keep` | act, `update` / `merge` / `remove` | `insufficient_context`, flag, drop |
+| `seo.action_choice` (Choice, role action; element by option) | act, `no_action` (demo fixture `none`) | act, any other mapped option | unmapped option, flag, drop |
+| Reused link suggestion | never | suggester tier act | any other tier |
+| Rule finding | never | class fact | class heuristic |
+
+- A flag or drop tier, an n/a tier, or a missing or malformed answer is never keep or change.
+- The decision **outcome** (selected, or rejected with `budget`, `duplicate`, `low_fit`, …) is a pipeline
+  result about the candidate, not a judgment of the element, so it never changes the verdict.
+- **Pending:** the server never sends a pending verdict. A candidate that is not judged yet has no stored
+  row, so it has no row here. Replay pending states and the live "waiting for the next stored judgment"
+  placeholders are client-side only.
+
+**Row enrichment** (batched over the page's rows only; `src/worker/live/lookups.ts`):
+- **Target** (first match wins): the candidate's recommendation (`recommendations.dedup_key =
+  decision_records.candidate_key`, same run) via `target_json`: a URL gives its path; a template gives
+  "Template: <name> (N URLs)"; a site gives "Site". Next, the first http(s) segment of the readable
+  candidate key in `answer_json.candidate`. For rule rows, the finding's `url`, else "Template: <template>",
+  else "Site". Otherwise "Candidate <readable key>" (the stored key).
+- **`pageId`:** `pages` matched by URL (the stored spelling, with or without `www.` and a trailing slash,
+  compared by page key).
+- **`now`:** the element's value in the page's snapshot from this run's crawl, else the page's latest
+  snapshot that was not skipped. Plain text clipped to 160:
+
+  | Element | Value |
+  |---|---|
+  | Title | `title` |
+  | Meta | `meta_description` |
+  | Title + meta | "Title: <title> · Meta: <meta or none>" |
+  | H1 | first `h1_json` entry |
+  | Headings | first 3 `headings_json` texts, joined with " · " |
+  | Intro | `first_paragraph` |
+  | Schema | `jsonld_types_json`, joined ("Product, Offer") |
+  | Content | "1,240 words" |
+  | Freshness | "Updated 2025-03-02" (`last_updated`) |
+  | Canonical | `canonical` |
+  | Indexing | `robots_meta` |
+  | Status | "HTTP 404" |
+  | Intent | "<page type> page" |
+  | Links | "<target path> has N internal links in" (`link_suggestions.target_inlinks`) |
+  | others | null |
+
+- **`proposed`:** the candidate recommendation's `suggested_snippet` (clipped to 160). It is never set on
+  a keep row or a rule row. When the candidate's stored `seo.action_choice` maps to an element, it is set
+  only on the action row and on rows of that element's family ("Title + meta" covers Title and Meta), so
+  a meta-description draft is never shown as a new title.
+- **`gsc`:** current window of the latest usable sync (completed or partial), device rows excluded.
+  - Pages: the page's page-dimension rows (`basis` page_rows) when the sync stored any for it, else the
+    sum of its query+page rows (`query_page_rows`, a lower bound: anonymized queries are omitted).
+  - Queries: query-dimension rows (`query_rows`), else the sum of the query's query+page rows
+    (`query_page_rows`).
+  - `position` is the impression-weighted average of the stored rows (an approximation), rounded to 0.01;
+    null without impressions. Grouped in SQL, so the read is bounded by the page's URLs and queries.
+- **`jev`:** stored fields only: `noul` for Noul, `choice`/`confidence` for Choice, the stored `tier`,
+  `provider` and `model` (for Links rows, the link suggestion's provider and model). A Noul never has a
+  confidence.
+
+**Other fields:**
 - **`gscSync`:** the newest `gsc_syncs` row with `run_id` = the run (error clipped to 200). It is null
   when the run did not sync; the UI then uses `GET /seo/overview` for charts.
+- **`labels`:** "Demo data - simulated run" for demo projects; a note that verdicts are code over stored
+  answers; the Search Console window when any row carries figures; "No Jev answers were stored in this
+  run: element rows come from rule findings only." for a finished run without provider answers; the
+  lower-bound note when `totals.truncated`.
 - **`totals`:**
-  - **`elements`:** counts verdicts over element and rule rows. Action rows count only for candidates
-    with no element-question row in the run (`candidate_key NOT IN (…)` subquery).
-  - **`queries`:** distinct query keys and band counts per question; `intent` counts per Choice option.
+  - **`elements`:** counts verdicts over element, action, Links and rule rows. Action rows count only
+    for candidates with no element-question row in the run (`candidate_key IN (…)` subquery), matching
+    the UI rule that hides such action rows.
+  - **`queries`:** `distinct` = distinct normalized queries with stored text (query-batch keys
+    `qrel:` / `buyer:` without the prefix, else `answer_json.query`). Band counts per question
+    (`unanswered` = drop tier or no usable answer). `intent` counts per stored option at act or flag tier.
   - **`pipeline`:** `candidates` and `judged` are distinct `candidate_key`s with decisions in the run,
-    excluding query-batch keys; `judged` is those with a non-null `provider`. `rejectedByReason` counts
-    distinct rejected candidates by `reason_code`. `created`, `byStage` and `byStatus` count the run's
-    recommendations.
+    excluding the query-batch keys `qrel:` and `buyer:`; `judged` is those with a non-null `provider`.
+    `rejectedByReason` counts distinct rejected candidates by `reason_code` ("unspecified" when none).
+    `created`, `byStage` and `byStatus` count the run's recommendations (every stage and status key is
+    present).
 
 ### GET /projects/:pid/live/geo?runId=&after=&limit= → `LiveGeoBoardResponse`
 
-Sources and cursor keys `{o, r}`:
+Builder `src/worker/live/geo-board.ts`. Sources and cursor keys `{o, r, p?}`:
 
 | List | Source (key) | id | at | Notes |
 |---|---|---|---|---|
-| `answers` | `geo_observations` of the run with `measurement_type = 'api'` (`o`) | `obs:<id>` | `created_at` | Ids are the same as the `engine_answer` activity items. `outcome` uses `answerOutcome` (AI engine board definition). While the run is active, an `ok` answer not yet analysed holds back the source for at most 120 s (`OBS_HOLD_MS`), exactly as "Run activity"; after that it is sent with `outcome: null` and re-sent with the same `id` once analysed |
+| `answers` | `geo_observations` of the run with `measurement_type = 'api'` (`o`) | `obs:<id>` | `created_at` | Ids are the same as the `engine_answer` activity items. `outcome` uses `answerOutcome` (AI engine board definition). While the run is active, an `ok` answer not yet analysed holds back the source for at most 120 s (`OBS_HOLD_MS`), exactly as "Run activity"; after that (or once the run has ended) it is sent with `outcome: null`. Its rowid is kept in the cursor (`p`, at most 20) and it is re-sent with the same `id` once its analysis is stored (or it is no longer `ok`) |
 | `recommendations` | `recommendations` of the run (`r`) | `rec:<id>` | `created_at` | As for SEO (agent `geo`) |
 
-- **Answer enrichment:** batched over the page's observation ids.
+- **Answer enrichment:** batched over the page's observation ids (chunks of 90).
   - **From the self brand row** (`geo_brand_observations`, `is_self = 1`): `position` (`list_rank`, only
-    in a real list), `sentiment` with its stored `method`, and `recommendationStatus`.
-  - **From `geo_citations`** (ordered by `position`, resolved with `resolveCitation`): `citedInstead` is
-    the first non-own citation, `ownCitedUrl` the first own one, and `citationCount` the total.
-  - **`searchQueryCount`:** from `geo_search_queries`; null when the provider does not expose them
-    (`usage_json`).
-  - **`latencyMs`:** the `geo_answer%` provider call joined on `request_id`.
-  - **`cost`:** the observation's `cost_usd` and `cost_is_estimate`.
-  - **`matchedPage`:** `coverage/answer-coverage.ts` `matchPrompt` over the latest crawl's pages, using
-    the answer's own engine search queries and the latest GSC page data. It is computed at most once per
-    request, and only when the page has at least one answer.
+    stored for a real ordered list), `sentiment` with its stored `method` (null when the brand was not
+    mentioned: `not_applicable`), and `recommendationStatus`.
+  - **From `geo_citations`** (ordered by `position`, resolved with `resolveCitation`, so wrapped redirect
+    URLs and `www.` count as the real host): `citedInstead` is the first non-own citation (any outcome),
+    `ownCitedUrl` the first own one, and `citationCount` the total.
+  - **`searchQueryCount`:** the answer's stored `geo_search_queries`; 0 when the provider exposes them
+    (`usage_json.searchQueriesExposed` or a `searchQueries` list, the board's rule) and there were none;
+    null when not exposed.
+  - **`latencyMs`:** the `geo_answer%` provider call of the run joined on `request_id`.
+  - **`cost`:** the observation's `cost_usd` (null = unknown, never $0) and `cost_is_estimate`.
+  - **`matchedPage`:** `coverage/answer-coverage.ts` `matchPrompt` with the answer's own engine search
+    queries, over the latest completed crawl of a verified site (titles/H1s of up to 2,000 pages) and the
+    latest usable sync's query+page rows for those queries. Loaded once per request, only when the page
+    has answers; null for failed answers and when nothing matches.
 - **`plannedPrompts`:** only when `after` is absent. It uses the same selection as `geo/batch.ts` and the
-  activity lanes: approved prompts of the run's prompt set (the active set before any answer), ordered by
-  position, capped by `project_limits.geo_prompts_per_run` (or `DEFAULT_PROMPTS_PER_RUN`), at most 200.
-  It is null on later pages or when unknown.
-- **`totals.lanes`:** one entry per provider with answers in the run. Lanes without answers come from
-  `RunActivity.lanes`.
+  activity lanes: approved prompts of the run's prompt set (the active set while an active run has no
+  answer yet), ordered by position, capped by `project_limits.geo_prompts_per_run` (or
+  `DEFAULT_PROMPTS_PER_RUN`), at most 200; `[]` when the cap is 0 or less. It is null on later pages or
+  when unknown.
+- **`totals.lanes`:** one entry per provider with answers in the run (board order, then custom lanes).
+  Lanes without answers come from `RunActivity.lanes`.
   - `cited`, `named`, `missing`, `failed` and `pending` (stored `ok` answers not yet analysed) are
-    counted over all the run's answers (cap 2,000, as in "Run activity").
+    counted over the run's answers (cap 2,000, as in "Run activity").
   - `cost` follows `laneCost`: value null when any cost is unknown, `isEstimate` when any is estimated.
-  - `citedInstead` is the host most often first-cited among the lane's `missing` and `named` answers,
-    with that answer count.
+  - `citedInstead` is the host most often first-cited (first non-own citation) among the lane's `missing`
+    and `named` answers, with that answer count (ties: host name order). Citation rows read for it are
+    capped at 20,000.
 - **`totals.pipeline`:** as for SEO, over the run's GEO decisions and recommendations.
+- **`totals.truncated`:** true when the answer or citation cap was hit, or a pipeline group cap.
+- **`labels`:** "Demo data - simulated run" for demo projects; "API-sampled answers; consumer apps may
+  answer differently."; the outcome definitions; the best-page heuristic note when any answer has a
+  matched page; "N stored answer(s) are awaiting analysis…" when any lane has pending answers; the custom
+  engine note when a custom lane answered; the lower-bound note when truncated.
 - **Not shown:** a per-run citation rate. The UI derives it from the lane counts and always shows the
   numerator and denominator. There is no score, projection, or prompts-per-second rate.

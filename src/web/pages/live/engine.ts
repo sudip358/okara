@@ -353,7 +353,10 @@ export interface ElementDisplayRow {
  * bottom of the pending block, right above the newest resolved row) then resolved rows, newest first.
  * Action rows show only for candidates with no element row; otherwise they become a "Next:" note.
  */
-export function elementDisplay(revealed: readonly LiveSeoElementRow[], pending: readonly LiveSeoElementRow[] = [], maxResolved = 200): ElementDisplayRow[] {
+export function elementDisplay(revealedIn: readonly LiveSeoElementRow[], pendingIn: readonly LiveSeoElementRow[] = [], maxResolved = 200): ElementDisplayRow[] {
+  const byTime = (a: LiveSeoElementRow, b: LiveSeoElementRow) => compareEvents({ t: toMs(a.at), id: a.id }, { t: toMs(b.at), id: b.id });
+  const revealed = revealedIn.slice().sort(byTime);
+  const pending = pendingIn.slice().sort(byTime);
   const all = [...revealed, ...pending];
   const withElement = elementCandidates(all);
   const nextNote = new Map<string, string>();
@@ -546,6 +549,15 @@ export function stepSegments(items: readonly ActivityItem[], agent: "seo" | "geo
   return { steps, lanes };
 }
 
+/** Lane state at the replay playhead, from revealed geo_batch:<engine> steps (never invented: no step = queued/idle). */
+export function laneStateAt(items: readonly ActivityItem[], provider: string, answered: number): "queued" | "asking" | "done" | "idle" {
+  const st = stepStatus(items, `geo_batch:${provider}`);
+  if (st === "running") return "asking";
+  if (st !== "not_started") return "done";
+  if (answered > 0) return "asking";
+  return stepStatus(items, "geo.batch") === "running" ? "queued" : "idle";
+}
+
 export function stepStatus(items: readonly ActivityItem[], step: string): SegmentStatus {
   let st: SegmentStatus = "not_started";
   for (const it of items) {
@@ -726,29 +738,36 @@ export type HeatCell =
   | { kind: "none" };
 
 /**
- * Prompt × engine cell. pending = genuinely pending (live: lane queued/asking while the run is active;
- * replay: the stored answer's time is not reached yet). not_run = the run is over and no answer exists.
+ * Prompt × engine cell. pending = genuinely pending: live, the lane is queued/asking while the run is active;
+ * replay, one of the next stored answers (`pendingKeys`, at most MAX_PENDING). A pair answered later in the
+ * replay (`futureKeys`) stays empty; not_run = the run is over (or replayed) and no answer was stored for it.
  */
 export function heatCell(
   revealed: ReadonlyMap<string, LiveGeoAnswerRow>,
-  upcoming: ReadonlySet<string>,
+  pendingKeys: ReadonlySet<string>,
+  futureKeys: ReadonlySet<string>,
   promptId: string,
   provider: string,
-  opts: { active: boolean; laneBusy: boolean; replaying: boolean },
+  opts: { liveActive: boolean; laneBusy: boolean },
 ): HeatCell {
   const key = `${promptId}|${provider}`;
   const a = revealed.get(key);
   if (a) return a.outcome === null ? { kind: "analysing", answer: a } : { kind: "answer", outcome: a.outcome, answer: a };
-  if (opts.replaying && upcoming.has(key)) return { kind: "pending" };
-  if (opts.active && opts.laneBusy) return { kind: "pending" };
-  if (!opts.active) return { kind: "not_run" };
-  return { kind: "none" };
+  if (pendingKeys.has(key)) return { kind: "pending" };
+  if (futureKeys.has(key)) return { kind: "none" };
+  if (opts.liveActive) return opts.laneBusy ? { kind: "pending" } : { kind: "none" };
+  return { kind: "not_run" };
 }
+
+export const answerKey = (a: Pick<LiveGeoAnswerRow, "promptId" | "provider">): string | null => (a.promptId ? `${a.promptId}|${a.provider}` : null);
 
 /** Latest revealed answer per (promptId, provider). */
 export function answerIndex(answers: readonly LiveGeoAnswerRow[]): Map<string, LiveGeoAnswerRow> {
   const m = new Map<string, LiveGeoAnswerRow>();
-  for (const a of answers) if (a.promptId) m.set(`${a.promptId}|${a.provider}`, a);
+  for (const a of answers) {
+    const k = answerKey(a);
+    if (k) m.set(k, a);
+  }
   return m;
 }
 
@@ -761,6 +780,35 @@ export function sumCost(costs: readonly CostUsd[]): CostUsd {
     est ||= c.isEstimate;
   }
   return { value: costs.length ? Math.round(sum * 1e6) / 1e6 : null, isEstimate: est };
+}
+
+// ------------------------------------------------------------------ run selection
+export interface RunPick {
+  id: string;
+  agent: "seo" | "geo";
+  status: string;
+  createdAt?: string;
+}
+
+const isActiveStatus = (s: string) => s === "pending" || s === "running";
+
+/**
+ * Which run the Live view shows (design section 1): `?run=` wins; with a mode, that agent's active run, else
+ * its latest finished run (from `current`, else the run list); otherwise the newest active run, else the
+ * latest finished one. null = nothing to show for that choice.
+ */
+export function pickLiveRun(current: readonly RunPick[] | null, requested: string | null, mode: "seo" | "geo" | null, list: readonly RunPick[] | null = null): string | null {
+  if (requested) return requested;
+  const runs = current ?? [];
+  if (mode) {
+    const mine = runs.filter((r) => r.agent === mode);
+    const hit = mine.find((r) => isActiveStatus(r.status)) ?? mine[0];
+    if (hit) return hit.id;
+    let best: RunPick | null = null;
+    for (const r of list ?? []) if (r.agent === mode && (!best || (r.createdAt ?? "") > (best.createdAt ?? ""))) best = r;
+    return best?.id ?? null;
+  }
+  return (runs.find((r) => isActiveStatus(r.status)) ?? runs[0])?.id ?? null;
 }
 
 // ------------------------------------------------------------------ arrivals (animation + announcements)

@@ -11,7 +11,7 @@ import { cx, ErrorState, StateBanner } from "@web/components/ui";
 import { LineChart } from "@web/components/LineChart";
 import { DemandCurveChart } from "@web/components/DemandCurveChart";
 import type { QueryGroup, SegmentStatus } from "../engine";
-import { Crossfade, Shimmer } from "../motion";
+import { Shimmer } from "../motion";
 import { JevChip, LTD, LTH, Panel, PanelEmpty, ToneChip, type ToneName } from "../parts";
 import { bandLabel, clipText, fmtInt, jevChipText, positionText, shortDate, urlHost, urlPath, windowShort } from "../text";
 
@@ -68,13 +68,13 @@ export function PagesPanel({
       ) : (
         <div className="space-y-2.5">
           {nowReading && (
-            <Crossfade k={nowReading.url} className="rounded-lg border border-sky-200 bg-sky-50/60 px-3 py-2 dark:border-sky-900 dark:bg-sky-950/40">
+            <div className="rounded-lg border border-sky-200 bg-sky-50/60 px-3 py-2 dark:border-sky-900 dark:bg-sky-950/40">
               <p className="text-[11px] text-zinc-600 dark:text-zinc-400">Now reading · {urlHost(nowReading.url)}</p>
-              <p className="lv-rise truncate font-mono text-base font-semibold text-zinc-950 dark:text-zinc-50" title={nowReading.url}>
+              <p key={nowReading.url} className="lv-rise truncate font-mono text-base font-semibold text-zinc-950 dark:text-zinc-50" title={nowReading.url}>
                 {urlPath(nowReading.url)}
               </p>
               <p className="text-[11px] text-zinc-500 dark:text-zinc-400">Latest stored read; may trail the crawler by up to 10 pages.</p>
-            </Crossfade>
+            </div>
           )}
           {frac !== null && (
             <div
@@ -262,17 +262,27 @@ export function GscPanel({
 }
 
 // ------------------------------------------------------------------ 03 Queries classified by Jev
-function JevCell({ row, kind }: { row: LiveSeoQueryRow | null; kind: "band" | "choice" | "buyer" }) {
+/** One Jev cell: the stored answer as a chip, then its Jev line (Noul: tier + raw value; Choice: tier + real confidence). */
+function JevCell({ row, kind }: { row: LiveSeoQueryRow | null; kind: "band" | "choice" }) {
   if (!row) return <span className="text-zinc-400 dark:text-zinc-500">—</span>;
-  const chip = jevChipText(row.jev);
-  let label: { label: string; tone: ToneName };
-  if (kind === "choice") label = row.jev.choice ? { label: row.jev.choice.replace(/_/g, " "), tone: row.jev.tier === "act" ? "info" : "review" } : { label: "No answer", tone: "none" };
-  else if (kind === "band" && row.jev.tier === "drop") label = { label: "Dropped (not relevant)", tone: "none" };
-  else label = bandLabel(row.band);
+  const tip = [row.jev.questionId, row.jev.provider, row.jev.model].filter(Boolean).join(" · ");
+  if (kind === "choice") {
+    const tier = row.jev.tier && row.jev.tier !== "n/a" ? row.jev.tier : "no tier";
+    const conf = row.jev.confidence !== null && Number.isFinite(row.jev.confidence) ? ` · conf ${row.jev.confidence.toFixed(2)}` : "";
+    return (
+      <span className="flex min-w-0 flex-col items-start gap-0.5">
+        <ToneChip tone={row.jev.choice ? (row.jev.tier === "act" ? "info" : "review") : "none"} title={row.jev.choice ?? undefined}>
+          {row.jev.choice ? row.jev.choice.replace(/_/g, " ") : "No answer"}
+        </ToneChip>
+        <JevChip text={tier === "drop" ? "Jev drop · withheld" : `Jev ${tier}${conf}`} tier={row.jev.tier} title={`${jevChipText(row.jev)} — ${tip}`} />
+      </span>
+    );
+  }
+  const label: { label: string; tone: ToneName } = row.jev.tier === "drop" ? { label: "Dropped (not relevant)", tone: "none" } : bandLabel(row.band);
   return (
     <span className="flex min-w-0 flex-col items-start gap-0.5">
       <ToneChip tone={label.tone}>{label.label}</ToneChip>
-      <JevChip text={chip} tier={row.jev.tier} title={[row.jev.questionId, row.jev.provider, row.jev.model].filter(Boolean).join(" · ")} />
+      <JevChip text={jevChipText(row.jev)} tier={row.jev.tier} title={tip} />
     </span>
   );
 }
@@ -313,13 +323,13 @@ export function QueriesPanel({
           <caption className="sr-only">Queries classified by Jev in this run</caption>
           <thead className="border-b border-zinc-200 dark:border-zinc-800">
             <tr>
-              <LTH className="w-[40%] sm:w-[32%]">Query</LTH>
-              <LTH className="hidden w-[20%] sm:table-cell" title={win ? `Search Console, ${windowShort(win)}` : "Search Console"}>
-                Clicks · Impr. · Pos.
+              <LTH className="w-[36%]" title={win ? `Clicks · impressions · position: Search Console, ${windowShort(win)} (measured)` : "Search Console (measured)"}>
+                Query
+                <span className="block text-[10px]">{win ? `clicks · impr. · pos., GSC ${windowShort(win)}` : "clicks · impr. · pos."}</span>
               </LTH>
-              <LTH className="w-[36%] sm:w-[22%]">Relevant?</LTH>
-              <LTH className="hidden w-[14%] sm:table-cell">Intent</LTH>
-              <LTH className="w-[24%] sm:w-[12%]">Buyer?</LTH>
+              <LTH className="w-[25%]">Relevant?</LTH>
+              <LTH className="w-[29%]">Intent</LTH>
+              <LTH className="w-[10%]">Buyer?</LTH>
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
@@ -327,16 +337,16 @@ export function QueriesPanel({
               const b = buyerBy.get(g.query.trim().toLowerCase());
               const isFresh = [g.relevance, g.intent, g.buyer, g.buyerReady].some((r) => r && fresh.has(r.id));
               return (
-                <tr key={g.queryKey} className={cx(isFresh && "lv-row-in", g.pending && "opacity-70")}>
+                <tr key={g.queryKey} data-pending={g.pending ? "true" : undefined} className={cx(isFresh && "lv-row-in", g.pending && "text-zinc-500 dark:text-zinc-400")}>
                   <LTD className="text-zinc-900 dark:text-zinc-100" title={g.query}>
                     <span className="block truncate">{g.query}</span>
+                    <span aria-hidden={g.pending || undefined} className={cx("block truncate font-mono text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400", g.pending && "lv-blur")}>
+                      {g.gsc ? `${fmtInt(g.gsc.clicks)} · ${fmtInt(g.gsc.impressions)} · ${positionText(g.gsc)}` : "no GSC row"}
+                    </span>
                   </LTD>
-                  <LTD className={cx("hidden font-mono tabular-nums text-zinc-700 sm:table-cell dark:text-zinc-300", g.pending && "lv-blur")}>
-                    <span aria-hidden={g.pending || undefined}>{g.gsc ? `${fmtInt(g.gsc.clicks)} · ${fmtInt(g.gsc.impressions)} · ${positionText(g.gsc)}` : "—"}</span>
-                  </LTD>
-                  <LTD className="overflow-visible whitespace-normal">{g.pending ? <Shimmer label="Reading…" /> : <JevCell row={g.relevance} kind="band" />}</LTD>
-                  <LTD className="hidden overflow-visible whitespace-normal sm:table-cell">{g.pending ? null : <JevCell row={g.intent} kind="choice" />}</LTD>
-                  <LTD className="whitespace-normal">
+                  <LTD className="overflow-visible">{g.pending ? <Shimmer label="Reading…" /> : <JevCell row={g.relevance} kind="band" />}</LTD>
+                  <LTD className="overflow-visible">{g.pending ? null : <JevCell row={g.intent} kind="choice" />}</LTD>
+                  <LTD>
                     {g.pending ? null : b ? (
                       <ToneChip tone="info" title={`Cached buyer label (${b.intentTier})`}>
                         {b.intent === "transactional" ? "Buyer" : "Researching"}

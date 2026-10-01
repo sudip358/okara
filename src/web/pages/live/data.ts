@@ -12,7 +12,7 @@
  * Every row shown comes from these stored rows. Cursors are opaque and committed only with the rows they
  * cover; a 404/403 on the run is final ("This run is no longer available.").
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ActivityItem,
   AnswerCoverageRow,
@@ -320,14 +320,23 @@ export interface SeoProjectData {
 /** `gscKey`/`recommendKey` change when those steps reach a terminal status (one refetch each). */
 export function useSeoProjectData(projectId: string, enabled: boolean, keys: { gsc: string; recommend: string }): SeoProjectData {
   const on = enabled && !!projectId;
-  return {
-    overview: useApi<SeoOverview>(on ? livePaths.overview(projectId) : null, [keys.gsc]),
-    buyer: useApi<CoverageResponse<BuyerQueryRow>>(on ? livePaths.buyer(projectId) : null, [keys.recommend]),
-    links: useApi<LinkSuggestionReport>(on ? livePaths.links(projectId) : null),
-    competitors: useCompetitorPages(on ? projectId : ""),
-    coverage: useApi<CoverageResponse<AnswerCoverageRow>>(on ? boardPaths.answerCoverage(projectId) : null),
-    evidence: useApi<CoverageResponse<CitationEvidenceRow>>(on ? livePaths.evidence(projectId) : null),
-  };
+  const overview = useApi<SeoOverview>(on ? livePaths.overview(projectId) : null, [keys.gsc]);
+  const buyer = useApi<CoverageResponse<BuyerQueryRow>>(on ? livePaths.buyer(projectId) : null, [keys.recommend]);
+  const links = useApi<LinkSuggestionReport>(on ? livePaths.links(projectId) : null);
+  const competitors = useCompetitorPages(on ? projectId : "");
+  const coverage = useApi<CoverageResponse<AnswerCoverageRow>>(on ? boardPaths.answerCoverage(projectId) : null);
+  const evidence = useApi<CoverageResponse<CitationEvidenceRow>>(on ? livePaths.evidence(projectId) : null);
+  // Stable identity while nothing changed, so the memoised boards skip the replay clock's 100 ms ticks.
+  return useMemo(
+    () => ({ overview, buyer, links, competitors, coverage, evidence }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    stateDeps([overview, buyer, links, competitors, coverage, evidence]),
+  );
+}
+
+/** Dependency list for a group of ApiStates: what a panel can see changes only with data, error or loading. */
+function stateDeps(states: Array<{ data: unknown; error: unknown; loading: boolean }>): unknown[] {
+  return states.flatMap((st) => [st.data, st.error, st.loading]);
 }
 
 export interface GeoProjectData {
@@ -341,12 +350,15 @@ export interface GeoProjectData {
 export function useGeoProjectData(projectId: string, enabled: boolean, keys: { batch: string; proposals: string; lanes: string }): GeoProjectData {
   const on = enabled && !!projectId;
   const lanesKey = useThrottled(keys.lanes, 10_000);
-  return {
-    board: useApi<EngineBoardResponse>(on ? boardPaths.board(projectId) : null, [keys.batch]),
-    competitors: useCompetitorPages(on ? projectId : ""),
-    plans: useApi<RewritePlansResponse>(on ? boardPaths.rewritePlans(projectId) : null, [keys.proposals]),
-    coverage: useApi<CoverageResponse<AnswerCoverageRow>>(on ? boardPaths.answerCoverage(projectId) : null, [lanesKey]),
-  };
+  const board = useApi<EngineBoardResponse>(on ? boardPaths.board(projectId) : null, [keys.batch]);
+  const competitors = useCompetitorPages(on ? projectId : "");
+  const plans = useApi<RewritePlansResponse>(on ? boardPaths.rewritePlans(projectId) : null, [keys.proposals]);
+  const coverage = useApi<CoverageResponse<AnswerCoverageRow>>(on ? boardPaths.answerCoverage(projectId) : null, [lanesKey]);
+  return useMemo(
+    () => ({ board, competitors, plans, coverage }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    stateDeps([board, competitors, plans, coverage]),
+  );
 }
 
 /** Latest run of an agent from the run list (only needed when the other agent has no run in `current`). */

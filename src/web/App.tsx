@@ -36,6 +36,7 @@ const router = createBrowserRouter([
             errorElement: <RouteError embedded />,
             children: [
               { index: true, lazy: page(() => import("./pages/Overview"), "OverviewPage") },
+              { path: "live", lazy: page(() => import("./pages/live/LivePage"), "LivePage") },
               { path: "seo", lazy: page(() => import("./pages/seo/SeoAuditPage"), "SeoAuditPage") },
               { path: "internal-links", lazy: page(() => import("./pages/links/InternalLinksPage"), "InternalLinksPage") },
               { path: "draft-check", lazy: page(() => import("./pages/draft-check/DraftCheckPage"), "DraftCheckPage") },

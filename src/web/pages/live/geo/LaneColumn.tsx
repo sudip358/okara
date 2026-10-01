@@ -222,11 +222,11 @@ export function LaneColumn(p: LaneColumnProps) {
   const dId = `lane-${p.provider.replace(/[^a-z0-9]/gi, "-")}-plan`;
   return (
     <section aria-label={`${name} lane`} className="flex min-w-0 flex-col gap-3 rounded-xl border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-      <header className="flex min-w-0 items-start justify-between gap-2">
-        <div className="flex min-w-0 items-start gap-2">
+      <header className="flex min-w-0 flex-wrap items-start justify-between gap-2">
+        <div className="flex min-w-[min(100%,11rem)] flex-1 items-start gap-2">
           <EngineBadge provider={p.provider} label={label} size="md" />
           <div className="min-w-0">
-            <h3 className="truncate text-base font-bold text-zinc-950 dark:text-zinc-50" title={label}>
+            <h3 className="line-clamp-2 text-base leading-tight font-bold break-words text-zinc-950 dark:text-zinc-50" title={label}>
               {label}
             </h3>
             <p className="flex min-w-0 flex-wrap items-center gap-x-1 text-[11px] text-zinc-600 dark:text-zinc-400">
@@ -243,7 +243,7 @@ export function LaneColumn(p: LaneColumnProps) {
         </div>
         <LaneGauge ratio={ratio} caption={custom ? "Mention rate (no web search)" : "Citation rate, this run"} reduced={p.reduced} />
       </header>
-      <dl className="grid grid-cols-3 gap-x-3 gap-y-2 sm:grid-cols-6">
+      <dl className="grid grid-cols-3 gap-x-3 gap-y-2">
         <Stat label="Answered" value={<AnimatedNumber value={p.answered} reduced={p.reduced} />} sub={`${p.lane.planned !== null ? `of ${fmtInt(p.lane.planned)} planned` : "plan unknown"}${p.lane.lastLatencyMs !== null && !p.replaying ? ` · last ${fmtInt(p.lane.lastLatencyMs)} ms` : ""}`} />
         <Stat label="Citing us" tone="green" value={<AnimatedNumber value={p.totals.cited} reduced={p.reduced} />} />
         <Stat label="Naming us, not citing" value={<AnimatedNumber value={p.totals.named} reduced={p.reduced} />} />

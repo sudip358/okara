@@ -99,7 +99,7 @@ need more than 10 ms of CPU per step, so agent runs will fail on the free plan. 
    | `GEMINI_MODEL`, `PERPLEXITY_MODEL` | Exact model ids (e.g. `perplexity/sonar`); no defaults. Operator defaults only: a workspace owner can choose its own model on the Integrations page (workspace selection wins; migration 0011). On the operator's key a workspace may only pick models with a verified price in `src/worker/providers/rates.ts` (or the model set here); any model with its own key |
    | `OPENAI_GEO_MODEL` | Exact OpenAI model id for the OpenAI web_search lane (a model the web search guide supports, e.g. `gpt-5.5`, `gpt-4.1`); no default. Unset: the lane is `setup_required`. Cost estimates exist for the ids in `src/worker/providers/rates.ts`; any other id records cost as unknown |
    | `ANTHROPIC_GEO_MODEL` | Exact Claude model id for the Anthropic web_search lane (e.g. `claude-sonnet-5-5`); no default. Web search must be enabled for the organization in the Claude Console, otherwise every call fails with HTTP 400 |
-   | `TYPESAFE_MODEL` | Jev model alias, default `jev-latest`. Always used with the operator's TypeSafe key; a workspace's own model choice applies only with its own TypeSafe key |
+   | `TYPESAFE_MODEL` | Jev model alias, default `jev-latest`. Always used, with the operator's key and with a workspace's own TypeSafe key alike (TypeSafe has no per-workspace model choice) |
    | `WRITER_PROVIDER`, `WRITER_MODEL` | `anthropic` or `openai_compatible`, plus an exact model id |
    | `WRITER_BASE_URL` | Required for `openai_compatible` (https only), e.g. `https://api.openai.com/v1` |
    | `WRITER_REASONING_EFFORT` | Optional, `openai_compatible` reasoning models only: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`, sent as `reasoning_effort`. Unset: not sent. Any other value makes the writer `setup_required` with the value named. |
@@ -134,7 +134,9 @@ need more than 10 ms of CPU per step, so agent runs will fail on the free plan. 
    default writer. Migration `0011_workspace_models_custom_geo.sql` adds per-workspace model selection
    (`workspace_provider_models`) and the `role` column for custom GEO engines; until it is applied, models come
    from the env vars only, saving a model or adding a custom GEO engine returns `setup_required`, and custom
-   writers keep working.
+   writers keep working. Migration `0012_custom_provider_changes.sql` adds the custom provider change log
+   (when a base URL, model, label or key changed, and by whom); until it is applied, edits still apply but are
+   not logged, and cards show no "URL changed" line.
 
 5. **Deploy**
    ```sh

@@ -92,8 +92,8 @@ the operator chose the model that runs on the operator's key. The rule now:
   `*_MODEL`). Otherwise the lane is not built (a `runtime` run event says why), the Integrations card and the
   AI engines board show `setup_required` ("add your own <Vendor> key to use it"), and
   `PUT /workspaces/:wid/credentials/:provider/model` refuses it (400 `operator_key_unpriced`).
-- On the operator key a workspace's TypeSafe model is ignored (`TYPESAFE_MODEL`, else `jev-latest`); the
-  PUT refuses it (400 `operator_key_model`).
+- TypeSafe (Jev) always runs the operator's model (`TYPESAFE_MODEL`, else `jev-latest`) on any key; a
+  workspace cannot choose one (both model routes answer 400 `model_not_selectable`).
 - Model lists fetched with the operator key show only priced ids (and no fine-tuned or org-owned OpenAI
   models).
 - With the workspace's own key any valid model may run; its spend is bounded by the project limits and its

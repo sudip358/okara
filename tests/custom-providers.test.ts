@@ -13,9 +13,13 @@ import { decryptSecret, encryptSecret } from "@worker/lib/crypto";
 import { credentialSources } from "@worker/platform/credentials";
 import {
   MAX_CUSTOM_PROVIDERS,
+  CUSTOM_PROVIDER_CHANGES_SHOWN,
+  EMBEDDED_IPV4_MESSAGE,
   customProviderAad,
   extractModelIds,
   fetchModelList,
+  listCustomProviders,
+  resolveCustomProviderRow,
   resolveCustomWriter,
   validateCustomBaseUrl,
   type BaseUrlRejectReason,
@@ -139,6 +143,10 @@ describe("custom provider base URL validation", () => {
     ["https://llm-3-70b.example.com/v1", "https://llm-3-70b.example.com/v1", "llm-3-70b.example.com"],
     ["https://v1.2.3.example.com/v1", "https://v1.2.3.example.com/v1", "v1.2.3.example.com"],
     ["https://svc.example.com/v1", "https://svc.example.com/v1", "svc.example.com"], // "svc" as a label, not the suffix
+    // Tunnel hosts that change on every restart (owner request: "the custom base URL keeps on changing").
+    ["https://abc-def-123.trycloudflare.com/v1", "https://abc-def-123.trycloudflare.com/v1", "abc-def-123.trycloudflare.com"],
+    ["https://1a2b-34-56.ngrok-free.app/v1", "https://1a2b-34-56.ngrok-free.app/v1", "1a2b-34-56.ngrok-free.app"],
+    ["https://my-gpu.loca.lt/v1", "https://my-gpu.loca.lt/v1", "my-gpu.loca.lt"],
   ];
   it.each(accept)("accepts %s", (raw, baseUrl, host) => {
     expect(validateCustomBaseUrl(raw, "https://okara.example.com")).toEqual({ ok: true, baseUrl, host });
@@ -401,7 +409,7 @@ describe("custom provider routes", () => {
     // A saved key is only ever sent to the host it was saved for.
     const moved = await call(env, u, "PATCH", `${cp(u)}/${first.id}`, { baseUrl: "https://attacker.example.net/v1" });
     expect(moved.status).toBe(400);
-    expect(moved.json!.error!.details).toMatchObject({ field: "apiKey", reason: "key_required" });
+    expect(moved.json!.error!.details).toMatchObject({ field: "apiKey", reason: "key_required_for_new_host" });
     const samePath = await call(env, u, "PATCH", `${cp(u)}/${first.id}`, { baseUrl: "https://llm.example.com/v2" });
     expect(samePath.json!.data.providers[0]).toMatchObject({ baseUrl: "https://llm.example.com/v2", host: "llm.example.com" });
     const rekeyed = await call(env, u, "PATCH", `${cp(u)}/${first.id}`, { baseUrl: "https://new.example.net/v1", apiKey: `${SECRET}-NEW9` });
@@ -880,5 +888,378 @@ describe("migration 0010 and export", () => {
     const body = JSON.parse(text) as { data: { tables: Record<string, Array<Record<string, unknown>>> } };
     expect(body.data.tables.workspace_custom_providers).toHaveLength(1);
     expect(body.data.tables.workspace_custom_providers![0]).toMatchObject({ base_url: BASE, host: "llm.example.com", model: "meta/llama-3.3-70b", is_writer: 1 });
+  });
+});
+
+// ------------------------------------------------------------------ tunnel hosts: base URL changes without re-entering the key
+const TUNNEL = "https://abc-def-123.trycloudflare.com/v1";
+const TUNNEL_HOST = "abc-def-123.trycloudflare.com";
+
+describe("tunnel hostnames (owner request: the base URL keeps changing)", () => {
+  it("trycloudflare, ngrok-free and loca.lt names validate; IP literals and local names still fail", () => {
+    for (const [raw, host] of [
+      ["https://abc-def-123.trycloudflare.com", "abc-def-123.trycloudflare.com"],
+      ["https://abc-def-123.trycloudflare.com/v1/", "abc-def-123.trycloudflare.com"],
+      ["https://1a2b-34-56.ngrok-free.app/v1", "1a2b-34-56.ngrok-free.app"],
+      ["https://my-gpu.loca.lt/v1/chat/completions", "my-gpu.loca.lt"],
+    ] as const) {
+      expect(validateCustomBaseUrl(raw, "https://okara.workers.dev"), raw).toMatchObject({ ok: true, host });
+    }
+    for (const [raw, reason] of [
+      ["https://127.0.0.1/v1", "ip_literal"],
+      ["https://10.0.0.5/v1", "ip_literal"],
+      ["https://192.168.1.20/v1", "ip_literal"],
+      ["https://[::1]/v1", "ip_literal"],
+      ["https://localhost/v1", "local_host"],
+      ["https://gpu.localhost/v1", "local_host"],
+      ["https://my-gpu.local/v1", "local_host"],
+      // A tunnel name that spells an IPv4 address is refused like any other (wildcard-DNS convention).
+      ["https://127-0-0-1.trycloudflare.com/v1", "local_host"],
+      ["http://abc-def-123.trycloudflare.com/v1", "not_https"],
+      ["https://my-gpu.loca.lt:8443/v1", "port"],
+    ] as const) {
+      const r = validateCustomBaseUrl(raw, "https://okara.workers.dev");
+      expect(r.ok, raw).toBe(false);
+      if (!r.ok) expect(r.reason, raw).toBe(reason);
+    }
+  });
+
+  it("a random ngrok name with an embedded IPv4 address is refused with an actionable message", () => {
+    const r = validateCustomBaseUrl("https://7c3e-103-21-58-191.ngrok-free.app/v1", "https://okara.workers.dev");
+    expect(r).toEqual({ ok: false, reason: "local_host", message: EMBEDDED_IPV4_MESSAGE });
+    if (!r.ok) {
+      expect(r.message).toMatch(/spells an IP address/);
+      expect(r.message).toMatch(/Tunnel names with an embedded IP address .*ngrok-free\.app\) are refused too/);
+      expect(r.message).toMatch(/use a tunnel URL without one, for example your ngrok static domain or a trycloudflare\.com URL/);
+    }
+    // Three groups only (no full IPv4 address spelled): fine.
+    expect(validateCustomBaseUrl("https://1a2b-34-56.ngrok-free.app/v1", "https://okara.workers.dev")).toMatchObject({ ok: true });
+  });
+});
+
+describe("PATCH base URL to a new host: keepKeyForNewHost", () => {
+  const rowOf = (u: Seeded, id: string) =>
+    u.db.first<{ base_url: string; host: string; key_enc: string; key_hint: string; updated_at: string }>(
+      "SELECT base_url, host, key_enc, key_hint, updated_at FROM workspace_custom_providers WHERE workspace_id = ? AND id = ?",
+      u.workspaceId,
+      id,
+    );
+  const changeRows = (u: Seeded) => u.db.all<Record<string, unknown>>("SELECT * FROM workspace_custom_provider_changes WHERE workspace_id = ? ORDER BY rowid", u.workspaceId);
+
+  it("without the flag and without a new key a host change is 400 key_required_for_new_host and nothing changes", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const p = (await addProvider(env, u)).providers[0]!;
+    const before = await rowOf(u, p.id);
+    for (const body of [{ baseUrl: TUNNEL }, { baseUrl: TUNNEL, keepKeyForNewHost: false }, { baseUrl: TUNNEL, model: "deepseek/deepseek-chat" }]) {
+      const r = await call(env, u, "PATCH", `${cp(u)}/${p.id}`, body);
+      expect(r.status, JSON.stringify(body)).toBe(400);
+      expect(r.json!.error).toMatchObject({ code: "bad_request", details: { field: "apiKey", reason: "key_required_for_new_host" } });
+      expect(r.json!.error!.message).toMatch(/confirm sending the saved key to the new host/);
+    }
+    const bad = await call(env, u, "PATCH", `${cp(u)}/${p.id}`, { baseUrl: TUNNEL, keepKeyForNewHost: "yes" });
+    expect(bad.status).toBe(400);
+    expect(bad.json!.error!.details).toMatchObject({ field: "keepKeyForNewHost", reason: "invalid" });
+    expect(await rowOf(u, p.id)).toEqual(before);
+    expect(await changeRows(u)).toEqual([]);
+    expect(seen).toHaveLength(0);
+    for (const t of bodies) expect(t).not.toContain(SECRET);
+  });
+
+  it("with keepKeyForNewHost the saved key stays bound to the row (same envelope, still decrypts) and is used on the new host", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const p = (await addProvider(env, u)).providers[0]!;
+    const before = (await rowOf(u, p.id))!;
+    await call(env, u, "POST", `${cp(u)}/${p.id}/test`, {}); // a recorded test result is reset by the move
+    const r = await call(env, u, "PATCH", `${cp(u)}/${p.id}`, { baseUrl: TUNNEL, keepKeyForNewHost: true });
+    expect(r.status).toBe(200);
+    const moved = (r.json!.data as CustomProvidersResponse).providers[0]!;
+    // Saved without a name, so its default name (the host) follows the new host.
+    expect(moved).toMatchObject({ label: TUNNEL_HOST, baseUrl: TUNNEL, host: TUNNEL_HOST, keyHint: "QRST", isWriter: true, lastTestOk: null, lastTestedAt: null });
+    expect(moved.changes).toEqual([
+      { at: expect.any(String), by: "Test User", fields: ["label", "baseUrl"], fromBaseUrl: BASE, toBaseUrl: TUNNEL, fromHost: "llm.example.com", toHost: TUNNEL_HOST, keyKeptForNewHost: true },
+    ]);
+    // The AAD binds workspace and row only (not the host): the envelope is kept as is and still decrypts.
+    const after = (await rowOf(u, p.id))!;
+    expect(after.key_enc).toBe(before.key_enc);
+    expect(await decryptSecret(env, after.key_enc, customProviderAad(u.workspaceId, p.id))).toBe(SECRET);
+    // The audit row names who and when, without key material.
+    const log = await changeRows(u);
+    expect(log).toHaveLength(1);
+    expect(log[0]).toMatchObject({ provider_id: p.id, changed_by: u.userId, fields: "label,base_url", old_host: "llm.example.com", new_host: TUNNEL_HOST, key_kept_for_new_host: 1 });
+    expect(JSON.stringify(log)).not.toContain(SECRET);
+    expect(JSON.stringify(log)).not.toContain(before.key_enc);
+
+    // Test and Fetch models now reach the new host with the same key; the old host is never contacted.
+    seen.length = 0;
+    expect((await call(env, u, "POST", `${cp(u)}/${p.id}/test`, {})).json!.data).toMatchObject({ ok: true });
+    expect((await call(env, u, "POST", `${cp(u)}/models`, { providerId: p.id })).json!.data).toMatchObject({ ok: true, models: ["deepseek/deepseek-chat", "meta/llama-3.3-70b"] });
+    expect(seen.map((x) => x.url)).toEqual([`${TUNNEL}/models`, `${TUNNEL}/models`]);
+    for (const x of seen) expect(x.headers.authorization).toBe(`Bearer ${SECRET}`);
+    for (const t of bodies) expect(t).not.toContain(SECRET);
+  });
+
+  it("Test reports whether the saved model is listed on the new host (the UI then offers Change model)", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const p = (await addProvider(env, u)).providers[0]!;
+    const test = async () => (await call(env, u, "POST", `${cp(u)}/${p.id}/test`, {})).json!.data as { ok: boolean | null; detail: string; modelListed: boolean | null };
+    expect(await test()).toMatchObject({ ok: true, modelListed: true });
+    await call(env, u, "PATCH", `${cp(u)}/${p.id}`, { baseUrl: TUNNEL, keepKeyForNewHost: true });
+    // The machine behind the new tunnel serves other models.
+    handler = (url) => (url === `${TUNNEL}/models` ? Response.json({ data: [{ id: "qwen/qwen3-32b" }] }) : new Response("unexpected", { status: 500 }));
+    expect(await test()).toMatchObject({ ok: true, modelListed: false, detail: expect.stringMatching(/not in the provider's model list/) });
+    // A truncated or empty list, or a failure, is "unknown" (never a false alarm).
+    handler = () => Response.json({ data: [] });
+    expect(await test()).toMatchObject({ ok: true, modelListed: null });
+    handler = () => new Response("nope", { status: 401 });
+    expect(await test()).toMatchObject({ ok: false, modelListed: null });
+  });
+
+  it("the writer drafts through the new host with the same key; the old host is no longer admitted", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const pid = await seedProject(env, u.workspaceId);
+    const p = (await addProvider(env, u)).providers[0]!;
+    expect((await call(env, u, "PATCH", `${cp(u)}/${p.id}`, { baseUrl: TUNNEL, keepKeyForNewHost: true })).status).toBe(200);
+    handler = (url) => (url.endsWith("/chat/completions") ? chatReply({ title: "Draft from the tunnel" }) : okModels());
+    const { runId } = await createRun(u.db, { workspaceId: u.workspaceId, projectId: pid, agent: "seo", trigger: "manual", idempotencyKey: "ktun", createdBy: null, now: FIXED_NOW });
+    const ctx = await buildRunContext(env, runId, { fetchImpl: fakeFetch() });
+    seen.length = 0;
+    const res = await ctx.writer!.write({ purpose: "seo_recommendation", system: "Draft only from evidence.", input: { evidence: ["e1"] }, jsonSchema: { type: "object" }, maxOutputTokens: 400 });
+    expect(res.output).toEqual({ title: "Draft from the tunnel" });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.url).toBe(`${TUNNEL}/chat/completions`);
+    expect(seen[0]!.headers.authorization).toBe(`Bearer ${SECRET}`);
+    await expect(ctx.apiFetch(`${BASE}/models`)).rejects.toBeInstanceOf(OutboundBlockedError);
+    // Request-scoped writer too.
+    const w = await buildWriterForWorkspace(env, u.db, u.workspaceId, { projectId: pid, fetchImpl: fakeFetch() });
+    seen.length = 0;
+    await w!.write({ purpose: "seo_recommendation", system: "s", input: {}, jsonSchema: { type: "object" }, maxOutputTokens: 100 });
+    expect(seen[0]).toMatchObject({ url: `${TUNNEL}/chat/completions`, headers: expect.objectContaining({ authorization: `Bearer ${SECRET}` }) });
+  });
+
+  it("a custom GEO engine keeps its key across a host change too", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const added = await call(env, u, "POST", cp(u), { baseUrl: BASE, apiKey: SECRET, model: "meta/llama-3.3-70b", role: "geo" });
+    expect(added.status).toBe(201);
+    const g = (added.json!.data as CustomProvidersResponse).providers.find((x) => x.role === "geo")!;
+    expect((await call(env, u, "PATCH", `${cp(u)}/${g.id}`, { baseUrl: "https://my-gpu.loca.lt/v1" })).json!.error!.details).toMatchObject({ reason: "key_required_for_new_host" });
+    const r = await call(env, u, "PATCH", `${cp(u)}/${g.id}`, { baseUrl: "https://my-gpu.loca.lt/v1", keepKeyForNewHost: true });
+    expect(r.status).toBe(200);
+    expect((r.json!.data as CustomProvidersResponse).providers.find((x) => x.id === g.id)).toMatchObject({ role: "geo", host: "my-gpu.loca.lt", isWriter: false, keyHint: "QRST" });
+    const row = (await listCustomProviders(u.db, u.workspaceId)).find((x) => x.id === g.id)!;
+    expect(await resolveCustomProviderRow(env, u.db, u.workspaceId, row)).toMatchObject({
+      status: "ready",
+      provider: { baseUrl: "https://my-gpu.loca.lt/v1", host: "my-gpu.loca.lt", key: SECRET },
+    });
+  });
+
+  it("a new key wins over the flag; same-host and no-op changes need neither; the log keeps the newest 5, newest first", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const p = (await addProvider(env, u)).providers[0]!;
+    const NEW_KEY = `${SECRET}-NEW9`;
+    const ngrok = await call(env, u, "PATCH", `${cp(u)}/${p.id}`, { baseUrl: "https://1a2b-34-56.ngrok-free.app/v1", apiKey: NEW_KEY, keepKeyForNewHost: true });
+    expect(ngrok.status).toBe(200);
+    expect((ngrok.json!.data as CustomProvidersResponse).providers[0]).toMatchObject({ host: "1a2b-34-56.ngrok-free.app", keyHint: "NEW9" });
+    expect((ngrok.json!.data as CustomProvidersResponse).providers[0]!.changes![0]).toMatchObject({ fields: ["label", "baseUrl", "apiKey"], keyKeptForNewHost: false });
+    const enc = (await rowOf(u, p.id))!.key_enc;
+    expect(await decryptSecret(env, enc, customProviderAad(u.workspaceId, p.id))).toBe(NEW_KEY);
+    // Same host, other path: no key, no flag needed. The flag on an unchanged host is ignored.
+    expect((await call(env, u, "PATCH", `${cp(u)}/${p.id}`, { baseUrl: "https://1a2b-34-56.ngrok-free.app/api/v1" })).status).toBe(200);
+    expect((await call(env, u, "PATCH", `${cp(u)}/${p.id}`, { model: "deepseek/deepseek-chat", keepKeyForNewHost: true })).status).toBe(200);
+    // A no-op PATCH records nothing.
+    expect((await call(env, u, "PATCH", `${cp(u)}/${p.id}`, { model: "deepseek/deepseek-chat" })).status).toBe(200);
+    expect(await changeRows(u)).toHaveLength(3);
+    // Rotate through tunnels: the response carries only the newest CUSTOM_PROVIDER_CHANGES_SHOWN entries.
+    for (const host of ["a-1.trycloudflare.com", "b-2.trycloudflare.com", "my-gpu.loca.lt", "c-3.trycloudflare.com"]) {
+      expect((await call(env, u, "PATCH", `${cp(u)}/${p.id}`, { baseUrl: `https://${host}/v1`, keepKeyForNewHost: true })).status).toBe(200);
+    }
+    const list = (await call(env, u, "GET", cp(u))).json!.data as CustomProvidersResponse;
+    const changes = list.providers[0]!.changes!;
+    expect(changes).toHaveLength(CUSTOM_PROVIDER_CHANGES_SHOWN);
+    expect(changes.map((c) => c.toHost)).toEqual(["c-3.trycloudflare.com", "my-gpu.loca.lt", "b-2.trycloudflare.com", "a-1.trycloudflare.com", null]);
+    expect(changes[4]).toMatchObject({ fields: ["model"], fromHost: null, keyKeptForNewHost: false });
+    expect(await changeRows(u)).toHaveLength(7);
+    for (const t of bodies) expect(t).not.toContain(NEW_KEY);
+  });
+
+  it("a saved key that cannot be decrypted is not moved (key_unreadable); a new key fixes it", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const p = (await addProvider(env, u)).providers[0]!;
+    const foreign = await encryptSecret(env, SECRET, customProviderAad(u.workspaceId, "cprov_other"));
+    await u.db.run("UPDATE workspace_custom_providers SET key_enc = ? WHERE id = ?", foreign, p.id);
+    const r = await call(env, u, "PATCH", `${cp(u)}/${p.id}`, { baseUrl: TUNNEL, keepKeyForNewHost: true });
+    expect(r.status).toBe(400);
+    expect(r.json!.error!.details).toMatchObject({ field: "apiKey", reason: "key_unreadable" });
+    expect((await rowOf(u, p.id))!.host).toBe("llm.example.com");
+    expect((await call(env, u, "PATCH", `${cp(u)}/${p.id}`, { baseUrl: TUNNEL, apiKey: SECRET })).status).toBe(200);
+  });
+
+  it("other workspaces cannot PATCH (with or without the flag); members cannot; members can read the change log", async () => {
+    const env = createTestEnv();
+    const a = await seedUser(env);
+    const b = await seedUser(env);
+    const p = (await addProvider(env, a)).providers[0]!;
+    const before = await rowOf(a, p.id);
+    for (const body of [{ baseUrl: TUNNEL, keepKeyForNewHost: true }, { baseUrl: TUNNEL, apiKey: "sk-attacker-key-0000" }]) {
+      expect((await call(env, b, "PATCH", `${cp(a)}/${p.id}`, body)).status).toBe(404);
+      expect((await call(env, b, "PATCH", `${cp(b)}/${p.id}`, body)).status).toBe(404);
+    }
+    await addMember(a.db, a.workspaceId, b.userId);
+    expect((await call(env, b, "PATCH", `${cp(a)}/${p.id}`, { baseUrl: TUNNEL, keepKeyForNewHost: true })).status).toBe(403);
+    expect(await rowOf(a, p.id)).toEqual(before);
+    expect(await changeRows(a)).toEqual([]);
+    expect(seen).toHaveLength(0);
+    // The owner moves it; the member sees when and by whom (never the key).
+    await call(env, a, "PATCH", `${cp(a)}/${p.id}`, { baseUrl: TUNNEL, keepKeyForNewHost: true });
+    const read = await call(env, b, "GET", cp(a));
+    expect((read.json!.data as CustomProvidersResponse).providers[0]!.changes![0]).toMatchObject({ by: "Test User", toHost: TUNNEL_HOST, keyKeptForNewHost: true });
+    expect(read.text).not.toContain(SECRET);
+    // b's own workspace shows no change log of a's provider.
+    expect((await call(env, b, "GET", cp(b))).json!.data.providers).toEqual([]);
+  });
+
+  it("DELETE removes the change log with the provider; export carries the log without secrets; before migration 0012 PATCH still works", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const pid = await seedProject(env, u.workspaceId);
+    const p = (await addProvider(env, u)).providers[0]!;
+    await call(env, u, "PATCH", `${cp(u)}/${p.id}`, { baseUrl: TUNNEL, keepKeyForNewHost: true });
+    const res = await app.request(`/api/projects/${pid}/export`, { headers: authHeaders(u.sessionToken, u.csrfToken) }, env);
+    const text = await res.text();
+    expect(text).not.toContain(SECRET);
+    const exported = (JSON.parse(text) as { data: { tables: Record<string, Array<Record<string, unknown>>> } }).data.tables.workspace_custom_provider_changes!;
+    expect(exported).toEqual([expect.objectContaining({ provider_id: p.id, old_host: "llm.example.com", new_host: TUNNEL_HOST, key_kept_for_new_host: 1 })]);
+    expect((await call(env, u, "DELETE", `${cp(u)}/${p.id}`)).status).toBe(200);
+    expect(await changeRows(u)).toEqual([]);
+
+    // Code deployed before migration 0012: the change applies, unlogged; GET has no changes.
+    const q = (await addProvider(env, u)).providers[0]!;
+    await u.db.run("DROP TABLE workspace_custom_provider_changes");
+    const r = await call(env, u, "PATCH", `${cp(u)}/${q.id}`, { baseUrl: TUNNEL, keepKeyForNewHost: true });
+    expect(r.status).toBe(200);
+    expect((r.json!.data as CustomProvidersResponse).providers[0]).toMatchObject({ host: TUNNEL_HOST, changes: [] });
+    expect((await call(env, u, "DELETE", `${cp(u)}/${q.id}`)).status).toBe(200);
+  });
+
+  it("the SSRF base URL rules still apply with keepKeyForNewHost (no bypass via quick update): 400 baseUrl, nothing stored, nothing fetched", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const p = (await addProvider(env, u)).providers[0]!;
+    const before = await rowOf(u, p.id);
+    seen.length = 0;
+    for (const [baseUrl, reason] of [
+      ["https://127.0.0.1/v1", "ip_literal"],
+      ["https://[::1]/v1", "ip_literal"],
+      ["https://localhost/v1", "local_host"],
+      ["https://my-gpu.local/v1", "local_host"],
+      ["https://127-0-0-1.trycloudflare.com/v1", "local_host"],
+      ["https://7c3e-103-21-58-191.ngrok-free.app/v1", "local_host"],
+      ["http://abc-def-123.trycloudflare.com/v1", "not_https"],
+      ["https://u:p@abc-def-123.trycloudflare.com/v1", "credentials"],
+      ["https://abc.nip.io/v1", "local_host"],
+      ["https://my-gpu.loca.lt:8443/v1", "port"],
+    ] as const) {
+      const r = await call(env, u, "PATCH", `${cp(u)}/${p.id}`, { baseUrl, keepKeyForNewHost: true });
+      expect(r.status, baseUrl).toBe(400);
+      expect(r.json!.error!.details, baseUrl).toEqual({ field: "baseUrl", reason });
+      expect(r.text).not.toContain(SECRET);
+    }
+    // Other fields in the same body do not get through either.
+    const mixed = await call(env, u, "PATCH", `${cp(u)}/${p.id}`, { baseUrl: "https://127.0.0.1/v1", keepKeyForNewHost: true, model: "deepseek/deepseek-chat", label: "Moved" });
+    expect(mixed.json!.error!.details).toEqual({ field: "baseUrl", reason: "ip_literal" });
+    expect(await rowOf(u, p.id)).toEqual(before);
+    expect(await changeRows(u)).toEqual([]);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("own_origin is refused with keepKeyForNewHost too", async () => {
+    const ORIGIN = "https://okara-app.workers.dev";
+    const env = createTestEnv({ APP_ORIGIN: ORIGIN });
+    const u = await seedUser(env);
+    const send = async (method: string, path: string, body?: unknown) => {
+      const res = await app.request(`/api${path}`, { method, headers: authHeaders(u.sessionToken, u.csrfToken, ORIGIN), body: body === undefined ? undefined : JSON.stringify(body) }, env);
+      const text = await res.text();
+      return { status: res.status, json: JSON.parse(text) as { data?: CustomProvidersResponse; error?: { details?: unknown } } };
+    };
+    const added = await send("POST", cp(u), { baseUrl: BASE, apiKey: SECRET, model: "meta/llama-3.3-70b" });
+    expect(added.status).toBe(201);
+    const p = added.json.data!.providers[0]!;
+    const before = await rowOf(u, p.id);
+    seen.length = 0;
+    const r = await send("PATCH", `${cp(u)}/${p.id}`, { baseUrl: `${ORIGIN}/api/v1`, keepKeyForNewHost: true });
+    expect(r.status).toBe(400);
+    expect(r.json.error!.details).toEqual({ field: "baseUrl", reason: "own_origin" });
+    expect(await rowOf(u, p.id)).toEqual(before);
+    expect(await changeRows(u)).toEqual([]);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("a run reads URL and key together: a stale row never pairs the old host with a new key", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const p = (await addProvider(env, u)).providers[0]!;
+    // The row a run read earlier (buildRunContext lists GEO rows / the writer row before decrypting keys).
+    const stale = (await listCustomProviders(u.db, u.workspaceId)).find((x) => x.id === p.id)!;
+    expect(stale).toMatchObject({ base_url: BASE, host: "llm.example.com" });
+    // Meanwhile the owner moves the provider to a tunnel with a key typed for the tunnel.
+    const NEW_KEY = `${SECRET}-TUN1`;
+    expect((await call(env, u, "PATCH", `${cp(u)}/${p.id}`, { baseUrl: TUNNEL, apiKey: NEW_KEY })).status).toBe(200);
+    const use = await resolveCustomProviderRow(env, u.db, u.workspaceId, stale);
+    expect(use).not.toMatchObject({ provider: { host: "llm.example.com", key: NEW_KEY } });
+    expect(use).toEqual({
+      status: "ready",
+      provider: { id: p.id, label: TUNNEL_HOST, baseUrl: TUNNEL, host: TUNNEL_HOST, model: "meta/llama-3.3-70b", key: NEW_KEY },
+    });
+    // The stored values are validated as read, never the stale ones: a stored URL that no longer validates is
+    // unusable even when the stale row's URL was fine.
+    await u.db.run("UPDATE workspace_custom_providers SET base_url = ?, host = ? WHERE id = ?", "https://127.0.0.1/v1", "127.0.0.1", p.id);
+    expect(await resolveCustomProviderRow(env, u.db, u.workspaceId, stale)).toMatchObject({ status: "unusable", host: "127.0.0.1" });
+    await u.db.run("UPDATE workspace_custom_providers SET base_url = ? WHERE id = ?", TUNNEL, p.id);
+    expect(await resolveCustomProviderRow(env, u.db, u.workspaceId, stale)).toMatchObject({ status: "unusable", detail: expect.stringMatching(/host mismatch/) });
+    // A row removed in between resolves to nothing; another workspace's id never resolves.
+    expect(await resolveCustomProviderRow(env, u.db, "ws_other", stale)).toBeNull();
+    expect((await call(env, u, "DELETE", `${cp(u)}/${p.id}`)).status).toBe(200);
+    expect(await resolveCustomProviderRow(env, u.db, u.workspaceId, stale)).toBeNull();
+  });
+
+  it("a default name (the host) follows a new host; a chosen name is kept", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const provider = async (id: string) => ((await call(env, u, "GET", cp(u))).json!.data as CustomProvidersResponse).providers.find((x) => x.id === id)!;
+    // Saved without a name: labelled with its host.
+    const d = (await addProvider(env, u)).providers[0]!;
+    expect(d.label).toBe("llm.example.com");
+    expect((await call(env, u, "PATCH", `${cp(u)}/${d.id}`, { baseUrl: TUNNEL, keepKeyForNewHost: true })).status).toBe(200);
+    expect(await provider(d.id)).toMatchObject({ label: TUNNEL_HOST, host: TUNNEL_HOST });
+    expect((await provider(d.id)).changes![0]).toMatchObject({ fields: ["label", "baseUrl"], fromHost: "llm.example.com", toHost: TUNNEL_HOST, keyKeptForNewHost: true });
+    // An older client resending the prefilled (default) name: it still follows the host.
+    expect((await call(env, u, "PATCH", `${cp(u)}/${d.id}`, { baseUrl: "https://my-gpu.loca.lt/v1", label: TUNNEL_HOST, keepKeyForNewHost: true })).status).toBe(200);
+    expect((await provider(d.id)).label).toBe("my-gpu.loca.lt");
+    // Same host (another path): the name stays.
+    expect((await call(env, u, "PATCH", `${cp(u)}/${d.id}`, { baseUrl: "https://my-gpu.loca.lt/api/v1" })).status).toBe(200);
+    expect((await provider(d.id)).label).toBe("my-gpu.loca.lt");
+    // A name sent with the move wins.
+    expect((await call(env, u, "PATCH", `${cp(u)}/${d.id}`, { baseUrl: TUNNEL, label: "GPU box", keepKeyForNewHost: true })).status).toBe(200);
+    expect((await provider(d.id)).label).toBe("GPU box");
+
+    // A chosen name is kept across moves.
+    const named = await addProvider(env, u, { label: "My gateway", useAsWriter: false });
+    const n = named.providers.find((x) => x.label === "My gateway")!;
+    expect((await call(env, u, "PATCH", `${cp(u)}/${n.id}`, { baseUrl: "https://b-2.trycloudflare.com/v1", keepKeyForNewHost: true })).status).toBe(200);
+    expect(await provider(n.id)).toMatchObject({ label: "My gateway", host: "b-2.trycloudflare.com" });
+    expect((await provider(n.id)).changes![0]!.fields).toEqual(["baseUrl"]);
+
+    // GEO lanes too (the lane name on boards comes from the label).
+    const geo = await call(env, u, "POST", cp(u), { baseUrl: BASE, apiKey: SECRET, model: "meta/llama-3.3-70b", role: "geo" });
+    const g = (geo.json!.data as CustomProvidersResponse).providers.find((x) => x.role === "geo")!;
+    expect(g.label).toBe("llm.example.com");
+    expect((await call(env, u, "PATCH", `${cp(u)}/${g.id}`, { baseUrl: "https://c-3.trycloudflare.com/v1", keepKeyForNewHost: true })).status).toBe(200);
+    expect((await provider(g.id)).label).toBe("c-3.trycloudflare.com");
   });
 });

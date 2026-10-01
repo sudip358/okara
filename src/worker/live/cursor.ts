@@ -4,7 +4,7 @@
  * crawl), so `at` is not insertion order and an (at, id) keyset would drop late rows. A cursor therefore
  * holds one insertion high-water mark (SQLite rowid) per source:
  *   SEO feed  {d: decision_records, f: audit_findings, r: recommendations, k?: crawl attempt}
- *   GEO feed  {o: geo_observations, r: recommendations}
+ *   GEO feed  {o: geo_observations, r: recommendations, p?: rowids of answers sent before their analysis}
  * Each source reads rows with rowid above its mark, in rowid order, LIMITed. `mergeMarked` takes heads by the
  * smallest (at, id), so every source contributes a rowid prefix and its mark advances exactly over the rows
  * taken. Rows read but not shown (payload null) advance their mark without counting toward the limit.
@@ -18,19 +18,24 @@ const CURSOR_MAX_CHARS = 400;
 
 export type Marks<K extends string> = Record<K, number>;
 
-export function encodeLiveCursor(marks: Record<string, number>): string {
+export function encodeLiveCursor(marks: Record<string, number | number[]>): string {
   return btoa(JSON.stringify(marks)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+/** Longest integer list a cursor may carry (`lists` keys of decodeLiveCursor). */
+export const CURSOR_LIST_MAX = 20;
+
 /**
- * Decodes an opaque live cursor whose keys must be exactly `keys` (plus any of `optional`); every value a
- * non-negative safe integer. Returns null when absent; throws 400 on anything else.
+ * Decodes an opaque live cursor whose keys must be exactly `keys` (plus any of `optional` and `lists`); every
+ * value a non-negative safe integer, and every `lists` value an array of at most CURSOR_LIST_MAX of them.
+ * Returns null when absent; throws 400 on anything else.
  */
-export function decodeLiveCursor<K extends string, O extends string = never>(
+export function decodeLiveCursor<K extends string, O extends string = never, L extends string = never>(
   raw: string | null | undefined,
   keys: readonly K[],
   optional: readonly O[] = [],
-): (Marks<K> & Partial<Marks<O>>) | null {
+  lists: readonly L[] = [],
+): (Marks<K> & Partial<Marks<O>> & Partial<Record<L, number[]>>) | null {
   if (raw === null || raw === undefined || raw === "") return null;
   const invalid = () => badRequest("Invalid live cursor.");
   let parsed: unknown;
@@ -44,15 +49,21 @@ export function decodeLiveCursor<K extends string, O extends string = never>(
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw invalid();
   const obj = parsed as Record<string, unknown>;
   const present = Object.keys(obj);
-  const allowed = new Set<string>([...keys, ...optional]);
+  const allowed = new Set<string>([...keys, ...optional, ...lists]);
   if (!keys.every((k) => present.includes(k)) || present.some((k) => !allowed.has(k))) throw invalid();
-  const out: Record<string, number> = {};
+  const isMark = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+  const out: Record<string, number | number[]> = {};
   for (const k of present) {
     const v = obj[k];
-    if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) throw invalid();
-    out[k] = v;
+    if ((lists as readonly string[]).includes(k)) {
+      if (!Array.isArray(v) || v.length > CURSOR_LIST_MAX || !v.every(isMark)) throw invalid();
+      out[k] = v as number[];
+    } else {
+      if (!isMark(v)) throw invalid();
+      out[k] = v;
+    }
   }
-  return out as Marks<K> & Partial<Marks<O>>;
+  return out as Marks<K> & Partial<Marks<O>> & Partial<Record<L, number[]>>;
 }
 
 export function parseLiveLimit(raw: string | null | undefined): number {

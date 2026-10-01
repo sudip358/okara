@@ -745,6 +745,9 @@ export function ActivityBody({
   const asc = items.slice().reverse();
   return (
     <div className="space-y-4">
+      <p className="-mb-2 flex justify-end text-xs">
+        <Link to={projectPath(projectId, `live?run=${encodeURIComponent(activity.run.id)}`)}>Open live view</Link>
+      </p>
       <RunHeader
         activity={activity}
         items={asc}

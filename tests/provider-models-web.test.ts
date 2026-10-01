@@ -42,6 +42,7 @@ import { activity, item } from "./activity-web-fixtures";
 type FC = (props: any) => ReactElement | null;
 const load = async <T,>(rel: string): Promise<T> => (await import(/* @vite-ignore */ rel)) as T;
 const model = await load<Record<"ProviderModelRow", FC>>("../src/web/pages/integrations/ProviderModel.tsx");
+const integrations = await load<Record<"ProviderRow", FC>>("../src/web/pages/Integrations.tsx");
 const writer = await load<Record<"ModelPicker" | "CustomProviderForm" | "SavedProviderItem", FC>>("../src/web/pages/integrations/CustomWriter.tsx");
 const geo = await load<Record<"CustomGeoEngines", FC>>("../src/web/pages/integrations/CustomGeo.tsx");
 const board = await load<Record<"EngineColumn", FC>>("../src/web/pages/geo/board/EngineColumn.tsx");
@@ -88,7 +89,9 @@ const custom = (over: Partial<CustomProviderStatus> = {}): CustomProviderStatus 
 
 describe("model-lib helpers", () => {
   it("knows which providers have a model row", () => {
-    expect(["typesafe", "gemini", "perplexity", "openai_geo", "anthropic_geo"].every(isModelSelectable)).toBe(true);
+    expect(["gemini", "perplexity", "openai_geo", "anthropic_geo"].every(isModelSelectable)).toBe(true);
+    // "TypeSafe will perform as it is": no model picker on the TypeSafe card.
+    expect(isModelSelectable("typesafe")).toBe(false);
     expect(isModelSelectable("writer")).toBe(false);
   });
 
@@ -149,14 +152,25 @@ describe("ProviderModelRow markup", () => {
     expect(buttons(html)).toEqual(["Change model", "Use operator default"]);
   });
 
-  it("without a model it asks to choose one; TypeSafe has no cohort or rate note", () => {
+  it("without a model it asks to choose one", () => {
     const none = text(renderToStaticMarkup(h(model.ProviderModelRow, { workspaceId: "ws1", p: status({ model: null, modelSource: null, rateKnown: null }), onChange: noop })));
     expect(none).toContain("No model chosen: choose one to use this provider.");
     expect(none).toContain("Choose a model");
-    const ts = text(renderToStaticMarkup(h(model.ProviderModelRow, { workspaceId: "ws1", p: status({ provider: "typesafe", model: "jev-latest", modelSource: "default", rateKnown: null }), onChange: noop })));
-    expect(ts).toContain("(documented default alias)");
-    expect(ts).not.toContain(COHORT_NOTE);
-    expect(ts).not.toContain(UNKNOWN_RATE_NOTE);
+  });
+
+  it("the TypeSafe card is unchanged: model shown in its summary line, no model row, no model buttons", () => {
+    const ts = status({ provider: "typesafe", label: "TypeSafe (Jev decisions)", source: "operator_key", keyHint: null, model: "jev-latest", modelSource: "default", rateKnown: null });
+    const html = renderToStaticMarkup(h(integrations.ProviderRow, { workspaceId: "ws1", p: ts, onChange: noop }));
+    const t = text(html);
+    expect(t).toContain("· model jev-latest");
+    expect(buttons(html)).toEqual(["Save key", "Test saved key"]);
+    for (const banned of ["Change model", "Choose a model", "Fetch models", "Use operator default", "documented default alias", COHORT_NOTE, UNKNOWN_RATE_NOTE]) {
+      expect(t, banned).not.toContain(banned);
+    }
+    // A GEO engine card keeps its model row (and drops the model from the summary line).
+    const engine = renderToStaticMarkup(h(integrations.ProviderRow, { workspaceId: "ws1", p: status(), onChange: noop }));
+    expect(buttons(engine)).toContain("Change model");
+    expect(text(engine)).not.toContain("· model gpt-5.5");
   });
 
   it("renders a hostile model id as plain text", () => {
@@ -186,7 +200,7 @@ describe("custom GEO engine markup", () => {
     const html = renderToStaticMarkup(h(writer.SavedProviderItem, { workspaceId: "ws1", p: custom(), canManage: true, apply: noop, reload: noop, onEdit: noop }));
     const t = text(html);
     expect(t).toContain(CUSTOM_GEO_NOTE);
-    expect(buttons(html)).toEqual(["Test", "Change model", "Edit URL or key", "Remove"]);
+    expect(buttons(html)).toEqual(["Test", "Change model", "Quick update URL", "Edit URL or key", "Remove"]);
   });
 
   it("the section explains the lane before data loads", () => {
@@ -215,8 +229,8 @@ describe("model row: operator-key guard", () => {
     expect(buttons(html)).toEqual(["Change model", "Use operator default"]);
   });
 
-  it("a TypeSafe selection ignored on the operator key can still be reset", () => {
-    const p = status({ provider: "typesafe", source: "operator_key", model: "jev-latest", modelSource: "default", workspaceModel: "jev-1.13.0", modelNote: "ignored", rateKnown: null });
+  it("a selection not in effect can still be reset", () => {
+    const p = status({ provider: "gemini", source: "operator_key", model: "gemini-env", modelSource: "operator", workspaceModel: "gemini-unpriced-x", modelNote: "ignored", rateKnown: true });
     expect(hasWorkspaceSelection(p)).toBe(true);
     expect(hasWorkspaceSelection(status({ modelSource: "operator", workspaceModel: null }))).toBe(false);
     const html = renderToStaticMarkup(h(model.ProviderModelRow, { workspaceId: "ws1", p, onChange: noop }));
@@ -226,7 +240,7 @@ describe("model row: operator-key guard", () => {
 
   it("explains the operator-key rule in the form (never with the workspace's own key)", () => {
     expect(operatorKeyHint({ provider: "gemini", source: "operator_key" })).toMatch(/only models with a verified price/);
-    expect(operatorKeyHint({ provider: "typesafe", source: "operator_key" })).toMatch(/operator's model/);
+    expect(operatorKeyHint({ provider: "typesafe", source: "operator_key" })).toBeNull(); // no model row on TypeSafe
     expect(operatorKeyHint({ provider: "gemini", source: "workspace_key" })).toBeNull();
     expect(operatorKeyHint({ provider: "writer", source: "operator_key" })).toBeNull();
   });

@@ -1453,3 +1453,45 @@ export interface LiveGeoBoardResponse {
   cursor: string | null;
   labels: string[];
 }
+
+// ------------------------------------------------------------------ custom provider URL changes (appended 2026-10-01)
+/**
+ * One configuration change of a custom provider (PATCH /workspaces/:wid/custom-providers/:id), from the audit
+ * log (migration 0012). Hosts and URLs are configuration, never secrets; no key material is ever included.
+ */
+export interface CustomProviderChange {
+  at: string;
+  /** Who changed it (name, else email); null when unknown (user removed). */
+  by: string | null;
+  /** What changed. */
+  fields: Array<"label" | "baseUrl" | "model" | "apiKey">;
+  /** Set when the base URL changed; null otherwise. */
+  fromBaseUrl: string | null;
+  toBaseUrl: string | null;
+  fromHost: string | null;
+  toHost: string | null;
+  /** The host changed and the owner confirmed sending the saved key to the new host (no new key entered). */
+  keyKeptForNewHost: boolean;
+}
+
+/**
+ * Declaration merge (kept as an append so this file's earlier sections stay untouched): the audit trail of a
+ * custom provider. Absent from builds before migration 0012.
+ */
+export interface CustomProviderStatus {
+  /** Newest first, at most 5 configuration changes; [] when none (or before migration 0012). */
+  changes?: CustomProviderChange[];
+}
+
+/**
+ * PATCH /workspaces/:wid/custom-providers/:id. A base URL on a NEW host needs either a new `apiKey` or
+ * `keepKeyForNewHost: true` (the owner confirmed sending the saved key to that host); otherwise 400
+ * `key_required_for_new_host`. The flag is ignored when the host is unchanged or a new key is given.
+ */
+export interface CustomProviderPatchInput {
+  label?: string;
+  baseUrl?: string;
+  model?: string;
+  apiKey?: string;
+  keepKeyForNewHost?: boolean;
+}

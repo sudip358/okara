@@ -10,12 +10,13 @@
  *   PUT    /workspaces/:wid/credentials/:provider/model  -> owner only; body {model: string | null}; the workspace's
  *                                                         model for that provider (null = back to the operator default)
  * Operator-key spend guard (platform/provider-models.ts modelForKeySource): without a workspace key of its own,
- * a workspace may not pick a GEO engine model that has no verified price (400 operator_key_unpriced) nor a
- * TypeSafe model (400 operator_key_model); a list fetched with the operator key shows only priced ids (no
- * fine-tuned or org-owned OpenAI models), and TypeSafe is not listed with it at all. A stored selection that
- * cannot run on the operator key shows state setup_required with a `modelNote`.
- * Model routes exist for typesafe, gemini, perplexity, openai_geo and anthropic_geo (not the writer, which has
- * its own custom provider flow). Keys are decrypted only server-side, never returned, and never logged.
+ * a workspace may not pick a GEO engine model that has no verified price (400 operator_key_unpriced); a list
+ * fetched with the operator key shows only priced ids (no fine-tuned or org-owned OpenAI models). A stored
+ * selection that cannot run on the operator key shows state setup_required with a `modelNote`.
+ * Model routes exist for gemini, perplexity, openai_geo and anthropic_geo. TypeSafe (Jev) is not
+ * workspace-selectable: both model routes answer 400 (reason model_not_selectable) for it, whatever the key
+ * source, and it always runs TYPESAFE_MODEL, else jev-latest. The writer has no model route (404; it has its
+ * own custom provider flow). Keys are decrypted only server-side, never returned, and never logged.
  */
 import { Hono, type Context } from "hono";
 import { z } from "zod";
@@ -38,15 +39,15 @@ import { isMissingTableError } from "../platform/custom-providers";
 import {
   MODEL_ID_FORMAT,
   MUST_SUPPORT,
+  TYPESAFE_MODEL_NOT_SELECTABLE,
   isModelProvider,
+  isWorkspaceModelProvider,
   listProviderModels,
   loadWorkspaceModels,
   modelForKeySource,
   normalizeModelId,
   operatorKeyModelRefusal,
   rateKnownFor,
-  resolveModel,
-  typesafeOperatorKeyNote,
   type WorkspaceModels,
 } from "../platform/provider-models";
 import { createApiFetch } from "../runs/runtime";
@@ -134,9 +135,9 @@ interface ModelStatus {
 }
 
 /**
- * The model the runtime would use with the key it would use (workspace selection > env > none; TypeSafe >
- * jev-latest; operator-key spend guard applied, exactly as runs/runtime.ts buildRunContext), and where it
- * comes from.
+ * The model the runtime would use with the key it would use (workspace selection > env > none; TypeSafe:
+ * TYPESAFE_MODEL > jev-latest, never a workspace selection; operator-key spend guard applied, exactly as
+ * runs/runtime.ts buildRunContext), and where it comes from.
  */
 function modelFor(env: Env, provider: ProviderId, keySource: ProviderStatus["source"], saved: WorkspaceModels, at: Date): ModelStatus {
   if (provider === "writer") {
@@ -144,12 +145,13 @@ function modelFor(env: Env, provider: ProviderId, keySource: ProviderStatus["sou
     return { model: m, source: m ? "operator" : null, blocked: false, note: null, workspaceModel: null };
   }
   const use = modelForKeySource(env, saved, provider, keySource, at);
-  const stored = saved[provider];
+  // loadWorkspaceModels never returns a TypeSafe row; the guard keeps it null even for a hand-built map.
+  const stored = isWorkspaceModelProvider(provider) ? saved[provider] : undefined;
   return {
     model: use.model,
     source: use.source,
     blocked: use.blocked !== null,
-    note: use.blocked ?? (use.ignoredSelection ? typesafeOperatorKeyNote(use.ignoredSelection) : null),
+    note: use.blocked,
     workspaceModel: stored !== undefined ? normalizeModelId(provider, stored) : null,
   };
 }
@@ -466,9 +468,14 @@ const modelsBody = z.object({ apiKey: keySchema.optional() }).strict();
 const modelBody = z.object({ model: z.union([z.string().max(400), z.null()]) }).strict();
 const modelsKey = (c: Context<AppEnv>) => `cred_models:${c.req.param("wid") ?? ""}:${c.get("user")?.id ?? c.req.header("CF-Connecting-IP") ?? "anon"}`;
 
+/**
+ * The provider of a model route: 404 for unknown providers and the writer; 400 model_not_selectable for
+ * TypeSafe (its model is the operator's, whatever key is used; owner decision 2026-10-01).
+ */
 function modelProviderParam(c: Context<AppEnv>): ModelSelectableProviderId {
   const p = c.req.param("provider");
   if (!p || !isModelProvider(p)) throw notFound("Provider");
+  if (!isWorkspaceModelProvider(p)) throw badRequest(TYPESAFE_MODEL_NOT_SELECTABLE, { field: "provider", reason: "model_not_selectable" });
   return p;
 }
 
@@ -507,19 +514,6 @@ credentialRoutes.post(
       }
     }
     if (!key) throw setupRequired(`Add a ${providerLabel(c.env, provider)} key (or type one) to fetch its models.`);
-    if (keySource === "operator_key" && provider === "typesafe") {
-      // The operator key always uses the operator's TypeSafe model; its account's list is not disclosed.
-      const out: ProviderModelList = {
-        ok: null,
-        detail: `With the operator key TypeSafe uses the operator's model (${resolveModel(c.env, {}, "typesafe").model}); add your own TypeSafe key to choose a model.`,
-        models: [],
-        total: 0,
-        truncated: false,
-        keySource,
-        ...base,
-      };
-      return c.json({ data: out });
-    }
     // With the operator key only models a workspace may run on it are listed (verified price; no fine-tuned or
     // org-owned OpenAI models): the operator's private model names are never disclosed to a tenant.
     const result = await listProviderModels(provider, key, createApiFetch(c.env, outboundFetch), { operatorKey: keySource === "operator_key", at: c.get("now") });

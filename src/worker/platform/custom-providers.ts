@@ -15,12 +15,20 @@
  *    cannot reach private addresses (same note as seo/ssrf.ts).
  *  - Outbound requests go through the guarded API fetch (runs/runtime.ts createApiFetch) with only the
  *    provider's host added, `redirect: "manual"` (a 3xx is reported, never followed) and a timeout.
- *  - The key is stored with the AES-GCM envelope (lib/crypto.ts), AAD bound to workspace and row, and is
- *    never returned, logged or exported. Provider response bodies are never echoed; model ids parsed from a
- *    model list are untrusted strings (clipped, control characters removed, rendered as plain text).
+ *  - The key is stored with the AES-GCM envelope (lib/crypto.ts), AAD bound to workspace and row (NOT to the
+ *    host), and is never returned, logged or exported. Provider response bodies are never echoed; model ids
+ *    parsed from a model list are untrusted strings (clipped, control characters removed, rendered as plain
+ *    text).
+ *  - A saved key is sent only to the host it was saved for, unless the owner explicitly moves it: a PATCH to
+ *    a new host needs a new key or `keepKeyForNewHost: true` (tunnel hosts such as *.trycloudflare.com change
+ *    on every restart). Because the AAD binds workspace and row only, a kept key stays decryptable and bound
+ *    to its row without re-encryption. Every change is recorded in workspace_custom_provider_changes
+ *    (migration 0012: when, who, which fields, old/new host, whether the key was kept). At use, the URL, host,
+ *    model and key are read in one statement (resolveCustomProviderRow), so a concurrent move can never pair
+ *    the old host with a new key.
  *  - No prices are invented: custom-provider calls record cost as unknown (NULL).
  */
-import type { CustomProviderStatus } from "@shared/types";
+import type { CustomProviderChange, CustomProviderStatus } from "@shared/types";
 import type { Env } from "../env";
 import type { Db } from "../lib/db";
 import { decryptSecret } from "../lib/crypto";
@@ -113,6 +121,12 @@ const NON_PUBLIC_SUFFIXES = [
  * 10-0-0-1.example.com): the convention of wildcard-DNS services that resolve such names to that address.
  */
 const EMBEDDED_IPV4 = /(?:^|[.-])(?:\d{1,3}[.-]){3}\d{1,3}(?:[.-]|$)/;
+/**
+ * Actionable: random ngrok names for IPv4 clients have the form <hex>-<a>-<b>-<c>-<d>.ngrok-free.app and are
+ * refused by the rule above like any name with an embedded IPv4 address.
+ */
+export const EMBEDDED_IPV4_MESSAGE =
+  "Base URL must not be a hostname that spells an IP address. Tunnel names with an embedded IP address (such as 1a2b-203-0-113-5.ngrok-free.app) are refused too; use a tunnel URL without one, for example your ngrok static domain or a trycloudflare.com URL.";
 
 const LDH_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const TLD = /^(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/;
@@ -154,7 +168,7 @@ export function validateCustomBaseUrl(raw: unknown, appOrigin?: string | null): 
   }
   // Names are never resolved here (Workers egress cannot reach private addresses, as for the crawler in
   // seo/ssrf.ts); this refuses the names that are well known to resolve to the address they spell.
-  if (EMBEDDED_IPV4.test(host)) return reject("local_host", "Base URL must not be a hostname that spells an IP address.");
+  if (EMBEDDED_IPV4.test(host)) return reject("local_host", EMBEDDED_IPV4_MESSAGE);
   if (!labels.every((l) => LDH_LABEL.test(l)) || !TLD.test(labels[labels.length - 1]!)) {
     return reject("not_public_host", "Base URL must be a public hostname with a valid top-level domain.");
   }
@@ -330,23 +344,37 @@ export async function fetchModelList(fetchImpl: typeof fetch, baseUrl: string, a
   };
 }
 
-/** Test-button semantics (same as the other key tests), plus a note when the saved model is not listed. */
+export interface CustomProviderTestResult {
+  ok: boolean | null;
+  detail: string;
+  /**
+   * Whether the saved model id is in the provider's model list: true listed; false not in a complete list
+   * (the UI offers "Change model", e.g. after a tunnel URL moved to another machine); null unknown (no list,
+   * a truncated list, or the request failed).
+   */
+  modelListed: boolean | null;
+}
+
+/** Test-button semantics (same as the other key tests), plus whether the saved model is listed. */
 export async function testCustomProvider(
   fetchImpl: typeof fetch,
   baseUrl: string,
   apiKey: string,
   model: string,
   finalCheck = "the first draft",
-): Promise<{ ok: boolean | null; detail: string }> {
+): Promise<CustomProviderTestResult> {
   const r = await fetchModelList(fetchImpl, baseUrl, apiKey);
-  if (r.ok !== true) return { ok: r.ok, detail: r.detail };
+  if (r.ok !== true) return { ok: r.ok, detail: r.detail, modelListed: null };
   let detail = `Model list request succeeded; the key was not rejected (some providers list models without checking the key, so ${finalCheck} is the final check).`;
-  if (r.models.length > 0 && !r.truncated && !r.models.includes(model)) {
-    detail += ` The saved model id is not in the provider's model list; check it.`;
-  } else if (r.models.includes(model)) {
+  let modelListed: boolean | null = null;
+  if (r.models.includes(model)) {
     detail += " The saved model is listed.";
+    modelListed = true;
+  } else if (r.models.length > 0 && !r.truncated) {
+    detail += ` The saved model id is not in the provider's model list; check it.`;
+    modelListed = false;
   }
-  return { ok: true, detail };
+  return { ok: true, detail, modelListed };
 }
 
 // ------------------------------------------------------------------ rows
@@ -394,7 +422,7 @@ export async function withRoleColumns<T>(fn: (columns: string, roleIs: (r: Custo
   }
 }
 
-export function toCustomProviderStatus(row: CustomProviderRow): CustomProviderStatus {
+export function toCustomProviderStatus(row: CustomProviderRow, changes: CustomProviderChange[] = []): CustomProviderStatus {
   return {
     id: row.id,
     role: row.role === "geo" ? "geo" : "writer",
@@ -409,7 +437,108 @@ export function toCustomProviderStatus(row: CustomProviderRow): CustomProviderSt
     lastTestDetail: row.last_test_detail,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    changes,
   };
+}
+
+// ------------------------------------------------------------------ change log (migration 0012)
+
+/** Changes returned per provider (newest first). */
+export const CUSTOM_PROVIDER_CHANGES_SHOWN = 5;
+
+export type CustomProviderChangeField = CustomProviderChange["fields"][number];
+const FIELD_COLUMN: Record<CustomProviderChangeField, string> = { label: "label", baseUrl: "base_url", model: "model", apiKey: "api_key" };
+const COLUMN_FIELD: Record<string, CustomProviderChangeField> = { label: "label", base_url: "baseUrl", model: "model", api_key: "apiKey" };
+
+export interface CustomProviderChangeRecord {
+  workspaceId: string;
+  providerId: string;
+  changedBy: string | null;
+  changedAt: string;
+  fields: CustomProviderChangeField[];
+  /** Base URLs and hosts before and after; recorded only when the base URL changed. */
+  from: { baseUrl: string; host: string } | null;
+  to: { baseUrl: string; host: string } | null;
+  keyKeptForNewHost: boolean;
+}
+
+/** INSERT statement for one change (no key material), for a db.batch together with the UPDATE. */
+export function customProviderChangeStatement(id: string, r: CustomProviderChangeRecord): [string, ...unknown[]] {
+  return [
+    `INSERT INTO workspace_custom_provider_changes
+       (id, workspace_id, provider_id, changed_by, changed_at, fields, old_base_url, new_base_url, old_host, new_host, key_kept_for_new_host)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    id,
+    r.workspaceId,
+    r.providerId,
+    r.changedBy,
+    r.changedAt,
+    r.fields.map((f) => FIELD_COLUMN[f]).join(","),
+    r.from?.baseUrl ?? null,
+    r.to?.baseUrl ?? null,
+    r.from?.host ?? null,
+    r.to?.host ?? null,
+    r.keyKeptForNewHost ? 1 : 0,
+  ];
+}
+
+interface ChangeRow {
+  provider_id: string;
+  changed_at: string;
+  fields: string;
+  old_base_url: string | null;
+  new_base_url: string | null;
+  old_host: string | null;
+  new_host: string | null;
+  key_kept_for_new_host: number;
+  name: string | null;
+  email: string | null;
+}
+
+/**
+ * The newest CUSTOM_PROVIDER_CHANGES_SHOWN changes of each of the workspace's custom providers, newest first.
+ * Empty before migration 0012 (the change log is informational; it never blocks the provider routes).
+ */
+export async function listCustomProviderChanges(db: Db, workspaceId: string): Promise<Map<string, CustomProviderChange[]>> {
+  const out = new Map<string, CustomProviderChange[]>();
+  let rows: ChangeRow[];
+  try {
+    rows = await db.all<ChangeRow>(
+      `SELECT provider_id, changed_at, fields, old_base_url, new_base_url, old_host, new_host, key_kept_for_new_host, name, email
+         FROM (
+           SELECT ch.provider_id, ch.changed_at, ch.fields, ch.old_base_url, ch.new_base_url, ch.old_host, ch.new_host,
+                  ch.key_kept_for_new_host, u.name, u.email,
+                  ROW_NUMBER() OVER (PARTITION BY ch.provider_id ORDER BY ch.changed_at DESC, ch.rowid DESC) AS n
+             FROM workspace_custom_provider_changes ch
+             LEFT JOIN users u ON u.id = ch.changed_by
+            WHERE ch.workspace_id = ?
+         )
+        WHERE n <= ${CUSTOM_PROVIDER_CHANGES_SHOWN}
+        ORDER BY provider_id, n`,
+      workspaceId,
+    );
+  } catch (e) {
+    if (isMissingTableError(e)) return out;
+    throw e;
+  }
+  for (const r of rows) {
+    const list = out.get(r.provider_id) ?? [];
+    list.push({
+      at: r.changed_at,
+      by: r.name || r.email || null,
+      fields: r.fields
+        .split(",")
+        .map((f) => COLUMN_FIELD[f])
+        .filter((f): f is CustomProviderChangeField => f !== undefined),
+      fromBaseUrl: r.old_base_url,
+      toBaseUrl: r.new_base_url,
+      fromHost: r.old_host,
+      toHost: r.new_host,
+      keyKeptForNewHost: r.key_kept_for_new_host === 1,
+    });
+    out.set(r.provider_id, list);
+  }
+  return out;
 }
 
 /** Every custom provider of the workspace (writers and GEO engines), oldest first. */
@@ -471,24 +600,36 @@ export type CustomProviderUse =
   | { status: "ready"; provider: ResolvedCustomProvider }
   | { status: "unusable"; id: string; label: string; host: string; model: string; detail: string };
 
-/** Re-validate a saved row and decrypt its key (writer or GEO engine). Never falls back to anything else. */
-export async function resolveCustomProviderRow(env: Env, db: Db, workspaceId: string, row: CustomProviderRow): Promise<CustomProviderUse | null> {
-  const base = { id: row.id, label: row.label, host: row.host, model: row.model };
-  const check = validateCustomBaseUrl(row.base_url, env.APP_ORIGIN);
-  if (!check.ok || check.host !== row.host) {
+/**
+ * Re-validate a saved row and decrypt its key (writer or GEO engine). Never falls back to anything else.
+ *
+ * Only `row.id` is used from the row passed in: the base URL, host, model, label and key are read together in
+ * ONE statement and validated as read. The row may have been read earlier (listCustomGeoEngines in
+ * buildRunContext, selectedCustomWriter) and a PATCH may have moved the provider to a new host with a new key
+ * since; pairing the stale host with the fresh key would send the new key to the old host (with tunnels, a
+ * name that may now belong to someone else). null when the row no longer exists.
+ */
+export async function resolveCustomProviderRow(env: Env, db: Db, workspaceId: string, row: Pick<CustomProviderRow, "id">): Promise<CustomProviderUse | null> {
+  const fresh = await db.first<{ label: string; base_url: string; host: string; model: string; key_enc: string }>(
+    "SELECT label, base_url, host, model, key_enc FROM workspace_custom_providers WHERE workspace_id = ? AND id = ?",
+    workspaceId,
+    row.id,
+  );
+  if (!fresh) return null;
+  const base = { id: row.id, label: fresh.label, host: fresh.host, model: fresh.model };
+  const check = validateCustomBaseUrl(fresh.base_url, env.APP_ORIGIN);
+  if (!check.ok || check.host !== fresh.host) {
     return { status: "unusable", ...base, detail: `The saved base URL is no longer accepted (${check.ok ? "host mismatch" : check.message}). Re-enter it.` };
   }
-  const model = cleanModelId(row.model);
+  const model = cleanModelId(fresh.model);
   if (!model) return { status: "unusable", ...base, detail: "The saved model id is invalid. Choose a model again." };
-  const enc = await db.first<{ key_enc: string }>("SELECT key_enc FROM workspace_custom_providers WHERE workspace_id = ? AND id = ?", workspaceId, row.id);
-  if (!enc) return null;
   let key: string;
   try {
-    key = await decryptSecret(env, enc.key_enc, customProviderAad(workspaceId, row.id));
+    key = await decryptSecret(env, fresh.key_enc, customProviderAad(workspaceId, row.id));
   } catch {
     return { status: "unusable", ...base, detail: "The saved API key could not be decrypted. Re-enter it." };
   }
-  return { status: "ready", provider: { id: row.id, label: row.label, baseUrl: check.baseUrl, host: check.host, model, key } };
+  return { status: "ready", provider: { id: row.id, label: fresh.label, baseUrl: check.baseUrl, host: check.host, model, key } };
 }
 
 /**

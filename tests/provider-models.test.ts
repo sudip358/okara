@@ -19,7 +19,9 @@ import { encryptSecret } from "@worker/lib/crypto";
 import { credentialAad } from "@worker/platform/credentials";
 import {
   MUST_SUPPORT,
+  TYPESAFE_MODEL_NOT_SELECTABLE,
   listProviderModels,
+  loadWorkspaceModels,
   modelForKeySource,
   normalizeModelId,
   operatorKeyModelRefusal,
@@ -284,6 +286,9 @@ describe("model resolution: workspace > env > none", () => {
     expect(resolveModel({}, {}, "gemini")).toEqual({ model: null, source: null });
     expect(resolveModel({}, {}, "typesafe")).toEqual({ model: "jev-latest", source: "default" });
     expect(resolveModel({ TYPESAFE_MODEL: "jev-1.13.0" }, {}, "typesafe")).toEqual({ model: "jev-1.13.0", source: "operator" });
+    // TypeSafe is never workspace-selectable: a selection in the map is ignored.
+    expect(resolveModel({}, { typesafe: "jev-1.13.0" }, "typesafe")).toEqual({ model: "jev-latest", source: "default" });
+    expect(resolveModel({ TYPESAFE_MODEL: "jev-pin" }, { typesafe: "jev-1.13.0" }, "typesafe")).toEqual({ model: "jev-pin", source: "operator" });
     // An invalid stored id is skipped, never used.
     expect(resolveModel({ PERPLEXITY_MODEL: "perplexity/sonar" }, { perplexity: "not valid" }, "perplexity")).toEqual({ model: "perplexity/sonar", source: "operator" });
     const all = resolveAllModels({}, { openai_geo: "gpt-5.5" });
@@ -362,14 +367,18 @@ describe("POST /workspaces/:wid/credentials/:provider/models", () => {
     expect(parseProviderModelList("anthropic_geo", ANTHROPIC_LIST, { operatorKey: true }).options.map((o) => o.id)).toEqual(["claude-opus-5", "claude-sonnet-5-5"]);
   });
 
-  it("TypeSafe is not listed with the operator key (the operator's model is always used)", async () => {
+  it("TypeSafe models are never listed (400 model_not_selectable) whatever the key source; nothing is fetched", async () => {
     const env = createTestEnv({ TYPESAFE_API_KEY: OP_KEY, TYPESAFE_MODEL: "jev-1.13.0" });
     const u = await seedUser(env);
-    const r = await call(env, u, "POST", path(u.workspaceId, "typesafe"), {});
-    expect(r.status).toBe(200);
-    expect(r.json!.data).toMatchObject({ ok: null, keySource: "operator_key", models: [], detail: expect.stringMatching(/operator's model \(jev-1\.13\.0\); add your own TypeSafe key/) });
+    const op = await call(env, u, "POST", path(u.workspaceId, "typesafe"), {});
+    expect(op.status).toBe(400);
+    expect(op.json!.error).toMatchObject({ message: TYPESAFE_MODEL_NOT_SELECTABLE, details: { field: "provider", reason: "model_not_selectable" } });
+    const typed = await call(env, u, "POST", path(u.workspaceId, "typesafe"), { apiKey: TYPED });
+    expect(typed.status).toBe(400);
+    await saveKey(env, u.db, u.workspaceId, "typesafe");
+    expect((await call(env, u, "POST", path(u.workspaceId, "typesafe"), {})).status).toBe(400);
     expect(seen).toHaveLength(0);
-    expect(r.text).not.toContain(OP_KEY);
+    expect(op.text + typed.text).not.toMatch(new RegExp(`${OP_KEY}|${TYPED}|${KEY}`));
   });
 
   it("no key at all is setup_required; the writer has no model route; unknown providers 404", async () => {
@@ -435,16 +444,39 @@ describe("PUT /workspaces/:wid/credentials/:provider/model", () => {
     expect((await call(env2, u2, "PUT", path(u2.workspaceId, "anthropic_geo"), { model: "claude-unpriced-x" })).status).toBe(200);
   });
 
-  it("operator key: TypeSafe ignores a workspace model, so choosing one is refused; with a BYO key it is saved", async () => {
-    const env = createTestEnv({ TYPESAFE_API_KEY: OP_KEY });
+  it("TypeSafe: a model selection is refused for every key source (400 model_not_selectable); nothing is stored", async () => {
+    const env = createTestEnv({ TYPESAFE_API_KEY: OP_KEY, TYPESAFE_MODEL: "jev-operator-pin" });
     const u = await seedUser(env);
-    const refused = await call(env, u, "PUT", path(u.workspaceId, "typesafe"), { model: "jev-1.13.0" });
-    expect(refused.status).toBe(400);
-    expect(refused.json!.error!.details).toMatchObject({ field: "model", reason: "operator_key_model" });
-    expect((await call(env, u, "PUT", path(u.workspaceId, "typesafe"), { model: "jev-latest" })).status).toBe(200); // the operator's model
+    const expectRefused = async (body: unknown) => {
+      const r = await call(env, u, "PUT", path(u.workspaceId, "typesafe"), body);
+      expect(r.status).toBe(400);
+      expect(r.json!.error).toMatchObject({ message: TYPESAFE_MODEL_NOT_SELECTABLE, details: { field: "provider", reason: "model_not_selectable" } });
+      expect(r.text).not.toContain("jev-1.13.0");
+    };
+    // Operator key: even the operator's own model or the documented alias.
+    await expectRefused({ model: "jev-1.13.0" });
+    await expectRefused({ model: "jev-operator-pin" });
+    await expectRefused({ model: "jev-latest" });
+    await expectRefused({ model: null });
+    // The workspace's own key: still refused.
     await saveKey(env, u.db, u.workspaceId, "typesafe");
-    const ok = await call(env, u, "PUT", path(u.workspaceId, "typesafe"), { model: "jev-1.13.0" });
-    expect(ok.json!.data).toMatchObject({ model: "jev-1.13.0", modelSource: "workspace", state: "ready" });
+    await expectRefused({ model: "jev-1.13.0" });
+    // No key at all: refused too.
+    const env2 = createTestEnv();
+    const u2 = await seedUser(env2);
+    const none = await call(env2, u2, "PUT", path(u2.workspaceId, "typesafe"), { model: "jev-1.13.0" });
+    expect(none.status).toBe(400);
+    expect(none.json!.error!.details).toMatchObject({ reason: "model_not_selectable" });
+    expect(await u.db.all("SELECT * FROM workspace_provider_models WHERE workspace_id IN (?, ?)", u.workspaceId, u2.workspaceId)).toHaveLength(0);
+    // The card keeps reporting the operator's model, as before the picker existed.
+    const ts = ((await call(env, u, "GET", `/workspaces/${u.workspaceId}/credentials`)).json!.data as ProviderStatus[]).find((p) => p.provider === "typesafe")!;
+    expect(ts).toMatchObject({ source: "workspace_key", model: "jev-operator-pin", modelSource: "operator", workspaceModel: null, modelNote: null, state: "ready" });
+    // Only owners reach the check (a member still gets 403, a stranger 404).
+    const member = await seedUser(env);
+    await member.db.insert("memberships", { workspace_id: u.workspaceId, user_id: member.userId, role: "member", created_at: FIXED_NOW.toISOString() });
+    expect((await call(env, member, "PUT", path(u.workspaceId, "typesafe"), { model: "jev-1.13.0" })).status).toBe(403);
+    const stranger = await seedUser(env);
+    expect((await call(env, stranger, "PUT", path(u.workspaceId, "typesafe"), { model: "jev-1.13.0" })).status).toBe(404);
   });
 
   it("no env model and no selection is setup_required (choose a model); choosing one makes the engine ready", async () => {
@@ -507,7 +539,7 @@ describe("runtime uses the workspace's model", () => {
     expect(byId).toEqual({ gemini: "gemini-3.8-flash", openai_geo: "gpt-5.5" }); // anthropic_geo: key but no model -> no lane
   });
 
-  it("every engine and TypeSafe (run context and request-scoped decisions) send the workspace's model", async () => {
+  it("every engine sends the workspace's model; TypeSafe ignores a stored selection even on the workspace's own key", async () => {
     const env = createTestEnv({ PERPLEXITY_API_KEY: OP_KEY, ANTHROPIC_GEO_API_KEY: OP_KEY, PERPLEXITY_MODEL: "perplexity/other-env" });
     const u = await seedUser(env);
     const pid = await seedProject(env, u.workspaceId);
@@ -518,16 +550,27 @@ describe("runtime uses the workspace's model", () => {
     handler = typesafeHandler;
     const ctx = await buildRunContext(env, await geoRun(env, u.db, u.workspaceId, pid), { fetchImpl: fakeFetch(), clock: () => FIXED_NOW });
     expect(Object.fromEntries(ctx.geoProviders.map((p) => [p.id, p.model]))).toEqual({ perplexity: "perplexity/sonar", anthropic_geo: "claude-opus-5" });
+    // A TypeSafe row stored while the picker briefly existed is harmless: the documented alias is used.
     const r = await ctx.decisions!.decide({ purpose: "test", state: { query: "q", page: { title: "t" } }, questions: DECISION_QUESTIONS });
-    expect(r.model).toBe("jev-1.13.0");
-    expect(sentModel()).toBe("jev-1.13.0");
+    expect(r.model).toBe("jev-latest");
+    expect(sentModel()).toBe("jev-latest");
     const d = await buildDecisionsForWorkspace(env, u.db, u.workspaceId, pid, { fetchImpl: fakeFetch(), clock: () => FIXED_NOW });
     await d!.decide({ purpose: "test", state: "s", questions: DECISION_QUESTIONS });
-    expect(sentModel()).toBe("jev-1.13.0");
+    expect(sentModel()).toBe("jev-latest");
     expect(seen.find((x) => x.url === "https://api.typesafe.ai/v1/systemone")!.headers.authorization).toBe(`Bearer ${KEY}`);
+    // With TYPESAFE_MODEL set, that model runs (workspace key, stored selection still ignored).
+    const env2 = createTestEnv({ TYPESAFE_MODEL: "jev-operator-pin" });
+    const d2 = await buildDecisionsForWorkspace(env2, u.db, u.workspaceId, pid, { fetchImpl: fakeFetch(), clock: () => FIXED_NOW });
+    await d2!.decide({ purpose: "test", state: "s", questions: DECISION_QUESTIONS });
+    expect(sentModel()).toBe("jev-operator-pin");
+    // The stored row is left in place (harmless): never loaded, and the card does not report it.
+    expect(await loadWorkspaceModels(u.db, u.workspaceId)).toEqual({ perplexity: "perplexity/sonar", anthropic_geo: "claude-opus-5" });
+    expect(await u.db.all("SELECT model FROM workspace_provider_models WHERE workspace_id = ? AND provider = 'typesafe'", u.workspaceId)).toEqual([{ model: "jev-1.13.0" }]);
+    const ts = ((await call(env, u, "GET", `/workspaces/${u.workspaceId}/credentials`)).json!.data as ProviderStatus[]).find((p) => p.provider === "typesafe")!;
+    expect(ts).toMatchObject({ source: "workspace_key", model: "jev-latest", modelSource: "default", workspaceModel: null, modelNote: null });
   });
 
-  it("TypeSafe on the operator key ignores the workspace's model (TYPESAFE_MODEL, else jev-latest)", async () => {
+  it("TypeSafe on the operator key also ignores a stored selection (TYPESAFE_MODEL, else jev-latest)", async () => {
     const env = createTestEnv({ TYPESAFE_API_KEY: OP_KEY });
     const u = await seedUser(env);
     const pid = await seedProject(env, u.workspaceId);
@@ -543,10 +586,9 @@ describe("runtime uses the workspace's model", () => {
     const d = await buildDecisionsForWorkspace(env2, u2.db, u2.workspaceId, pid2, { fetchImpl: fakeFetch() });
     await d!.decide({ purpose: "test", state: "s", questions: DECISION_QUESTIONS });
     expect(sentModel()).toBe("jev-operator-pin");
-    // The card says so and keeps the selection resettable.
+    // The card shows the operator's model and no selection, exactly as before the picker existed.
     const ts = ((await call(env2, u2, "GET", `/workspaces/${u2.workspaceId}/credentials`)).json!.data as ProviderStatus[]).find((p) => p.provider === "typesafe")!;
-    expect(ts).toMatchObject({ source: "operator_key", model: "jev-operator-pin", modelSource: "operator", workspaceModel: "jev-1.13.0", state: "ready" });
-    expect(ts.modelNote).toMatch(/applies only with your own TypeSafe key/);
+    expect(ts).toMatchObject({ source: "operator_key", model: "jev-operator-pin", modelSource: "operator", workspaceModel: null, modelNote: null, state: "ready" });
   });
 
   it("operator key + a workspace model without a verified price: no lane, a run event, setup_required everywhere; a BYO key builds the lane", async () => {
@@ -587,7 +629,9 @@ describe("runtime uses the workspace's model", () => {
     expect(modelForKeySource(env, { gemini: "gemini-3.8-flash" }, "gemini", "operator_key", FIXED_NOW).blocked).toBeNull();
     expect(modelForKeySource(env, { gemini: "gemini-env-unpriced" }, "gemini", "operator_key", FIXED_NOW).blocked).toBeNull(); // the operator's own choice
     expect(modelForKeySource(env, {}, "gemini", "operator_key", FIXED_NOW)).toMatchObject({ model: "gemini-env-unpriced", source: "operator", blocked: null });
-    expect(modelForKeySource({}, { typesafe: "jev-1.13.0" }, "typesafe", "operator_key")).toMatchObject({ model: "jev-latest", source: "default", ignoredSelection: "jev-1.13.0", blocked: null });
+    for (const keySource of ["operator_key", "workspace_key", null] as const) {
+      expect(modelForKeySource({}, { typesafe: "jev-1.13.0" }, "typesafe", keySource)).toEqual({ model: "jev-latest", source: "default", blocked: null });
+    }
     expect(operatorKeyModelRefusal({}, "perplexity", "perplexity/sonar")).toBeNull();
     expect(operatorKeyModelRefusal({}, "perplexity", "perplexity/sonar-pro")).toMatchObject({ reason: "operator_key_unpriced" });
   });

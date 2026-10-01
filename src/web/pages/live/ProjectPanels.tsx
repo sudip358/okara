@@ -75,14 +75,14 @@ export function CompetitorsPanel({
           <caption className="sr-only">Approved competitor pages and their measured checks</caption>
           <thead className="border-b border-zinc-200 dark:border-zinc-800">
             <tr>
-              <LTH className="w-[30%] sm:w-[24%] md:w-[18%]">Site</LTH>
-              <LTH className="hidden sm:table-cell sm:w-[34%] md:w-[20%]">Page</LTH>
+              <LTH className="w-[30%] sm:w-[24%] md:w-[16%]">Site</LTH>
+              <LTH className="hidden sm:table-cell sm:w-[34%] md:w-[18%]">Page</LTH>
               {COMP_CHECKS.map((c) => (
-                <LTH key={c.key} className="hidden md:table-cell md:w-[7%]">
+                <LTH key={c.key} className="hidden md:table-cell md:w-[8%]">
                   {c.label}
                 </LTH>
               ))}
-              <LTH className="w-[40%] sm:w-[24%] md:w-[15%]">Cited in</LTH>
+              <LTH className="w-[40%] sm:w-[24%] md:w-[14%]">Cited in</LTH>
               <LTH className="w-[30%] sm:w-[18%] md:w-[12%]">Verdict</LTH>
             </tr>
           </thead>
@@ -226,7 +226,7 @@ export function CoveragePanel({
 }) {
   const rows = (state.data?.rows ?? []).slice().sort((a, b) => GAP_ORDER[a.gap] - GAP_ORDER[b.gap] || (a.text < b.text ? -1 : 1));
   const c = coverageCounts(rows);
-  const pct = c.total > 0 ? `${Math.round((c.noPage / c.total) * 100)}% of approved prompts` : undefined;
+  const pct = c.total > 0 ? `${Math.round((c.noPage / c.total) * 100)}%` : undefined;
   return (
     <Panel
       num={num}
@@ -234,7 +234,7 @@ export function CoveragePanel({
       accent={accent}
       reduced={reduced}
       testId="coverage"
-      counter={state.data ? { value: c.noPage, suffix: `of ${fmtInt(c.total)} approved prompts have no matching page`, sub: pct } : null}
+      counter={state.data ? { value: c.noPage, suffix: `of ${fmtInt(c.total)} approved prompts`, sub: `have no matching page${pct ? ` · ${pct}` : ""}` } : null}
       subtitle="Your approved prompts matched to your best page (measured overlap) and to who the engines cited."
       captions={captions}
     >
@@ -249,15 +249,15 @@ export function CoveragePanel({
           <caption className="sr-only">Approved prompts, matched page and who the engines cited</caption>
           <thead className="border-b border-zinc-200 dark:border-zinc-800">
             <tr>
-              <LTH className="w-[42%] sm:w-[32%] md:w-[26%]">Approved prompt</LTH>
-              <LTH className="hidden md:table-cell md:w-[8%]" title="Engines that answered this prompt (no question-volume source exists)">
+              <LTH className="w-[42%] sm:w-[32%] md:w-[22%]">Approved prompt</LTH>
+              <LTH className="hidden md:table-cell md:w-[7%]" title="Engines that answered this prompt (no question-volume source exists)">
                 Engines
               </LTH>
-              <LTH className="hidden sm:table-cell sm:w-[20%] md:w-[18%]">Our best page</LTH>
-              <LTH className="hidden md:table-cell md:w-[12%]">Match</LTH>
-              <LTH className="w-[30%] sm:w-[18%] md:w-[14%]">AI cites</LTH>
-              <LTH className="w-[28%] sm:w-[16%] md:w-[12%]">Verdict</LTH>
-              <LTH className="hidden sm:table-cell sm:w-[14%] md:w-[10%]">Next step</LTH>
+              <LTH className="hidden sm:table-cell sm:w-[20%] md:w-[15%]">Our best page</LTH>
+              <LTH className="hidden md:table-cell md:w-[13%]">Match</LTH>
+              <LTH className="w-[30%] sm:w-[18%] md:w-[15%]">AI cites</LTH>
+              <LTH className="w-[28%] sm:w-[16%] md:w-[14%]">Verdict</LTH>
+              <LTH className="hidden sm:table-cell sm:w-[14%] md:w-[14%]">Next step</LTH>
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
@@ -277,11 +277,12 @@ export function CoveragePanel({
                   </LTD>
                   <LTD className="hidden md:table-cell" title={r.basis}>
                     {r.matchedPage ? (
-                      <span className="flex min-w-0 items-center gap-1">
-                        <MiniBar value={r.matchedPage.score} label={`overlap ${r.matchedPage.score.toFixed(2)}`} className="w-8 shrink-0" />
-                        <span className="truncate font-mono text-[11px] text-zinc-600 dark:text-zinc-400">
-                          overlap {r.matchedPage.score.toFixed(2)} · {METHOD_TAG[r.matchedPage.method]}
+                      <span className="block min-w-0">
+                        <span className="flex min-w-0 items-center gap-1">
+                          <MiniBar value={r.matchedPage.score} label={`overlap ${r.matchedPage.score.toFixed(2)}`} className="w-6 shrink-0" />
+                          <span className="truncate font-mono text-[11px] text-zinc-700 dark:text-zinc-300">overlap {r.matchedPage.score.toFixed(2)}</span>
                         </span>
+                        <span className="block truncate text-[10px] text-zinc-500 dark:text-zinc-400">{METHOD_TAG[r.matchedPage.method]}</span>
                       </span>
                     ) : (
                       "—"
@@ -383,7 +384,7 @@ export function AiAnswersPanel({
       accent="rose"
       reduced={reduced}
       testId="ai-answers"
-      counter={c ? { value: c.citeUs, suffix: `of ${fmtInt(c.answered)} answered prompts cite our site`, sub: "stored answers, latest per prompt" } : null}
+      counter={c ? { value: c.citeUs, suffix: `of ${fmtInt(c.answered)} answered prompts`, sub: "cite our site · latest stored answer per prompt" } : null}
       subtitle="Stored citations of your pages and five measured page attributes. No likelihood of any kind is shown."
       captions={captions}
     >
@@ -396,15 +397,15 @@ export function AiAnswersPanel({
           <caption className="sr-only">Your pages in stored AI answers, with measured attributes</caption>
           <thead className="border-b border-zinc-200 dark:border-zinc-800">
             <tr>
-              <LTH className="w-[40%] sm:w-[34%] md:w-[24%]">Page</LTH>
-              <LTH className="w-[28%] sm:w-[22%] md:w-[16%]">Cited in</LTH>
+              <LTH className="w-[40%] sm:w-[34%] md:w-[21%]">Page</LTH>
+              <LTH className="w-[28%] sm:w-[22%] md:w-[15%]">Cited in</LTH>
               {FACTOR_COLUMNS.map((f) => (
-                <LTH key={f.key} className="hidden text-center md:table-cell md:w-[6%]" title={f.long}>
+                <LTH key={f.key} className="hidden text-center md:table-cell md:w-[5%]" title={f.long}>
                   {f.label}
                 </LTH>
               ))}
-              <LTH className="hidden sm:table-cell sm:w-[22%] md:w-[16%]">Cited alongside</LTH>
-              <LTH className="w-[32%] sm:w-[22%] md:w-[14%]">Next step</LTH>
+              <LTH className="hidden sm:table-cell sm:w-[22%] md:w-[15%]">Cited alongside</LTH>
+              <LTH className="w-[32%] sm:w-[22%] md:w-[24%]">Next step</LTH>
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
@@ -446,8 +447,8 @@ export function AiAnswersPanel({
                   <LTD className="hidden text-zinc-700 sm:table-cell dark:text-zinc-300" title={r.citedAlongside.map((h) => h.host).join(", ")}>
                     {r.citedAlongside.length ? r.citedAlongside.slice(0, 3).map((h) => h.host).join(", ") : "—"}
                   </LTD>
-                  <LTD className={cx("text-zinc-700 dark:text-zinc-300")} title={r.reason ?? undefined}>
-                    {next}
+                  <LTD className="whitespace-normal text-zinc-700 dark:text-zinc-300" title={r.reason ?? undefined}>
+                    <span className="line-clamp-2">{next}</span>
                   </LTD>
                 </tr>
               );

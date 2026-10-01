@@ -123,14 +123,16 @@ export function ElementsPanel({
             <tr>
               <LTH className="w-[44%] sm:w-[26%] md:w-[22%]">Page</LTH>
               <LTH className="w-[24%] sm:w-[12%] md:w-[11%]">Element</LTH>
-              <LTH className="hidden sm:table-cell sm:w-[34%] md:w-[29%]">Now → proposed</LTH>
-              <LTH className="hidden text-right md:table-cell md:w-[7%]" title="Average position from Search Console (≈ for page aggregates)">
-                Avg pos.
+              <LTH className="hidden sm:table-cell sm:w-[32%] md:w-[24%]">Now → proposed</LTH>
+              <LTH className="hidden text-right md:table-cell md:w-[9%]" title="Average position from Search Console (≈ for page aggregates)">
+                Pos.
+                <span className="block text-[10px]">GSC ≈</span>
               </LTH>
-              <LTH className="hidden text-right md:table-cell md:w-[8%]" title={win ? `Search Console, ${windowShort(win)}; measured, not projected` : "Search Console; measured"}>
-                {win ? `Clicks (GSC, ${windowShort(win)})` : "Clicks (GSC)"}
+              <LTH className="hidden text-right md:table-cell md:w-[8%]" title={win ? `Clicks (GSC, ${windowShort(win)}); measured, not projected` : "Clicks (GSC); measured"}>
+                Clicks
+                <span className="block text-[10px]">{win ? `GSC ${windowShort(win)}` : "GSC"}</span>
               </LTH>
-              <LTH className="hidden sm:table-cell sm:w-[16%] md:w-[13%]">Jev</LTH>
+              <LTH className="hidden sm:table-cell sm:w-[18%] md:w-[16%]">Jev</LTH>
               <LTH className="w-[32%] sm:w-[12%] md:w-[10%]">Verdict</LTH>
             </tr>
           </thead>
