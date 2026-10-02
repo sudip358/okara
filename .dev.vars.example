@@ -23,6 +23,9 @@ OPENAI_GEO_MODEL=
 # Anthropic GEO lane (Messages API + web_search_20250305). Separate from WRITER_API_KEY. Exact model id required.
 ANTHROPIC_GEO_API_KEY=
 ANTHROPIC_GEO_MODEL=
+# Optional operator DataForSEO API login + API password (competitor data; paid per request; global caps apply).
+DATAFORSEO_LOGIN=
+DATAFORSEO_PASSWORD=
 # Writer: WRITER_PROVIDER=anthropic|openai_compatible, exact model id required
 WRITER_PROVIDER=
 WRITER_MODEL=

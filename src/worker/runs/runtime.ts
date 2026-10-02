@@ -53,6 +53,8 @@ export const API_HOST_ALLOWLIST: readonly string[] = [
   "oauth2.googleapis.com",
   "www.googleapis.com",
   "searchconsole.googleapis.com",
+  // DataForSEO (competitor data; HTTP Basic auth, see providers/dataforseo.ts). Not used by agent runs.
+  "api.dataforseo.com",
 ];
 
 export class OutboundBlockedError extends Error {}

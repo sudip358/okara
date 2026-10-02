@@ -104,3 +104,50 @@ export function isSetupRequired(err: unknown): boolean {
 export function isRateLimited(err: unknown): boolean {
   return err instanceof ApiError && (err.status === 429 || err.code === "rate_limited" || err.code === "quota_exceeded" || err.code === "budget_exceeded");
 }
+
+/**
+ * POST whose success response is newline-delimited JSON (Ask Okara `?stream=1`). Same CSRF retry and 401
+ * handling as api(); a JSON error response throws ApiError before any event. Calls `onEvent` once per line.
+ */
+export async function apiStream<E>(path: string, body: unknown, onEvent: (event: E) => void, signal?: AbortSignal): Promise<void> {
+  let res = await send(path, "POST", { body, signal });
+  if (res.status === 403) {
+    const peek = (await res.clone().json().catch(() => null)) as { error?: ApiErrorBody } | null;
+    if (peek?.error?.code === "csrf_failed" && (await refreshCsrfToken(signal))) res = await send(path, "POST", { body, signal });
+  }
+  const type = res.headers.get("content-type") ?? "";
+  if (!res.ok || !type.includes("ndjson") || !res.body) {
+    const json = (await res.json().catch(() => null)) as { error?: ApiErrorBody } | null;
+    if (res.status === 401 && unauthorizedHandler) unauthorizedHandler();
+    throw new ApiError(res.status, json?.error ?? { code: "network", message: `Request failed (${res.status}).` });
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+    let nl = buffer.indexOf("\n");
+    while (nl >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (line) {
+        try {
+          onEvent(JSON.parse(line) as E);
+        } catch {
+          // a malformed line is skipped; the final "done" event carries the full state
+        }
+      }
+      nl = buffer.indexOf("\n");
+    }
+    if (done) break;
+  }
+  const rest = buffer.trim();
+  if (rest) {
+    try {
+      onEvent(JSON.parse(rest) as E);
+    } catch {
+      // ignored (see above)
+    }
+  }
+}

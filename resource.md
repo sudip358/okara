@@ -4,7 +4,7 @@ Every external reference used while specifying and building this product, with w
 
 - **Status:** Adopted = in the spec and/or code. Partly = some ideas taken, others rejected. Rejected = reviewed, nothing taken. Unreachable = couldn't be read.
 - **Where:** amendment tags (`[A1]`–`[A25]`) refer to [`docs/build-kit.md`](docs/build-kit.md) section 1; section numbers refer to that file too.
-- Last updated: 2026-09-30.
+- Last updated: 2026-10-02.
 
 ---
 
@@ -92,6 +92,11 @@ Every external reference used while specifying and building this product, with w
 - Product structured data: https://developers.google.com/search/docs/appearance/structured-data/product
 - Helpful, people-first content: https://developers.google.com/search/docs/fundamentals/creating-helpful-content
 
+### Competitor data (DataForSEO)
+- Auth (HTTP Basic, API login + API password): https://docs.dataforseo.com/v3/auth/ (read 2026-10-02). Free credential test with account balance (`money.balance`): https://docs.dataforseo.com/v3/appendix/user_data/ · Status codes: https://docs.dataforseo.com/v3/appendix/errors/
+- DataForSEO Labs Google, Live: [ranked_keywords](https://docs.dataforseo.com/v3/dataforseo_labs/google/ranked_keywords/live/) (overview metrics + top keywords), [domain_intersection](https://docs.dataforseo.com/v3/dataforseo_labs/google/domain_intersection/live/) (keyword gap, `intersections: false`), [relevant_pages](https://docs.dataforseo.com/v3/dataforseo_labs/google/relevant_pages/live/) (top pages), [locations_and_languages](https://docs.dataforseo.com/v3/dataforseo_labs/locations_and_languages/) (free). Reviewed and not used: [domain_rank_overview](https://docs.dataforseo.com/v3/dataforseo_labs/google/domain_rank_overview/live/) (its metrics are already in ranked_keywords' `metrics.organic`). Request/response fields, example responses (test fixtures) and cost semantics in docs/provider-contracts.md "DataForSEO Labs".
+- Pricing: https://dataforseo.com/pricing/dataforseo-labs/dataforseo-google-api (read 2026-10-02): $0.012 per task + $0.00012 per item ("All other endpoints"); reservation ceiling only, the recorded cost is the response `cost`. Where: `src/worker/providers/dataforseo.ts`, `src/worker/competitors/dataforseo.ts`, `[A26]`. Status: Adopted.
+
 ### Platform, libraries, security
 - Cloudflare: https://developers.cloudflare.com/workers/ · /workers/platform/limits/ · /workers/static-assets/ · /workers/configuration/cron-triggers/ · /workers/runtime-apis/html-rewriter/ · /workers/runtime-apis/web-crypto/ · /d1/ · /workflows/ · /workflows/reference/limits/
 - Hono: https://hono.dev/docs/ · Drizzle + D1: https://orm.drizzle.team/docs/get-started/d1-new · Zod: https://zod.dev
@@ -102,5 +107,5 @@ Every external reference used while specifying and building this product, with w
 - Jev cost: estimates are recorded per call but not yet reserved against the daily dollar budget (call caps still apply). Decide whether to add them.
 - Milestone 6 `[A24]`: decide on Slack/email digests, analytics connectors (GA4, Shopify, PostHog), and an MCP server.
 - SERP data provider: needed for Google Page 1 composition, "People also ask", and SERP feature checks. Opt-in only; never scrape.
-- Keyword data source: needed for search volume and keyword difficulty.
+- Keyword data source: needed for search volume and keyword difficulty. Competitor domains now have DataForSEO Labs estimates (`[A26]`); the project's own pages and the SEO agent still have none. Decide whether gap keywords become SEO-agent evidence (needs an `external_estimate` evidence source).
 - LinkedIn profile (mert-d): clarify what to take from it.

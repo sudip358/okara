@@ -43,6 +43,12 @@ export interface Env {
   WRITER_REASONING_HEADROOM_TOKENS?: string;
   /** Optional Gemini thinkingLevel override (e.g. LOW, HIGH) for models that accept it. Default in providers/gemini.ts. */
   GEMINI_THINKING_LEVEL?: string;
+  /**
+   * Optional operator DataForSEO API login + API password (secrets; both required). Workspace credentials
+   * take precedence. Spend on these counts against the GLOBAL_* daily caps (runs/budget.ts).
+   */
+  DATAFORSEO_LOGIN?: string;
+  DATAFORSEO_PASSWORD?: string;
 
   /**
    * Global daily caps across all projects, applied only to spend on the operator keys above

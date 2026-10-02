@@ -29,6 +29,8 @@ import { runRoutes } from "./routes/runs";
 import { demoRoutes } from "./routes/demo";
 import { activityRoutes } from "./routes/activity";
 import { liveRoutes } from "./routes/live";
+import { chatRoutes } from "./routes/chat";
+import { competitorDataRoutes } from "./routes/competitor-data";
 
 export interface AppVariables {
   db: Db;
@@ -74,6 +76,8 @@ export function createApp() {
   app.route("/", demoRoutes);
   app.route("/", activityRoutes);
   app.route("/", liveRoutes);
+  app.route("/", chatRoutes);
+  app.route("/", competitorDataRoutes);
 
   app.notFound((c) => c.json({ error: { code: "not_found", message: "Not found." } }, 404));
   app.onError((err, c) => {

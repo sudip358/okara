@@ -61,7 +61,7 @@ const patchBody = z
 
 const feedbackBody = z.object({ humanAnswer: z.string().trim().min(1).max(200), reason: z.string().max(1000).optional() }).strict();
 
-interface RecRow {
+export interface RecRow {
   id: string;
   workspace_id: string;
   project_id: string;
@@ -161,7 +161,7 @@ export function mapRecommendation(r: RecRow, decisionProvider: string | null = n
 }
 
 /** Attach the true decision provider from decision_records (candidate_key = dedup key). */
-async function withProviders(db: Db, rows: RecRow[]): Promise<Recommendation[]> {
+export async function withProviders(db: Db, rows: RecRow[]): Promise<Recommendation[]> {
   if (rows.length === 0) return [];
   const first = rows[0]!;
   const keys = [...new Set(rows.map((r) => r.dedup_key))];
@@ -193,7 +193,7 @@ async function loadRecForUser(db: Db, userId: string, id: string): Promise<RecRo
   return row;
 }
 
-async function detail(db: Db, r: RecRow): Promise<RecommendationDetail> {
+export async function recommendationDetail(db: Db, r: RecRow): Promise<RecommendationDetail> {
   const ids = parseJson<string[]>(r.evidence_ids_json, []).filter((x) => typeof x === "string").slice(0, 100);
   // 100 ids + 2 scope params would exceed D1's 100 bound-parameter limit: chunked.
   const evidence = await inChunks(ids, (chunk, placeholders) =>
@@ -249,6 +249,55 @@ async function agentState(c: { env: AppEnv["Bindings"] }, db: Db, project: Proje
   return anyGeoEngineConfigured(caps) ? "ready" : "setup_required";
 }
 
+/**
+ * Status transition for one recommendation of `project` by `userId` (Ask Okara's confirmed approve/dismiss
+ * action). Same transition table and event as PATCH /recommendations/:id; conditional on the current status
+ * so a concurrent change cannot be overwritten. Throws 404 (not in this project) or 409 (invalid transition).
+ */
+export async function setRecommendationStatus(
+  db: Db,
+  project: Pick<ProjectRow, "id" | "workspace_id">,
+  userId: string,
+  id: string,
+  status: Exclude<RecommendationStatus, "implemented">,
+  note: string | null,
+  now: Date,
+): Promise<Recommendation> {
+  const row = await db.first<RecRow>("SELECT * FROM recommendations WHERE id = ? AND workspace_id = ? AND project_id = ?", id, project.workspace_id, project.id);
+  if (!row) throw notFound("Recommendation");
+  if (row.status !== status) {
+    if (!TRANSITIONS[row.status].includes(status)) throw conflict(`Cannot change status from ${row.status} to ${status}.`);
+    const at = iso(now);
+    await db.batch([
+      [
+        "UPDATE recommendations SET status = ?, stage = 'awaiting_approval', updated_at = ? WHERE id = ? AND workspace_id = ? AND status = ?",
+        status,
+        at,
+        row.id,
+        row.workspace_id,
+        row.status,
+      ],
+      [
+        "INSERT INTO recommendation_events (id, workspace_id, project_id, recommendation_id, user_id, event, note, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        newId("rev"),
+        row.workspace_id,
+        row.project_id,
+        row.id,
+        userId,
+        EVENT_FOR[status],
+        note,
+        at,
+      ],
+    ]);
+  }
+  const updated = await db.first<RecRow>("SELECT * FROM recommendations WHERE id = ? AND workspace_id = ?", row.id, row.workspace_id);
+  const [rec] = await withProviders(db, [updated!]);
+  return rec!;
+}
+
+/** Allowed next statuses (UI + Ask Okara validation). */
+export const RECOMMENDATION_TRANSITIONS: Readonly<Record<RecommendationStatus, readonly RecommendationStatus[]>> = TRANSITIONS;
+
 export const recommendationRoutes = new Hono<AppEnv>();
 
 recommendationRoutes.get("/projects/:pid/recommendations", async (c) => {
@@ -280,7 +329,7 @@ recommendationRoutes.get("/recommendations/:id", async (c) => {
   const user = requireUser(c);
   const db = c.get("db");
   const row = await loadRecForUser(db, user.id, c.req.param("id"));
-  return c.json({ data: await detail(db, row) });
+  return c.json({ data: await recommendationDetail(db, row) });
 });
 
 recommendationRoutes.patch("/recommendations/:id", async (c) => {

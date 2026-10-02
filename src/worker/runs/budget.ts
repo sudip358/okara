@@ -161,7 +161,12 @@ const PROVIDER_VIEW = Symbol("budget.forProvider");
  * global operator-key caps never apply; project limits do.
  */
 export const WORKSPACE_CUSTOM_PROVIDER = "workspace_custom" as const;
-type BudgetProvider = CredentialProviderId | typeof WORKSPACE_CUSTOM_PROVIDER;
+/**
+ * Spend on an operator-owned credential of a provider outside CredentialProviderId (e.g. DataForSEO via
+ * DATAFORSEO_LOGIN/DATAFORSEO_PASSWORD): the global operator-key caps always apply, plus project limits.
+ */
+export const OPERATOR_KEY_SPEND = "operator_key_spend" as const;
+type BudgetProvider = CredentialProviderId | typeof WORKSPACE_CUSTOM_PROVIDER | typeof OPERATOR_KEY_SPEND;
 type ProviderAwareBudget = Budget & { [PROVIDER_VIEW]: (provider: BudgetProvider) => Budget };
 
 /**
@@ -174,6 +179,16 @@ export function budgetFor(budget: Budget, provider: string): Budget {
   if (!view) return budget;
   if (provider.startsWith("custom_geo:")) return view(WORKSPACE_CUSTOM_PROVIDER);
   return (PROVIDER_IDS as readonly string[]).includes(provider) ? view(provider as CredentialProviderId) : budget;
+}
+
+/**
+ * A view for a provider whose key source the caller resolved itself (DataForSEO): the tenant's own key is
+ * bounded by project limits only; the operator's key also counts against the global daily caps.
+ */
+export function budgetForKeySource(budget: Budget, source: CredentialSource): Budget {
+  const view = (budget as Partial<ProviderAwareBudget>)[PROVIDER_VIEW];
+  if (!view) return budget;
+  return view(source === "operator_key" ? OPERATOR_KEY_SPEND : WORKSPACE_CUSTOM_PROVIDER);
 }
 
 export function createBudget(
@@ -269,7 +284,9 @@ export function createBudget(
     const pKey = projectScopeKey(scope.projectId);
     const globalLimit = globalDailyLimit(resource, env);
     const withGlobal =
-      globalLimit !== null && provider !== WORKSPACE_CUSTOM_PROVIDER && spendsOperatorKey(resource, provider, await loadSources());
+      globalLimit !== null &&
+      provider !== WORKSPACE_CUSTOM_PROVIDER &&
+      (provider === OPERATOR_KEY_SPEND || spendsOperatorKey(resource, provider, await loadSources()));
     await upsertCounter(pKey, day, resource, dailyLimit(resource, limits));
     if (!(await tryIncrement(pKey, day, resource, amt))) {
       throw new BudgetExceededError(resource, `Project daily limit reached for ${resource}.`);

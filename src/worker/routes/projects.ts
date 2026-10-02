@@ -32,6 +32,8 @@ import {
   updateProject,
 } from "../platform/projects";
 import { ensureVerificationToken, runVerificationCheck, verificationStatus } from "../platform/verification";
+import { onCompetitorsChanged } from "../competitors/dataforseo";
+import { backgroundScheduler } from "./competitor-data";
 
 export const projectRoutes = new Hono<AppEnv>();
 
@@ -58,6 +60,8 @@ projectRoutes.post("/workspaces/:wid/projects", async (c) => {
   await requireWorkspaceMember(db, user.id, wid);
   const input = await parseBody(c, projectInputSchema);
   const row = await createProject(db, wid, user.id, input, c.get("now"));
+  // Competitors added at creation pull DataForSEO data when credentials exist (after the response; never fails the save).
+  await onCompetitorsChanged(c.env, db, row, [], user.id, c.get("now"), backgroundScheduler(c));
   return c.json({ data: toProject(row) }, 201);
 });
 
@@ -73,6 +77,10 @@ projectRoutes.patch("/projects/:pid", async (c) => {
   const row = await requireProject(db, user.id, c.req.param("pid"));
   const patch = await parseBody(c, projectPatchSchema);
   const updated = await updateProject(db, row, patch, c.get("now"));
+  if (patch.competitors) {
+    // Newly added competitor domains pull DataForSEO data (after the response; never fails the save).
+    await onCompetitorsChanged(c.env, db, updated, toProject(row).competitors, user.id, c.get("now"), backgroundScheduler(c));
+  }
   return c.json({ data: toProject(updated) });
 });
 

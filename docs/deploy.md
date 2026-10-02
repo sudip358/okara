@@ -90,6 +90,13 @@ need more than 10 ms of CPU per step, so agent runs will fail on the free plan. 
      `provider_credentials` CHECK constraint; until it is applied, saving one returns `setup_required` and only
      the operator key works. Spend on these keys is shared by every
      workspace and bounded by the `GLOBAL_*` caps below. Review those caps before setting these keys.
+   - Optional operator DataForSEO credentials (competitor data on the Competitors page): `DATAFORSEO_LOGIN` and
+     `DATAFORSEO_PASSWORD` (the **API** login and API password from https://app.dataforseo.com/api-access, not
+     the account password; both required). Workspaces can save their own on the Integrations page (needs
+     migration `0014_dataforseo_competitors.sql`). DataForSEO is paid per request (at most $0.0624 per
+     competitor-domain refresh at the price published 2026-10-02); spend on the operator credentials counts
+     against `GLOBAL_USD_MICROS_PER_DAY` and `GLOBAL_PROVIDER_CALLS_PER_DAY`, and the cron tick processes
+     refreshes left queued. Consider a cost limit in the DataForSEO dashboard as a second guard.
 
    Plain vars live in `wrangler.jsonc` → `vars` (not secrets; a name cannot be both a var and a secret):
 

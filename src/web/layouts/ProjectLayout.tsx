@@ -6,6 +6,7 @@ import { ProjectProvider, projectPath, useProjectLoader } from "@web/lib/project
 import { useSession } from "@web/lib/session";
 import { ActivityLauncher } from "@web/components/activity/ActivityWindow";
 import { LiveNavDot } from "@web/pages/live/LiveNavDot";
+import { ChatLauncher } from "@web/components/chat/ChatPanel";
 import { Badge, DemoBanner, EmptyState, ErrorState, LoadingState, buttonClass, cx } from "@web/components/ui";
 
 const NAV: Array<{ to: string; label: string; end?: boolean; group?: string }> = [
@@ -74,6 +75,7 @@ export function ProjectLayout() {
             </div>
             <div className="mt-2">
               <ActivityLauncher projectId={projectId} isDemo={project.isDemo} topAnchor={activityTop} />
+              <ChatLauncher projectId={projectId} className="ml-2" />
             </div>
           </div>
           <nav aria-label="Project">

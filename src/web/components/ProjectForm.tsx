@@ -170,7 +170,7 @@ export function ProjectForm({
 
       <Card
         title={`Competitors (${v.competitors.length} of ${MAX_COMPETITORS})`}
-        description="Names, domains, and aliases. Competitor sites are never crawled automatically."
+        description="Names, domains, and aliases. Competitor sites are never crawled automatically. If DataForSEO is connected, a newly added competitor domain pulls DataForSEO search estimates (paid per request; see the Competitors page)."
         actions={
           <Button
             size="sm"

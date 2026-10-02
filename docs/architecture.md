@@ -18,6 +18,7 @@ Specification: `docs/build-kit.md`. API contract: `docs/api.md` + `src/shared/ty
 | SEO agent | `src/worker/seo/*` | Crawl (SSRF-guarded), rule registry, GSC sync, candidate shortlist, Jev decisions, priority, writer drafts |
 | GEO agent | `src/worker/geo/*`, `src/worker/providers/{gemini,perplexity,rates}.ts` | Grounded prompt sampling, mention/citation/sentiment analysis, displacement, search-query capture, proposals |
 | Recommendations | `src/worker/recommendations/*` | Evidence rows, dedup, 0-2/day cap, persistence shared by both agents |
+| Ask Okara | `src/worker/chat/*`, `src/worker/routes/chat.ts`, `src/web/components/chat/*` | In-app chat agent: tool-calling writer model over internal read tools; confirmed actions only |
 | Web | `src/web/*` | SPA; renders untrusted text as plain text |
 
 ## Run pipeline
@@ -120,6 +121,31 @@ Manual runs (`POST /projects/:pid/runs`) are limited to 3 per project per UTC da
 quota (HTTP 429 `quota_exceeded`); demo projects return 409 `demo_project`; a repeat within the same minute
 for the same agent returns the existing run; a run refused because another run holds the lock is removed so
 it does not consume quota (409).
+
+## Ask Okara (chat agent)
+
+```
+POST /projects/:pid/chat/sessions/:sid/messages (CSRF, rate limit) ──► prepareSend: session lease (conditional UPDATE),
+     expire a waiting action, store user + assistant messages ──► runAgentLoop (chat/loop.ts)
+        model.round()  ── metered: provider_calls + writer_tokens reserved, settled, provider_calls row (chat.turn)
+        tool calls ──► read/output tool: run now (zod-validated, tenancy-scoped, result capped) ──► next round
+                   └─► action tool: prepare() + chat_actions 'pending' ──► pause (transcript saved on the session)
+POST .../actions/:aid/confirm ──► lease + pending→executing (exactly once) ──► execute() ──► resume the loop
+```
+
+- Model: `chat/model.ts` resolves the workspace writer (custom OpenAI-compatible writer, else `WRITER_PROVIDER`
+  anthropic / openai_compatible with `WRITER_MODEL` and a key); adapters `chat/model-anthropic.ts` (SDK, client
+  tools) and `chat/model-openai.ts` (function tools). Same allowlisted `apiFetch` and metering as the writer.
+- Transcript: earlier turns as text pairs only; the current turn append-only (provider-native assistant
+  content replayed verbatim, thinking blocks included), so nothing replayed was produced against a different
+  prefix. A paused turn keeps its transcript in `chat_sessions.pending_json` until confirm/cancel.
+- Tools (`chat/tools.ts`) call the same service functions as the routes (`buildSeoOverview`, `buildGeoResults`,
+  `getProjectChecklist`, `getLinkReport`, `runDraftCheck`, `requestManualRun`, `setRecommendationStatus`,
+  `approveCompetitorPage`, ...) with the route's `ProjectRow`; nothing goes over HTTP.
+- Safety: the confirmation gate lives in `chat/service.ts` (not the prompt); the system prompt (`chat/prompt.ts`)
+  marks tool data as untrusted; the UI renders answers as markdown-lite text with in-app or http(s) links only.
+- Streaming: `?stream=1` returns ndjson events through a `TransformStream`; the turn keeps running (and is
+  stored) if the client disconnects (`waitUntil`).
 
 ## Deviations and known limitations
 

@@ -239,7 +239,7 @@ describe("runtime", () => {
     await expect(api("https://shop.example.com/")).rejects.toBeInstanceOf(OutboundBlockedError); // crawling never uses apiFetch
     expect(seen).toHaveLength(0);
     for (const host of API_HOST_ALLOWLIST) {
-      expect(["api.typesafe.ai", "generativelanguage.googleapis.com", "api.perplexity.ai", "api.anthropic.com", "api.openai.com", "oauth2.googleapis.com", "www.googleapis.com", "searchconsole.googleapis.com"]).toContain(host);
+      expect(["api.typesafe.ai", "generativelanguage.googleapis.com", "api.perplexity.ai", "api.anthropic.com", "api.openai.com", "oauth2.googleapis.com", "www.googleapis.com", "searchconsole.googleapis.com", "api.dataforseo.com"]).toContain(host);
     }
     await api("https://api.typesafe.ai/v1/models");
     await api("https://llm.example.com/v1/chat/completions");

@@ -16,6 +16,8 @@ Spec: `docs/build-kit.md`. API contract: `docs/api.md` + `src/shared/types.ts`. 
 | runtime | providers/{typesafe,writer-anthropic,writer-openai}.ts, writing/**, runs/{budget,calls,locks,runtime,orchestrate,scheduler,workflow}.ts, routes/{runs,recommendations}.ts, tests/runtime*.test.ts | runs, recommendations, usage, attention |
 | web-shell | src/web/{main,App}.tsx, src/web/lib/**, src/web/components/**, pages: SignIn, Workspace/Projects, Onboarding, Overview, Integrations (+ pages/integrations/**: writer card custom provider flow), Usage, Settings, RunHistory | — |
 | web-features | src/web/pages/{seo,geo,recommendations}/** | SEO audit, recommendations list/detail, GEO prompts, GEO results, observation drawer, competitors |
+| competitor-data | providers/dataforseo.ts, competitors/dataforseo.ts, platform/dataforseo-credentials.ts, routes/competitor-data.ts, src/shared/competitor-data.ts, migrations/0014_dataforseo_competitors.sql, web pages/geo/{CompetitorDataPanel.tsx,competitor-data-lib.ts}, pages/integrations/DataForSeo.tsx, tests/dataforseo-*.test.ts, tests/fixtures/dataforseo.ts | /workspaces/:wid/dataforseo/*, /projects/:pid/competitors/dataforseo/* (DataForSEO Labs competitor data, [A26]) |
+| ask-okara | src/worker/chat/**, src/worker/routes/chat.ts, src/web/components/chat/**, migrations/0013_chat.sql, tests/chat-*.test.ts | /projects/:pid/chat/* |
 
 ## Milestones
 - [x] M0 Foundation: scaffold, schema, contracts, test harness

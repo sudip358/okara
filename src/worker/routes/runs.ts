@@ -16,7 +16,8 @@ import type { Db } from "../lib/db";
 import { parseJson } from "../lib/db";
 import { badRequest, conflict, HttpError, notFound } from "../lib/errors";
 import { iso, utcDay } from "../lib/time";
-import { requireProject } from "../platform/access";
+import { requireProject, type ProjectRow } from "../platform/access";
+import type { Env } from "../env";
 import { loadProjectLimits } from "../runs/budget";
 import { releaseRunLock } from "../runs/locks";
 import type { OrchestrateDeps } from "../runs/orchestrate";
@@ -75,6 +76,71 @@ export function mapEvent(r: Record<string, unknown>): RunEvent {
   };
 }
 
+/**
+ * Manual run for a member (route POST /projects/:pid/runs and Ask Okara's confirmed run_agent_now action):
+ * per-project daily quota, same-minute double-submit returns the existing run, demo projects refused, a run
+ * refused because another run holds the lock is removed so it does not consume quota. Throws HttpError.
+ */
+export async function requestManualRun(
+  env: Env,
+  db: Db,
+  project: ProjectRow,
+  userId: string,
+  agent: AgentKind,
+  now: Date,
+  opts: { deps?: RunRouteDeps; waitUntil?: (p: Promise<unknown>) => void } = {},
+): Promise<{ row: RunRow; created: boolean }> {
+  const deps = opts.deps ?? {};
+  if (project.is_demo === 1) throw new HttpError(409, "demo_project", "Demo projects use fixture data; runs are disabled.");
+
+  // Same project + agent within the same minute (double submit) returns the existing run.
+  const key = `${project.id}:${agent}:manual:${Math.floor(now.getTime() / 60000)}`;
+  const result = await createManualRun(db, {
+    workspaceId: project.workspace_id,
+    projectId: project.id,
+    agent,
+    idempotencyKey: key,
+    createdBy: userId,
+    now,
+    perDay: MANUAL_RUNS_PER_PROJECT_PER_DAY,
+  });
+  if (result.quotaExceeded || !result.runId) {
+    throw new HttpError(429, "quota_exceeded", `Manual run limit reached (${MANUAL_RUNS_PER_PROJECT_PER_DAY} per project per UTC day). Scheduled runs continue daily.`);
+  }
+  const { runId, created } = result;
+  const ref = { id: runId, projectId: project.id, agent };
+  const claimAndStart = async () => {
+    const claim = await claimAndLock(db, ref, now, Boolean(env.AGENT_RUN));
+    if (claim === "locked") {
+      // Never started: remove it so it does not consume the manual-run quota.
+      await db.run("DELETE FROM agent_runs WHERE id = ? AND status = 'pending' AND started_at IS NULL", runId);
+      throw conflict("A run for this project and agent is already in progress.");
+    }
+    if (claim === "claimed") {
+      if (deps.start) await deps.start(ref);
+      else await startRun(env, db, ref, now, { deps: deps.orchestrate, waitUntil: opts.waitUntil });
+    }
+  };
+  if (created) {
+    await claimAndStart();
+  } else {
+    // An existing run for this key (double submit). If it is still pending with no dispatch claim, the
+    // request that created it died before claiming it (or lost the lock race): claim and start it now
+    // instead of returning a run that would never start. claimAndLock is a conditional UPDATE, so a
+    // concurrent request still inside its own claim cannot start it twice.
+    const existing = await db.first<{ status: string; workflow_instance_id: string | null }>(
+      "SELECT status, workflow_instance_id FROM agent_runs WHERE id = ? AND workspace_id = ?",
+      runId,
+      project.workspace_id,
+    );
+    if (existing?.status === "pending" && existing.workflow_instance_id === null) await claimAndStart();
+  }
+  const row = await db.first<RunRow>("SELECT * FROM agent_runs WHERE id = ?", runId);
+  // Removed by a concurrent request that found the project + agent locked.
+  if (!row) throw conflict("A run for this project and agent is already in progress.");
+  return { row, created };
+}
+
 export function createRunRoutes(deps: RunRouteDeps = {}) {
   const routes = new Hono<AppEnv>();
 
@@ -118,63 +184,14 @@ export function createRunRoutes(deps: RunRouteDeps = {}) {
     const project = await requireProject(db, user.id, c.req.param("pid"));
     const parsed = manualRunBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw badRequest("Body must be {agent: 'seo' | 'geo'}.");
-    const agent = parsed.data.agent;
-    if (project.is_demo === 1) throw new HttpError(409, "demo_project", "Demo projects use fixture data; runs are disabled.");
-
-    // Same project + agent within the same minute (double submit) returns the existing run.
-    const key = `${project.id}:${agent}:manual:${Math.floor(now.getTime() / 60000)}`;
-    const result = await createManualRun(db, {
-      workspaceId: project.workspace_id,
-      projectId: project.id,
-      agent,
-      idempotencyKey: key,
-      createdBy: user.id,
-      now,
-      perDay: MANUAL_RUNS_PER_PROJECT_PER_DAY,
-    });
-    if (result.quotaExceeded || !result.runId) {
-      throw new HttpError(429, "quota_exceeded", `Manual run limit reached (${MANUAL_RUNS_PER_PROJECT_PER_DAY} per project per UTC day). Scheduled runs continue daily.`);
+    let waitUntil: ((p: Promise<unknown>) => void) | undefined;
+    try {
+      const ec = c.executionCtx;
+      waitUntil = (p) => ec.waitUntil(p);
+    } catch {
+      waitUntil = undefined;
     }
-    const { runId, created } = result;
-    const ref = { id: runId, projectId: project.id, agent };
-    const claimAndStart = async () => {
-      const claim = await claimAndLock(db, ref, now, Boolean(c.env.AGENT_RUN));
-      if (claim === "locked") {
-        // Never started: remove it so it does not consume the manual-run quota.
-        await db.run("DELETE FROM agent_runs WHERE id = ? AND status = 'pending' AND started_at IS NULL", runId);
-        throw conflict("A run for this project and agent is already in progress.");
-      }
-      if (claim === "claimed") {
-        if (deps.start) await deps.start(ref);
-        else {
-          let waitUntil: ((p: Promise<unknown>) => void) | undefined;
-          try {
-            const ec = c.executionCtx;
-            waitUntil = (p) => ec.waitUntil(p);
-          } catch {
-            waitUntil = undefined;
-          }
-          await startRun(c.env, db, ref, now, { deps: deps.orchestrate, waitUntil });
-        }
-      }
-    };
-    if (created) {
-      await claimAndStart();
-    } else {
-      // An existing run for this key (double submit). If it is still pending with no dispatch claim, the
-      // request that created it died before claiming it (or lost the lock race): claim and start it now
-      // instead of returning a run that would never start. claimAndLock is a conditional UPDATE, so a
-      // concurrent request still inside its own claim cannot start it twice.
-      const existing = await db.first<{ status: string; workflow_instance_id: string | null }>(
-        "SELECT status, workflow_instance_id FROM agent_runs WHERE id = ? AND workspace_id = ?",
-        runId,
-        project.workspace_id,
-      );
-      if (existing?.status === "pending" && existing.workflow_instance_id === null) await claimAndStart();
-    }
-    const row = await db.first<RunRow>("SELECT * FROM agent_runs WHERE id = ?", runId);
-    // Removed by a concurrent request that found the project + agent locked.
-    if (!row) throw conflict("A run for this project and agent is already in progress.");
+    const { row, created } = await requestManualRun(c.env, db, project, user.id, parsed.data.agent, now, { deps, waitUntil });
     return c.json({ data: toRunSummary(row) }, created ? 201 : 200);
   });
 

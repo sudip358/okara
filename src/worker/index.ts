@@ -2,6 +2,7 @@
 import type { Env } from "./env";
 import { createApp } from "./app";
 import { dispatchDueRuns, sweepOrphans } from "./runs/scheduler";
+import { processQueuedCompetitorFetches } from "./competitors/dataforseo";
 
 export { AgentRunWorkflow } from "./runs/workflow";
 
@@ -23,6 +24,12 @@ export default {
         }
         await dispatchDueRuns(env, now);
       })(),
+    );
+    // DataForSEO competitor refreshes left queued (or stuck running) by a request's waitUntil.
+    ctx.waitUntil(
+      processQueuedCompetitorFetches(env, now).catch((e) => {
+        console.error("competitor data queue failed", e instanceof Error ? e.message.slice(0, 200) : "unknown");
+      }),
     );
   },
 } satisfies ExportedHandler<Env>;

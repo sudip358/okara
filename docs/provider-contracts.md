@@ -352,8 +352,67 @@ Rules for the adapter:
   table dated 2026-09-25; the live page matched).
 - Not available on Amazon Bedrock; on Google Cloud only the basic tool. This app calls the Claude API directly.
 
+## DataForSEO Labs — competitor data (`dataforseo`, implemented)
+
+Owner request 2026-10-02: "If I add a competitor it should pull data from the DataForSEO API." Contracts read
+on **2026-10-02**. Implemented in `src/worker/providers/dataforseo.ts` (client + parsers),
+`src/worker/competitors/dataforseo.ts` (queue, budget, storage), `src/worker/routes/competitor-data.ts`.
+
+- **Auth** (https://docs.dataforseo.com/v3/auth/): HTTP Basic only. `Authorization: Basic base64(login:password)`
+  with the **API login and API password** from https://app.dataforseo.com/api-access ("The API password is
+  generated automatically by DataForSEO and is different from your account password"). Credentials "cannot
+  be passed as URL parameters". Base URL `https://api.dataforseo.com/` (added to `API_HOST_ALLOWLIST`; every
+  call goes through `createApiFetch`: https, port 443, `redirect: "manual"`). The doc example
+  `login:password` → `bG9naW46cGFzc3dvcmQ=` is a unit test.
+- **Credentials:** workspace `provider_credentials` row with provider `dataforseo` (migration 0014 widens the
+  CHECK), `key_enc` = AES-GCM("login:password") with AAD `provider_credentials:<wid>:dataforseo`, `key_hint` =
+  last 4 characters of the password. Operator fallback: secrets `DATAFORSEO_LOGIN` + `DATAFORSEO_PASSWORD`
+  (both required). Workspace credentials win. The login must not contain `:` (RFC 7617).
+- **Envelope** (every endpoint): `{version, status_code, status_message, time, cost, tasks_count, tasks_error,
+  tasks:[{id, status_code, status_message, time, cost, result_count, path, data, result:[...]}]}`.
+  `status_code` **20000** = ok at both levels; anything else is an error
+  (https://docs.dataforseo.com/v3/appendix/errors/; mapped to plain messages: 40100 not authorized, 40104
+  account not verified, 40200/40210 payment required / insufficient funds, 40202 per-minute rate limit, 40203
+  cost limit, 40204 no access to the API, 40207 IP not whitelisted, 40209 too many simultaneous requests,
+  40501 invalid field). Live endpoints take one task per call; "up to 2000 API calls per minute"; "the maximum
+  number of calls that can be sent simultaneously is limited to 30".
+- **Cost semantics:** the response `cost` (total, USD) and `tasks[i].cost` are what DataForSEO billed. That value
+  is written to `provider_calls.cost_usd` with `cost_is_estimate = 0` (actual) and `rate_version =
+  dataforseo-labs-2026-10-02`; a missing cost (timeout, unreadable body) is stored as NULL, never 0.
+  Published price (https://dataforseo.com/pricing/dataforseo-labs/dataforseo-google-api, read 2026-10-02),
+  Labs Google "All other endpoints", Live: **$0.012 per task + $0.00012 per item** returned; clickstream
+  data doubles the price (never requested). The doc examples still show the earlier $0.01 + $0.0001 (e.g.
+  `cost: 0.0101` for one domain_rank_overview item), which is why the recorded cost always comes from the
+  response. The published price is used only for the reservation ceiling: ranked_keywords (limit 100)
+  $0.024, domain_intersection (limit 100) $0.024, relevant_pages (limit 20) $0.0144 → **at most $0.0624 per
+  refresh of one domain**, shown before "Refresh data".
+
+| Purpose | Endpoint | Cost | Request fields used | Response fields used |
+|---|---|---|---|---|
+| Credential test + balance | `GET /v3/appendix/user_data` ([doc](https://docs.dataforseo.com/v3/appendix/user_data/)) | Free ("Your account will not be charged for using this API") | — | `tasks[0].result[0].money.balance` ("amount of money left in your account", USD) |
+| Location/language codes | `GET /v3/dataforseo_labs/locations_and_languages` ([doc](https://docs.dataforseo.com/v3/dataforseo_labs/locations_and_languages/)) | Free | — | `result[]`: `location_code`, `location_name`, `country_iso_code`, `available_languages[].{language_code, language_name, available_sources}` (only languages with source `google` are offered) |
+| Overview + top keywords | `POST /v3/dataforseo_labs/google/ranked_keywords/live` ([doc](https://docs.dataforseo.com/v3/dataforseo_labs/google/ranked_keywords/live/)) | Paid per task + item | `target` (domain without https:// and www.), `location_code`, `language_code`, `item_types: ["organic"]`, `limit: 100`, `order_by: ["keyword_data.keyword_info.search_volume,desc"]` | `result[0].total_count`; `metrics.organic.{count, etv, estimated_paid_traffic_cost, pos_1 … pos_91_100, is_new, is_up, is_down, is_lost}`; `items[].keyword_data.keyword`, `.keyword_info.search_volume`, `items[].ranked_serp_element.serp_item.{rank_group, url, etv}` |
+| Keyword gap | `POST /v3/dataforseo_labs/google/domain_intersection/live` ([doc](https://docs.dataforseo.com/v3/dataforseo_labs/google/domain_intersection/live/)) | Paid | `target1` (competitor), `target2` (project domain: verified host, else site URL host, without www.), `location_code`, `language_code`, `intersections: false` ("keywords for which the domain specified as target1 has results in SERP, and the domain specified as target2 doesn't"), `item_types: ["organic"]`, `limit: 100` (default order `search_volume,desc`) | `items[].keyword_data.{keyword, keyword_info.search_volume, keyword_info.cpc, keyword_properties.keyword_difficulty}`, `items[].first_domain_serp_element.{rank_group, url, etv}` |
+| Top pages | `POST /v3/dataforseo_labs/google/relevant_pages/live` ([doc](https://docs.dataforseo.com/v3/dataforseo_labs/google/relevant_pages/live/)) | Paid | `target`, `location_code`, `language_code`, `item_types: ["organic"]`, `limit: 20`, `order_by: ["metrics.organic.etv,desc"]` | `items[].page_address`, `items[].metrics.organic.{etv, count, pos_1, pos_2_3}` |
+
+- **Minimal set:** `ranked_keywords` already returns the domain's `metrics.organic` (the same counts, ETV and
+  rank buckets as `google/domain_rank_overview/live`), so the overview costs no extra task; three paid tasks
+  per refresh.
+- **Location:** the project locale's region (`en-US` → `US`) is matched to `country_iso_code` and the project
+  language (exact, then primary subtag) to a Google language of that location. No region, or no listed pair
+  → `setup_required` "choose a location": the owner picks from the free list (validated server-side against
+  it) and the choice is stored in `competitor_data_settings`.
+- **Untrusted data:** keywords and URLs are third-party text; only normalized fields are stored (keyword ≤ 200
+  chars, URL ≤ 500 chars, at most 100/100/20 rows, `data_json` ≤ 200,000 chars), never SERP titles,
+  descriptions or the raw response; the UI renders them as plain text (URLs only as http(s) links with
+  `rel="noopener noreferrer nofollow"`). Response bodies are read with a 6 MB cap (2 MB for free endpoints);
+  25 s timeout per paid call, 10 s for free calls.
+- **Labels:** every number is a "DataForSEO estimate" (ETV = CTR × search volume, modelled), never Search
+  Console data; the panel shows location, fetch date and the cost DataForSEO returned.
+
 ## Disabled / not implemented
 
 All four GEO answer-engine lanes (OpenAI, Anthropic, Gemini, Perplexity) are implemented; an unconfigured
 lane shows `setup_required`, never simulated. SERP data sources, analytics, and publishing connectors are not
-implemented and are shown as unavailable.
+implemented and are shown as unavailable. DataForSEO is used only for competitor-domain estimates (DataForSEO
+Labs, above), not as a SERP source for the agents.

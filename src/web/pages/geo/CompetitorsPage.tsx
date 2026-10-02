@@ -1,6 +1,7 @@
 /**
  * Competitor comparisons. Route: /projects/:projectId/competitors
- * "Cited instead" leaderboard [A1], engine search queries [A6], tracked-brand share of voice.
+ * "Cited instead" leaderboard [A1], engine search queries [A6], tracked-brand share of voice, and DataForSEO
+ * search data per competitor domain (third-party estimates; CompetitorDataPanel.tsx).
  */
 import { Link, useParams } from "react-router";
 import type { DisplacementSummary, GeoResults, SearchQuerySummary } from "@shared/types";
@@ -10,6 +11,7 @@ import { projectPath, useProject } from "@web/lib/project-context";
 import { Badge, Card, EmptyState, ErrorState, LoadingState, PageHeader, TBody, TD, TH, THead, TR, Table, type BadgeTone } from "@web/components/ui";
 import { ExternalUrl } from "@web/components/ExternalUrl";
 import { ShareOfVoiceTable } from "./components/ShareOfVoiceTable";
+import { CompetitorDataSection } from "./CompetitorDataPanel";
 import { sourceTypeLabel } from "./lib";
 
 const GSC_MATCH: Record<SearchQuerySummary["gscMatch"], { label: string; tone: BadgeTone; hint: string }> = {
@@ -31,7 +33,7 @@ export function CompetitorsPage() {
     <div className="min-w-0 space-y-4">
       <PageHeader
         title="Competitors"
-        description="Who AI APIs cite or recommend in your place, from API-sampled answers to your prompts. Okara does not crawl competitor sites."
+        description="Who AI APIs cite or recommend in your place, from API-sampled answers to your prompts, plus DataForSEO search estimates per competitor domain when connected. Okara does not crawl competitor sites."
       />
 
       <Card
@@ -57,6 +59,8 @@ export function CompetitorsPage() {
           </ul>
         )}
       </Card>
+
+      <CompetitorDataSection projectId={projectId} />
 
       <Card
         title="Cited instead"

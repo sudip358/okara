@@ -45,6 +45,10 @@ export const EXPORT_TABLES = [
   "link_runs",
   "link_suggestions",
   "competitor_pages",
+  // DataForSEO competitor data (migration 0014): settings, refresh log, parsed third-party estimates.
+  "competitor_data_settings",
+  "competitor_fetches",
+  "competitor_snapshots",
 ] as const;
 
 /** Column names that must never appear in an export, whichever table they are in. */

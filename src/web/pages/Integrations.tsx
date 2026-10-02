@@ -29,6 +29,7 @@ import { WriterProviderRow } from "./integrations/CustomWriter";
 import { CustomGeoEngines } from "./integrations/CustomGeo";
 import { ProviderModelRow } from "./integrations/ProviderModel";
 import { GEO_ENGINE_PROVIDERS, isModelSelectable } from "./integrations/model-lib";
+import { DataForSeoCard } from "./integrations/DataForSeo";
 
 type ProviderStatus = IntegrationsStatus["providers"][number];
 
@@ -127,6 +128,7 @@ export function IntegrationsPage() {
             }}
           />
           <ProviderKeysCard workspaceId={project.workspaceId} fallback={integrations.data.providers} onChange={integrations.reload} />
+          <DataForSeoCard workspaceId={project.workspaceId} />
         </>
       ) : null}
     </div>

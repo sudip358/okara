@@ -26,6 +26,10 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | POST | /workspaces/:wid/custom-providers/:id/test | platform-auth | member; `GET {base}/models` with the saved key; `{ok, detail, modelListed}` (recorded as last test) |
 | POST | /workspaces/:wid/custom-providers/models | platform-auth | owner; body `{baseUrl, apiKey}` or `{providerId}`; `CustomProviderModelList` |
 | PUT | /workspaces/:wid/writer-source | platform-auth | owner; body `{source: "default" \| "custom:<id>"}`; `CustomProvidersResponse` |
+| GET | /workspaces/:wid/dataforseo | competitor-data | member; `DataForSeoCredentialStatus` (`src/shared/competitor-data.ts`; never the login or password, only the password's last 4). See "Competitor data (DataForSEO)" |
+| PUT | /workspaces/:wid/dataforseo | competitor-data | owner; body `{login, password}` (API login/password, 1–200 printable ASCII, login without `:`); stored AES-GCM encrypted (migration 0014); status |
+| DELETE | /workspaces/:wid/dataforseo | competitor-data | owner; `{ok:true}` |
+| POST | /workspaces/:wid/dataforseo/test | competitor-data | member; body `{login?, password?}` (typed pair, else the saved workspace credentials; never the operator's: 412); free `GET v3/appendix/user_data`; `DataForSeoTestResult` `{ok, detail, balanceUsd}` |
 | GET | /workspaces/:wid/projects | platform-projects | `Project[]` |
 | POST | /workspaces/:wid/projects | platform-projects | body `ProjectInput`; `Project` |
 | GET | /projects/:pid | platform-projects | `Project` |
@@ -89,6 +93,11 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | GET | /projects/:pid/geo/pages/:pageId/skip-factors?promptId=&engine= | geo-analysis | `PageSkipFactors` (measured from the latest crawl; never calls Jev) |
 | POST | /projects/:pid/geo/competitor-pages | geo-analysis | body `CompetitorPageApprovalRequest` `{url}`; 202 `CompetitorPageAssessment` (read within the request: state `assessed`, `blocked` or `failed`; 200 when a recent assessment is reused) [A7] (CSRF; rate-limited; budgeted) |
 | GET | /projects/:pid/geo/competitor-pages | geo-analysis | `CompetitorPageAssessment[]` (newest first) |
+| GET | /projects/:pid/competitors/dataforseo | competitor-data | member; `CompetitorDataPanel` (state, location, caps, published-price ceiling, per competitor domain: latest refresh + overview) |
+| GET | /projects/:pid/competitors/dataforseo/domains/:domain | competitor-data | member; `CompetitorDomainDetail` (top keywords, keyword gap, top pages of the latest refresh); 404 when the domain is not a current competitor |
+| POST | /projects/:pid/competitors/dataforseo/refresh | competitor-data | owner; body `{domain}`; 202 `CompetitorRefreshResult` (queued, run after the response); 200 `{existing:true}` when one is already queued/running; 412 `setup_required` without credentials; 429 `quota_exceeded` over the daily caps (CSRF; rate-limited 10/min; budgeted; paid) |
+| GET | /projects/:pid/competitors/dataforseo/locations | competitor-data | owner; `CompetitorLocationOption[]` from the free Labs `locations_and_languages` (rate-limited) |
+| PUT | /projects/:pid/competitors/dataforseo/settings | competitor-data | owner; body `{location?: {locationCode, languageCode} \| null, autoFetch?: boolean}` (location validated against DataForSEO's list; `null` = back to the project locale); `CompetitorDataPanel` |
 | GET | /projects/:pid/geo/rewrite-plans | geo-analysis | `RewritePlansResponse` (manual plans; no publishing) |
 | GET | /projects/:pid/checklists/:kind | checklists | `Checklist` for kind `seo` or `geo` [A21] |
 | GET | /projects/:pid/pages/:pageId/checklist | checklists | `Checklist` kind `page` (on-page checklist for one URL) [A21] |
@@ -329,6 +338,58 @@ The custom provider routes below also manage custom GEO engines: `POST /workspac
   recommendations like any grounded answer; answers without sources are not (`geo/proposals.ts`).
 - Competitor pages: only stored citations can be approved, and a custom lane stores citations only for
   grounded answers.
+
+## Competitor data (DataForSEO)
+
+Owner request (2026-10-02): adding a competitor pulls data from the DataForSEO API. Provider contract:
+docs/provider-contracts.md "DataForSEO Labs". Types: `src/shared/competitor-data.ts`. Code:
+`src/worker/competitors/dataforseo.ts`, `src/worker/routes/competitor-data.ts`, migration
+`0014_dataforseo_competitors.sql`.
+
+- **What is fetched** per competitor domain (one "refresh" = 3 paid DataForSEO Labs Live tasks):
+  `ranked_keywords` (overview: organic keyword count, estimated organic traffic (ETV), estimated traffic value,
+  rank buckets; plus the top 100 keywords by search volume with position, volume, URL), `domain_intersection`
+  with `intersections:false` (top 100 keywords the competitor ranks for and the project's domain does not),
+  `relevant_pages` (top 20 pages by estimated organic traffic). All are third-party estimates, labelled
+  "DataForSEO estimate · <location> · fetched <date> · cost $x"; never Search Console data.
+- **Trigger on competitor add:** `POST /workspaces/:wid/projects` and `PATCH /projects/:pid` (when `competitors`
+  changes) queue a refresh for every newly added competitor domain (normalized: no scheme, no leading `www.`;
+  at most 5 per save) when DataForSEO credentials exist (workspace, else operator) and the project's auto-pull
+  is on (default on; `PUT .../settings {autoFetch:false}`). Demo projects never fetch. The save itself never
+  fails because of DataForSEO.
+- **Scheduling (Workers-safe):** the request only inserts `competitor_fetches` rows (`queued`); the work runs
+  after the response in `ctx.waitUntil` (at most 2 domains per request = 6 parallel subrequests, each with a 25 s
+  timeout, so it fits the post-response `waitUntil` window). The cron tick (every 15 min) processes up to 4
+  refreshes still queued after 60 s and marks refreshes `running` for over 10 min as failed (their stranded
+  reservations are marked `unknown`, i.e. stay counted, by the existing stale-reservation sweep after 1 h). Without an execution context
+  (tests, dev) the work is awaited in the request. The panel polls while a refresh is queued/running.
+- **Caps:** at most 1 queued/running refresh per (project, domain) (partial unique index); 2 refreshes per
+  domain and 10 per project per UTC day (`setup_required` attempts do not count), enforced in one conditional
+  INSERT; refresh route rate-limited to 10/min per user.
+- **Budget:** before any call, each task reserves `provider_calls` 1 and `usd_micros` = the published-price
+  ceiling (`maxTaskCostUsd`), all three or none (a refused reservation releases the others; the refresh fails
+  with "this project's daily limit" or "the operator's global daily allowance"). On the operator's credentials
+  the `GLOBAL_*` caps apply too (`budgetForKeySource` → `OPERATOR_KEY_SPEND`); on workspace credentials only the
+  project limits. After the call `usd_micros` is settled to the `cost` DataForSEO returned; a call whose cost
+  is unknown (timeout, unreadable body) keeps the full reservation (`unknown`); a blocked request releases it.
+- **provider_calls:** one row per HTTP attempt, `provider = 'dataforseo'`, `model = labs/google/<endpoint>` or
+  `labs/locations_and_languages`, `purpose = competitor_data`, `request_id` = DataForSEO task id, `cost_usd` =
+  response cost (actual, `cost_is_estimate = 0`), NULL when unknown. Credential tests (free) are not recorded.
+- **Storage/retention:** `competitor_snapshots` holds one row per endpoint per refresh with the parsed, bounded
+  `data_json` (no raw responses); the snapshots of the newest 3 completed/partial refreshes per (project,
+  domain) are kept, older ones and those of domains that are no longer competitors are deleted after each
+  refresh; the refresh log keeps the newest 10 rows per domain. All three tables carry `workspace_id` and
+  `project_id`; every query filters by both; they are included in the project export and cascade on project
+  delete.
+- **States:** `setup_required` (no credentials → "Add DataForSEO API credentials…"; locale not mappable →
+  "Choose a location and language…"; migration 0014 pending), `disabled` (demo project), `ready`. A refresh
+  ends `completed`, `partial` (some tasks failed; their errors are shown per table), `failed` or
+  `setup_required`.
+- **Not done on purpose:** no "add to GEO prompts" or "check in Search Console" links on gap keywords (no
+  per-keyword feature exists for either), and the gap is not yet SEO-agent evidence: the `evidence.source` CHECK
+  has no third-party source and no existing candidate kind takes an external keyword list without Search
+  Console support. TODO (needs an owner decision): an `external_estimate` evidence source plus a candidate kind
+  that pairs a gap keyword with a crawled page, labelled as a third-party estimate.
 
 ## Sign-in errors
 
@@ -760,3 +821,71 @@ Builder `src/worker/live/geo-board.ts`. Sources and cursor keys `{o, r, p?}`:
   custom lane answered; the lower-bound note when truncated.
 - **Not shown:** a per-run citation rate. The UI derives it from the lane counts and always shows the
   numerator and denominator. There is no score, projection, or prompts-per-second rate.
+
+## Ask Okara (chat) (amends docs/build-kit.md, 2026-10-02; types in `src/shared/types.ts`, section "Ask Okara")
+
+An in-app agent docked on the right of every project page. It answers questions about one project's stored
+data by calling internal tools and can propose actions that run only after the user confirms. Code:
+`src/worker/chat/*`, `src/worker/routes/chat.ts`, `src/web/components/chat/*`. Schema: migration
+`0013_chat.sql` (`chat_sessions`, `chat_messages`, `chat_actions`).
+
+Auth and tenancy: every route is `requireUser` + `requireProject` (404 for non-members); sessions are private to
+the user who created them (another member gets 404). Tools run with that user's permissions, for that project
+only; every query filters by `workspace_id` + `project_id`. POSTs go through the app-wide CSRF middleware.
+
+| Method | Path | Response |
+|---|---|---|
+| GET | `/projects/:pid/chat/status` | `ChatStatus` (`state` ready / setup_required, configured model, limits) |
+| GET | `/projects/:pid/chat/sessions` | `ChatSessionSummary[]` (history, newest first, at most 50) |
+| POST | `/projects/:pid/chat/sessions` | 201 `ChatSessionSummary` (prunes this user's sessions in the project to the newest 50) |
+| GET | `/projects/:pid/chat/sessions/:sid` | `ChatSessionDetail` (messages with steps, actions) |
+| DELETE | `/projects/:pid/chat/sessions/:sid` | `{deleted: true}`; 409 `chat_busy` while a turn runs |
+| POST | `/projects/:pid/chat/sessions/:sid/messages` body `{content}` (1-4,000 characters) | `ChatTurnResult`; `?stream=1` streams ndjson `ChatStreamEvent` lines (`started`, `step`, `status`, `done` with the same `ChatTurnResult`, or `error`) |
+| POST | `/projects/:pid/chat/sessions/:sid/actions/:aid/confirm` | `ChatTurnResult` (`?stream=1` likewise): executes the pending action once, then the agent continues |
+| POST | `/projects/:pid/chat/sessions/:sid/actions/:aid/cancel` | `ChatTurnResult`: the action is cancelled and the agent is told so |
+
+Errors before a turn starts are JSON: 400 (empty/oversized message), 404, 409 `chat_busy` (a turn is running in
+this chat) or `chat_full` (200 messages; start a new chat), 412 `setup_required` (no usable chat model; nothing
+is stored), 413, 429 `rate_limited` (per user: 20 messages, 30 confirm/cancel, 30 new chats per 10 minutes).
+Failures inside a turn (budget exhausted, provider error, refusal) end the assistant message with
+`status: "error"` and a safe `error` text; the session lease is always released.
+
+**Model.** The workspace writer, when it can call tools: a selected workspace custom writer (OpenAI-compatible
+`POST {base}/chat/completions` with `tools: [{type:"function", function:{name, description, parameters}}]`,
+`tool_calls`, `role: "tool"` results; https://platform.openai.com/docs/api-reference/chat/create), else the
+operator writer (`WRITER_PROVIDER=anthropic`: Messages API client tools through `@anthropic-ai/sdk`,
+`tool_use` / `tool_result` blocks, https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview; or
+`openai_compatible` as above). The model id comes only from `WRITER_MODEL` or the custom writer; there is no
+default. No `tool_choice` (auto) and no `thinking` parameter are sent. Missing configuration or key ->
+`setup_required` with the reason and a link to Integrations. A custom writer's host alone joins that request's
+API allowlist; the response body is capped (2 MiB) and its key scrubbed from stored errors.
+
+**Loop.** At most 8 model rounds and 120 s per turn (then the answer says it stopped); one model round = one
+metered call (`provider_calls` + `writer_tokens` reserved before sending, settled to reported usage, recorded
+with purpose `chat.turn`, cost unknown/NULL; operator global caps apply when the writer runs on the operator
+key). Output cap per round: 6,000 tokens. Earlier turns are replayed as text only (user text + answer text, at
+most 12 messages / 24,000 characters); inside a turn the provider transcript is append-only (assistant content,
+including thinking blocks, replayed verbatim; every tool call answered in call order in one results message).
+
+**Tools** (arguments validated with zod; result JSON capped at 12,000 characters, untrusted strings at 300):
+read - `get_overview`, `search_console_queries` (top/declining/rising queries or pages, current vs previous
+window, contains filter, limit <= 50), `list_pages`, `page_details`, `list_recommendations`,
+`get_recommendation`, `geo_results`, `list_competitors`, `list_runs`, `run_activity`, `checklist_status`,
+`internal_link_suggestions`, `draft_check` (deterministic checks only; no Jev from chat; text <= 20,000
+characters); action (confirmation required) - `run_agent_now` (same quota/lock rules as `POST
+/projects/:pid/runs`), `update_recommendation_status` (approved | dismissed; same transitions as PATCH),
+`approve_competitor_page` (only a URL stored as a citation for this project; same rules as `POST
+/projects/:pid/geo/competitor-pages`); output - `navigate` (an in-app route under `/projects/:pid/`; ids are
+checked against the project) and `export_csv` (up to 500 rows returned to the UI as a step `download`; the
+model receives only the count and columns; the CSV is built client-side with formula cells neutralised). No tool
+fetches a URL the model chooses.
+
+**Confirmation gate (server-enforced).** The loop never executes an action: it validates it (`prepare`), stores
+a `chat_actions` row `pending`, marks the step `awaiting_confirmation`, saves the paused transcript on the
+session and stops. Only `.../confirm` runs it, exactly once (`pending -> executing` is a conditional UPDATE;
+repeats return the current state), then the agent continues with the result. `.../cancel` and a new message
+(`expired`) close it without running. Text in tool results (pages, AI answers, evidence) is evidence, never
+instructions, and cannot confirm anything.
+
+**Rendering.** Answers render as markdown-lite (paragraphs, lists, bold, inline code, links) parsed into React
+text nodes, never HTML; links only to `/projects/<this project>/...` routes or http(s) URLs.
