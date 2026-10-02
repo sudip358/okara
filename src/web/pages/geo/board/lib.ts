@@ -30,7 +30,8 @@ export type BadgeTone = "neutral" | "success" | "warning" | "danger" | "info" | 
 export const LABELS = {
   apiSampled: "API-sampled",
   apiSampledTip: "Answers from the provider's API with web search; consumer apps may answer differently.",
-  customApiSampledTip: "Answers from the custom provider's API, without web search; consumer apps may answer differently.",
+  customApiSampledTip:
+    "Answers from the custom provider's API; no tool is requested, and web sources count only when the provider returns them. Consumer apps may answer differently.",
   measured: "Measured from crawl",
   heuristic: "Heuristic",
   jev: "Jev judgment",
@@ -53,20 +54,43 @@ const ENGINE_META: Record<GeoEngineProviderId, { name: string; vendor: string; g
   perplexity: { name: "Perplexity", vendor: "Perplexity", glyph: "P" },
 };
 
-/** Workspace custom GEO engine lanes ("custom_geo:<id>"): ungrounded, mention rate only. */
-export const CUSTOM_ENGINE_NOTE = "Custom · no web search proof · mention rate only";
+/**
+ * Workspace custom GEO engine lanes ("custom_geo:<id>"): an answer counts toward citation rate only when the
+ * provider returned web sources (grounded); answers without sources count toward mention rate only.
+ */
+export const CUSTOM_ENGINE_NOTE = "Custom · citations count only when the provider returns sources";
+/** A custom answer / cohort without provider-reported sources. */
+export const CUSTOM_NO_SOURCES_NOTE = "no sources returned · mention rate only";
+/** A custom answer / cohort with provider-reported sources. */
+export const CUSTOM_SOURCES_NOTE = "provider-reported sources";
 export function isCustomEngine(provider: string): boolean {
   return provider.startsWith("custom_geo:");
 }
 const CUSTOM_META = { name: "Custom engine", vendor: "the custom provider", glyph: "C" };
 
-/** Body note for a custom lane: only the prompt feed is shown (no citation-based sections). */
+/** Body note for a custom lane without sourced answers: only the prompt feed is shown (no citation-based sections). */
 export const CUSTOM_LANE_BODY_NOTE =
-  "Custom engine: no web search is requested, so cited pages, skip factors and rewrite plans are not available for this lane (mention rate only).";
-/** Replaces the citation gauge on a custom lane. */
-export const CUSTOM_CITATION_NOT_MEASURED = "Citation rate: not measured (no web search proof)";
+  "Custom engine: no sources returned in this cohort, so cited pages, skip factors and rewrite plans are not available for this lane (mention rate only).";
+/** Replaces the citation gauge on a custom lane whose cohort has no grounded (sourced) answer. */
+export const CUSTOM_CITATION_NOT_MEASURED = "Citation rate: not measured (no sources returned)";
 
-/** "API-sampled" tooltip for a lane: custom engines get their own (no web search). */
+/**
+ * A custom lane is measured like any grounded lane when its latest cohort has at least one grounded answer
+ * (provider-reported sources): citation rate's denominator counts exactly those answers.
+ */
+export function customLaneHasSources(lane: Pick<EngineLaneSummary, "provider" | "citationRate">): boolean {
+  return isCustomEngine(lane.provider) && lane.citationRate.denominator > 0;
+}
+
+/** Cohort line of a custom lane: "provider-reported sources in X of Y valid answers" or the no-sources note. */
+export function customSourcesLine(lane: Pick<EngineLaneSummary, "counts">): string {
+  const { grounded, valid } = lane.counts;
+  if (grounded <= 0) return CUSTOM_NO_SOURCES_NOTE;
+  const rest = valid - grounded;
+  return `${CUSTOM_SOURCES_NOTE} in ${formatNumber(grounded)} of ${formatNumber(valid)} valid answers${rest > 0 ? ` · ${formatNumber(rest)} with ${CUSTOM_NO_SOURCES_NOTE}` : ""}`;
+}
+
+/** "API-sampled" tooltip for a lane: custom engines get their own (sources only when the provider returns them). */
 export function apiSampledTipFor(provider: string | null | undefined): string {
   return provider && isCustomEngine(provider) ? LABELS.customApiSampledTip : LABELS.apiSampledTip;
 }

@@ -1,9 +1,10 @@
 /**
  * "Custom GEO engines" in the AI engines section of the Integrations page: add an OpenAI-compatible provider
  * (base URL + API key + Fetch models + model picker, the same form as the custom writer) as an extra GEO
- * lane. The prompt is sent without tools, so nothing proves a web search: these lanes are labelled
- * "Custom · no web search proof · mention rate only" everywhere, are stored ungrounded and never count
- * toward citation rate. Keys are write-only. Untrusted names and model ids render as plain text. Base URL
+ * lane. The prompt is sent without tools; an answer counts toward citation rate only when the provider's
+ * response returns web sources (e.g. an OpenRouter model with web search, a Perplexity-compatible API),
+ * otherwise mention rate only. Lanes are labelled "Custom · citations count only when the provider returns
+ * sources" everywhere. Keys are write-only. Untrusted names and model ids render as plain text. Base URL
  * changes (tunnels) work as for the custom writer: "Quick update URL" or "Edit URL or key", with the required
  * "Send my saved key to <new host>" confirmation, then an automatic Test (CustomWriter.tsx).
  * OWNED BY: web-shell.
@@ -49,8 +50,10 @@ export function CustomGeoEngines({ workspaceId, onChange }: { workspaceId: strin
           URL and API key, fetch its models, pick one, and save. At most {max} per workspace.
         </p>
         <p>
-          <span className="font-medium">{CUSTOM_GEO_NOTE}.</span> The prompt is sent to /chat/completions with no tools, so nothing proves a web search: answers
-          are stored as ungrounded and count toward mention rate only, never citation rate. Costs are recorded as unknown.
+          <span className="font-medium">{CUSTOM_GEO_NOTE}.</span> The prompt is sent to /chat/completions with no tools. To get a citation rate, pick a model or
+          provider that searches the web and returns its sources (for example an OpenRouter model with web search, such as a &quot;:online&quot; model, or a
+          Perplexity-compatible API): answers that return sources count toward citation rate (provider-reported sources). Answers without sources count toward
+          mention rate only. Costs are recorded as unknown.
         </p>
         {data?.geoDataSent && (
           <p>

@@ -21,7 +21,9 @@
  *     host = parsed hostname, or for Gemini redirect-wrapped URIs the domain given in the title
  *     ('' when it cannot be resolved).
  *   - Custom GEO engines (custom_geo:<id>, geo/custom-lanes.ts) are lanes like the others, but reserve no
- *     usd_micros (tenant key, unknown price) and always store grounded = 0 (mention rate only).
+ *     usd_micros (tenant key, unknown price). An answer is grounded = 1 with citations only when the
+ *     provider returned web sources (providers/custom-geo.ts), else grounded = 0 (mention rate only). The
+ *     cohort key uses the lane's fixed grounding mode, so answers with and without sources stay in one series.
  *   - Calls run sequentially per provider, at most two provider lanes concurrently, no retries and no
  *     repeat sampling (one sample per prompt x provider).
  *   - Idempotent per run: a Workflow retry of this step skips prompt x provider pairs already observed
@@ -332,7 +334,10 @@ async function persistObservation(
   const model = isCustomGeoId(provider.id) ? provider.model : answer.model || provider.model;
   const groundingMode = answer.groundingMode || provider.groundingMode;
   const samplingOptions = (provider as { samplingOptions?: Record<string, unknown> }).samplingOptions ?? null;
-  const cohort = await cohortKey({ promptSetVersion, provider: provider.id, model, groundingMode, samplingOptions });
+  // A custom lane records each answer's own mode (sources returned or not), but its cohort uses the lane's
+  // fixed mode: per-answer modes would split one run of one model into two series.
+  const cohortMode = isCustomGeoId(provider.id) ? provider.groundingMode : groundingMode;
+  const cohort = await cohortKey({ promptSetVersion, provider: provider.id, model, groundingMode: cohortMode, samplingOptions });
   const failed = answer.status === "failed";
   const text = failed ? null : answer.text;
   const exposedFlag = (answer as { searchQueriesExposed?: unknown }).searchQueriesExposed;

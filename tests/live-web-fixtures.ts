@@ -254,8 +254,8 @@ export function geoFeed(over: Partial<LiveGeoBoardResponse> = {}): LiveGeoBoardR
     recommendations: [],
     totals: {
       lanes: [
-        { provider: "gemini", cited: 23, named: 10, missing: 65, failed: 1, pending: 0, cost: { value: 0.162, isEstimate: true }, citedInstead: { host: "reviews.example", sourceType: "review_site", answers: 31 } },
-        { provider: "openai_geo", cited: 1, named: 1, missing: 0, failed: 0, pending: 0, cost: { value: null, isEstimate: false }, citedInstead: null },
+        { provider: "gemini", cited: 23, named: 10, missing: 65, grounded: 98, failed: 1, pending: 0, cost: { value: 0.162, isEstimate: true }, citedInstead: { host: "reviews.example", sourceType: "review_site", answers: 31 } },
+        { provider: "openai_geo", cited: 1, named: 1, missing: 0, grounded: 2, failed: 0, pending: 0, cost: { value: null, isEstimate: false }, citedInstead: null },
       ],
       pipeline: { candidates: 0, judged: 0, rejectedByReason: {}, created: 0, byStage: { collected: 0, judged: 0, drafted: 0, awaiting_approval: 0, marked_implemented: 0 }, byStatus: { open: 0, approved: 0, dismissed: 0, implemented: 0 } },
       truncated: false,

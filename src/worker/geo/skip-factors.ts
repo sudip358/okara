@@ -24,7 +24,7 @@
  *                  partial 1..2, missing 0 (not linked from any crawled page).
  * A signal the crawler did not store is `unknown` with measured "not collected".
  */
-import type { FactorStatus, GeoEngineProviderId, PageSkipFactors, SkipFactor, SkipFactorKey } from "@shared/types";
+import type { BoardLaneProviderId, FactorStatus, GeoEngineProviderId, PageSkipFactors, SkipFactor, SkipFactorKey } from "@shared/types";
 import type { Db } from "../lib/db";
 import { parseJson } from "../lib/db";
 import { badRequest, notFound } from "../lib/errors";
@@ -444,7 +444,7 @@ export async function citedInsteadForPrompt(
 
 export interface SkipFactorsQuery {
   promptId: string | null;
-  engine: GeoEngineProviderId | null;
+  engine: BoardLaneProviderId | null;
 }
 
 /** Hook for the cited-page column: the latest assessed competitor assessment for a host (see competitor-pages.ts). */

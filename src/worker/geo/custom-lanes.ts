@@ -3,21 +3,38 @@
  * (workspace_custom_providers, migrations 0010 + 0011). Its provider id in geo_observations,
  * provider_calls and run events is "custom_geo:<row id>".
  *
- * Measurement rules (docs/build-kit.md amendment "Custom GEO engine lanes"):
- *   - the approved prompt goes to {base}/chat/completions with no tools: nothing proves a web search, so
- *     every observation is stored grounded = 0, grounding_mode "none (custom provider)", no citations, no
- *     search queries, cost NULL (unknown, never guessed);
- *   - metrics.ts citationRate counts grounded responses only, so these lanes contribute to mention rate (and
- *     tracked-brand share of voice) only; their citation rate is unavailable (denominator 0);
- *   - every surface labels them "Custom · no web search proof · mention rate only".
+ * Measurement rules (docs/build-kit.md amendments "Custom GEO engine lanes" 2026-10-01 and 2026-10-02):
+ *   - the approved prompt goes to {base}/chat/completions with no tools or plugins requested (the owner picks
+ *     a model/provider that searches by itself, e.g. an OpenRouter ":online" model);
+ *   - an answer whose response carries provider-reported web sources in a documented OpenAI-compatible shape
+ *     (providers/custom-geo.ts parseCustomGeoResponse) is stored grounded = 1, grounding_mode
+ *     CUSTOM_GEO_SOURCES_MODE, with those sources as citations; it counts toward citation rate exactly like
+ *     any other grounded answer;
+ *   - an answer without sources is stored grounded = 0, grounding_mode CUSTOM_GEO_GROUNDING_MODE, no
+ *     citations: mention rate (and tracked-brand share of voice) only, as before;
+ *   - search queries are never exposed (null) and cost is NULL (unknown, never guessed);
+ *   - the lane's cohort uses CUSTOM_GEO_LANE_GROUNDING_MODE (fixed per lane), so answers with and without
+ *     sources of one model stay in ONE series; metrics.ts counts only the grounded ones in citation rate;
+ *   - surfaces label the lane CUSTOM_GEO_NOTE and each answer/cohort with CUSTOM_GEO_SOURCES_NOTE or
+ *     CUSTOM_GEO_NO_SOURCES_NOTE.
  */
 import type { CustomGeoProviderId } from "@shared/types";
 import type { Db } from "../lib/db";
 import { listCustomGeoEngines } from "../platform/custom-providers";
 
 export const CUSTOM_GEO_PREFIX = "custom_geo:";
+/** Per-answer grounding mode of an answer WITHOUT provider-reported sources (grounded = 0). */
 export const CUSTOM_GEO_GROUNDING_MODE = "none (custom provider)";
-export const CUSTOM_GEO_NOTE = "Custom · no web search proof · mention rate only";
+/** Per-answer grounding mode of an answer WITH provider-reported sources (grounded = 1). */
+export const CUSTOM_GEO_SOURCES_MODE = "custom (provider-reported sources)";
+/** Lane-level grounding mode (adapter + cohort key): fixed, so one lane's series never splits per answer. */
+export const CUSTOM_GEO_LANE_GROUNDING_MODE = "custom (sources only when the provider returns them)";
+/** Lane / engine note. */
+export const CUSTOM_GEO_NOTE = "Custom · citations count only when the provider returns sources";
+/** Answer (or cohort) without provider-reported sources. */
+export const CUSTOM_GEO_NO_SOURCES_NOTE = "no sources returned · mention rate only";
+/** Answer (or cohort) with provider-reported sources. */
+export const CUSTOM_GEO_SOURCES_NOTE = "provider-reported sources";
 
 export const customGeoProviderId = (rowId: string): CustomGeoProviderId => `custom_geo:${rowId}`;
 
@@ -25,7 +42,7 @@ export function isCustomGeoId(provider: string | null | undefined): provider is 
   return typeof provider === "string" && provider.startsWith(CUSTOM_GEO_PREFIX) && provider.length > CUSTOM_GEO_PREFIX.length;
 }
 
-/** "<name> (<host>) · Custom · no web search proof · mention rate only". Name and host are plain text. */
+/** "<name> (<host>) · Custom · citations count only when the provider returns sources". Name and host are plain text. */
 export function customGeoLaneLabel(name: string, host: string): string {
   return name === host ? `${host} · ${CUSTOM_GEO_NOTE}` : `${name} (${host}) · ${CUSTOM_GEO_NOTE}`;
 }

@@ -195,7 +195,7 @@ export interface ProviderModelList {
 export type WriterSource = "default" | `custom:${string}`;
 
 /** A workspace custom provider as the API returns it. The API key is never included (only its last 4 characters). */
-/** writer: a custom writer (0010); geo: a custom GEO engine lane (0011; ungrounded, mention rate only). */
+/** writer: a custom writer (0010); geo: a custom GEO engine lane (0011; citation rate only for answers with provider-reported sources, else mention rate only). */
 export type CustomProviderRole = "writer" | "geo";
 
 export interface CustomProviderStatus {
@@ -881,7 +881,9 @@ export type GeoEngineApiProviderId = "openai_geo" | "anthropic_geo";
 export type GeoEngineProviderId = "gemini" | "perplexity" | GeoEngineApiProviderId;
 /**
  * A workspace custom OpenAI-compatible GEO engine lane: "custom_geo:<workspace_custom_providers.id>".
- * No web search: answers are stored ungrounded and count toward mention rate only, never citation rate.
+ * No tool is requested. An answer whose response returns web sources (OpenAI-compatible url_citation annotations,
+ * or Perplexity-style citations / search_results) is stored grounded with those sources as citations and counts
+ * toward citation rate; an answer without sources is ungrounded and counts toward mention rate only.
  */
 export type CustomGeoProviderId = `custom_geo:${string}`;
 /** Any lane of the AI engine board: a built-in engine or a custom GEO engine. */
@@ -920,7 +922,10 @@ export interface EngineFeedItem {
 
 /** One engine column of the board. Every rate carries its numerator and denominator. */
 export interface EngineLaneSummary {
-  /** Built-in engine, or "custom_geo:<id>" for a custom GEO engine (ungrounded; citation rate unavailable). */
+  /**
+   * Built-in engine, or "custom_geo:<id>" for a custom GEO engine (grounded only for answers with
+   * provider-reported sources; citationRate.denominator 0 = citation rate not measured for this lane).
+   */
   provider: BoardLaneProviderId;
   label: string; // e.g. "OpenAI Responses API · web_search (API-sampled)"
   model: string | null; // exact model id from configuration / the response; never a default
@@ -983,7 +988,8 @@ export interface PageSkipFactors {
   page: { pageId: string; url: string; snapshotAt: string | null; wordCount: number | null };
   promptId: string | null;
   promptText: string | null;
-  engine: GeoEngineProviderId | null;
+  /** Built-in engine or a custom GEO engine lane ("custom_geo:<id>", only when it has grounded answers). */
+  engine: BoardLaneProviderId | null;
   /** Host cited in place of us for this prompt/engine (latest cohort), null when none or not asked. */
   citedInsteadHost: string | null;
   /** Approved competitor assessment used for the citedPage column, when one exists. */
@@ -1066,7 +1072,8 @@ export interface RewritePlan {
   url: string;
   question: string; // the prompt text this page should answer
   promptId: string | null;
-  engine: GeoEngineProviderId | null;
+  /** Built-in engine or a custom GEO engine lane ("custom_geo:<id>", only when it has grounded answers). */
+  engine: BoardLaneProviderId | null;
   competitorAssessmentId: string | null;
   items: RewritePlanItem[];
   /** Measured GSC for the page (never projected); null when GSC is not connected. */
@@ -1430,6 +1437,11 @@ export interface LiveGeoLaneTotals {
   cited: number;
   named: number;
   missing: number;
+  /**
+   * Of cited + named + missing: answers that were grounded (web sources returned). Citation rate over a custom
+   * GEO engine lane uses this denominator; a custom lane with 0 shows its mention rate instead.
+   */
+  grounded: number;
   failed: number;
   /** Stored 'ok' answers not analysed yet. */
   pending: number;

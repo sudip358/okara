@@ -19,7 +19,7 @@ export function isModelSelectable(provider: string): provider is ModelSelectable
 }
 
 /** Same label the server uses for every custom GEO engine surface. */
-export const CUSTOM_GEO_NOTE = "Custom · no web search proof · mention rate only";
+export const CUSTOM_GEO_NOTE = "Custom · citations count only when the provider returns sources";
 
 export const COHORT_NOTE =
   "Changing the model starts a new trend series: results are only compared with answers from the same model (cohort), never mixed.";

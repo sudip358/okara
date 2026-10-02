@@ -2,8 +2,9 @@
  * One engine lane of the board (design §1-§6): header, then A prompt feed, B our pages, C cited pages,
  * D rewrite plans. Desktop/tablet stack the sections; on mobile the lane is a collapsible <details> and
  * B-D are tabs. Setup / disabled / error / no-answer lanes keep the header and show an honest state only.
- * A custom GEO engine lane (no web search) shows only A plus a note: B-D come from the citation pipeline and
- * the per-engine skip-factor API, which never have data for an ungrounded lane.
+ * A custom GEO engine lane with no grounded answer in its cohort (no provider-reported sources) shows only A
+ * plus a note: B-D come from the citation pipeline and the per-engine skip-factor API, which never have data
+ * for an ungrounded lane. A custom lane with grounded answers shows A-D like any engine.
  */
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router";
@@ -16,7 +17,7 @@ import { PromptFeed } from "./PromptFeed";
 import { SkipFactorsBody, skipSectionTitle, type SkipInputs } from "./SkipFactorsPanel";
 import { CompetitorBody } from "./CompetitorPanel";
 import { RewritePlansBody } from "./RewritePlansPanel";
-import { CUSTOM_LANE_BODY_NOTE, assessmentsForEngine, engineName, engineVendor, isCustomEngine, laneBodyMode, plansForEngine } from "./lib";
+import { CUSTOM_LANE_BODY_NOTE, assessmentsForEngine, customLaneHasSources, engineName, engineVendor, isCustomEngine, laneBodyMode, plansForEngine } from "./lib";
 
 export interface ListState<T> {
   data: T | null;
@@ -135,7 +136,8 @@ export function EngineColumn(props: EngineColumnProps) {
 
   const body = !ready ? (
     <LaneStateBody projectId={projectId} lane={lane} />
-  ) : isCustomEngine(lane.provider) ? (
+  ) : isCustomEngine(lane.provider) && !customLaneHasSources(lane) ? (
+    // A custom lane with grounded (sourced) answers gets the full body like any engine.
     customBody
   ) : compact ? (
     <div className="min-w-0 space-y-3">

@@ -27,10 +27,10 @@ import type {
 } from "@shared/types";
 import { projectPath } from "@web/lib/project-context";
 import { cx } from "@web/components/ui";
-import { CUSTOM_ENGINE_NOTE, PLAN_ITEM_STATUS, VERDICT, costDisplay, engineName, isCustomEngine, planItemLabel, planProgress, type ApprovalCandidate } from "@web/pages/geo/board/lib";
+import { CUSTOM_ENGINE_NOTE, CUSTOM_NO_SOURCES_NOTE, CUSTOM_SOURCES_NOTE, PLAN_ITEM_STATUS, VERDICT, costDisplay, engineName, isCustomEngine, planItemLabel, planProgress, type ApprovalCandidate } from "@web/pages/geo/board/lib";
 import { ApproveCandidate, CheckRadar, CheckTable } from "@web/pages/geo/board/CompetitorPanel";
 import { SENTIMENT_LABEL, sourceTypeLabel } from "@web/pages/geo/lib";
-import { laneRatio } from "../engine";
+import { customLaneMeasured, laneRatio } from "../engine";
 import { AnimatedNumber, Crossfade, PulseDot, Shimmer, staggerStyle } from "../motion";
 import { EngineBadge, LaneGauge, ToneChip, type ToneName } from "../parts";
 import { LIVE_TEXT, clipText, fmtInt, shortDate, urlHost, urlPath, windowShort } from "../text";
@@ -329,13 +329,16 @@ function Stat({ label, short, value, sub, tone, className }: { label: string; sh
 
 export function LaneColumn(p: LaneColumnProps) {
   const custom = isCustomEngine(p.provider);
+  // A custom lane is measured like any engine once this run has answers with provider-reported sources.
+  const measured = customLaneMeasured(p.totals, custom);
+  const mentionOnly = custom && !measured;
   const name = engineName(p.provider);
   const label = p.board?.label ?? p.lane.label;
   // The real lane label, split for the header: "Gemini API" on top, "Google Search grounding (API-sampled)" below.
   const [head, ...tail] = label.split(" · ");
   // This run's model (stored with its answers); the board's latest configuration only when the run has none.
   const model = p.runModel ? (p.runModel.model ?? "model not recorded") : p.board?.model ? `${p.board.model} (latest configuration)` : "model not reported";
-  const grounding = p.runModel ? (p.runModel.groundingMode ?? (custom ? "no web search" : "grounding not recorded")) : (p.board?.groundingMode ?? (custom ? "no web search" : "grounding not reported"));
+  const grounding = p.runModel ? (p.runModel.groundingMode ?? "grounding not recorded") : (p.board?.groundingMode ?? "grounding not reported");
   const notReplayed = p.replaying ? "Current state, not replayed" : null;
   const cost = costDisplay(p.totals.cost);
   const ratio = laneRatio(p.totals, custom);
@@ -362,11 +365,18 @@ export function LaneColumn(p: LaneColumnProps) {
               <span> · {grounding} · </span>
               <span className={p.laneState === "asking" ? "font-semibold text-emerald-700 dark:text-emerald-400" : undefined}>{LANE_STATE[p.laneState]}</span>
             </p>
-            {custom && <p className="text-[11px] font-medium text-amber-800 dark:text-amber-300">{CUSTOM_ENGINE_NOTE}</p>}
+            {custom && (
+              <p className="text-[11px] font-medium text-amber-800 dark:text-amber-300">
+                {CUSTOM_ENGINE_NOTE} ·{" "}
+                {measured
+                  ? `${CUSTOM_SOURCES_NOTE} in ${fmtInt(p.totals.grounded)} of ${fmtInt(p.totals.cited + p.totals.named + p.totals.missing)} answers`
+                  : CUSTOM_NO_SOURCES_NOTE}
+              </p>
+            )}
             {p.board?.stateDetail && <p className="text-[11px] text-amber-800 dark:text-amber-300">{clipText(p.board.stateDetail, 120)}</p>}
           </div>
         </div>
-        <LaneGauge ratio={ratio} caption={custom ? "Mention rate (no web search)" : "Citation rate, this run"} reduced={p.reduced} />
+        <LaneGauge ratio={ratio} caption={mentionOnly ? "Mention rate (no sources returned)" : custom ? "Citation rate, this run (answers with sources)" : "Citation rate, this run"} reduced={p.reduced} />
       </header>
       <dl className="grid grid-cols-3 gap-x-3 gap-y-2 @xl:grid-cols-7 @xl:gap-x-2">
         <Stat
@@ -402,9 +412,9 @@ export function LaneColumn(p: LaneColumnProps) {
         <Strip cards={p.strip} queued={p.queued} pending={p.pending} fresh={p.fresh} reduced={p.reduced} onOpen={p.onOpen} laneName={name} runActive={p.runActive} />
       </div>
 
-      {custom ? (
+      {mentionOnly ? (
         <p className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
-          No web search is requested for this engine, so our pages, cited pages and rewrite plans are not shown for it (mention rate only).
+          This custom engine returned no sources in this run, so our pages, cited pages and rewrite plans are not shown for it (mention rate only).
         </p>
       ) : (
         <>

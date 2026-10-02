@@ -38,7 +38,7 @@ import { selfDomains } from "../geo/detect";
 import { BOARD_LANES, LANE_LABELS } from "../geo/board";
 import { DEFAULT_PROMPTS_PER_RUN } from "../geo/batch";
 import { isGeoEngineId } from "../geo/engines";
-import { CUSTOM_GEO_NOTE, customGeoLabelFor, customGeoLabels, isCustomGeoId } from "../geo/custom-lanes";
+import { CUSTOM_GEO_NO_SOURCES_NOTE, CUSTOM_GEO_SOURCES_NOTE, customGeoLabelFor, customGeoLabels, isCustomGeoId } from "../geo/custom-lanes";
 
 export const ACTIVITY_DEFAULT_LIMIT = 80;
 export const ACTIVITY_MAX_LIMIT = 200;
@@ -370,8 +370,8 @@ function obsItem(r: ObsRow, cites: CitationInfo | undefined, latencyMs: number |
       detail = "Answer stored · awaiting analysis";
       status = "info";
   }
-  // A custom GEO engine requests no web search: say so on every answer it gave.
-  if (custom) detail = `${detail} · ${CUSTOM_GEO_NOTE}`;
+  // A custom GEO engine: say on every answer whether the provider returned web sources (citation rate) or not.
+  if (custom) detail = `${detail} · ${r.grounded === 1 ? CUSTOM_GEO_SOURCES_NOTE : CUSTOM_GEO_NO_SOURCES_NOTE}`;
   return {
     id: `obs:${r.id}`,
     at: r.created_at,

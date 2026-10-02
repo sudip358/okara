@@ -6,10 +6,19 @@
  *   body { model, messages: [ {role:"system", content:<neutral locale instruction>}?, {role:"user", content:<prompt>} ],
  *          max_completion_tokens }
  *   response { id?, model?, choices[0].message.content, choices[0].finish_reason, usage.{prompt_tokens, completion_tokens} }
- * No tools and no web search are requested, and nothing in an OpenAI-compatible response proves a search
- * happened, so every answer is grounded = false with groundingMode "none (custom provider)", no citations
- * and no search queries (searchQueriesExposed false). Cost is unknown (null): no rate exists for an
- * arbitrary provider and none is invented. The request never mentions the brand.
+ * No tool or plugin is ever requested: the owner picks a model/provider that searches by itself (e.g. an
+ * OpenRouter ":online" model). Grounding (amendment 2026-10-02): an answer is grounded = true, groundingMode
+ * CUSTOM_GEO_SOURCES_MODE, only when the response returns at least one valid web source in a documented
+ * OpenAI-compatible shape (parseCustomGeoSources; docs/provider-contracts.md "Custom GEO engine"):
+ *   (a) choices[0].message.annotations[] {type:"url_citation", url_citation:{url, title, start_index, end_index}}
+ *       (OpenAI Chat Completions search models; OpenRouter web search),
+ *   (b) top-level `citations: string[]` and `search_results: [{title, url, date, ...}]` (Perplexity Sonar
+ *       CompletionResponse shape, also served by Perplexity-compatible APIs).
+ * Otherwise grounded = false, groundingMode CUSTOM_GEO_GROUNDING_MODE ("none (custom provider)"), no
+ * citations. Search queries are never exposed (null). Cost is unknown (null): no rate exists for an
+ * arbitrary provider and none is invented. The request never mentions the brand. Sources are untrusted
+ * evidence: URLs are validated (http/https, no credentials, <= 2048 chars, no control characters), titles are
+ * plain text (<= 300 chars), deduplicated by URL (first position kept), capped at 50.
  *
  * The host is chosen by the workspace owner, not the operator: `fetchImpl` must be the guarded API fetch with
  * only that host admitted (redirects are never followed), the body read is capped, provider error bodies are
@@ -22,11 +31,18 @@ import { readCapped } from "../lib/read-capped";
 import { cleanModelId } from "../platform/custom-providers";
 import type { GeoAnswerWithOutcome, GeoCallOutcome, GeoProviderAdapter } from "./rates";
 import { GEO_CALL_TIMEOUT_MS, neutralInstruction, scrub } from "./rates";
-import { CUSTOM_GEO_GROUNDING_MODE } from "../geo/custom-lanes";
+import type { GeoCitation } from "./types";
+import { CUSTOM_GEO_GROUNDING_MODE, CUSTOM_GEO_LANE_GROUNDING_MODE, CUSTOM_GEO_SOURCES_MODE } from "../geo/custom-lanes";
+
+export { CUSTOM_GEO_GROUNDING_MODE, CUSTOM_GEO_SOURCES_MODE };
 
 export const CUSTOM_GEO_MAX_COMPLETION_TOKENS = 4096;
 /** Response body cap per answer (output is already bounded by max_completion_tokens). */
 export const CUSTOM_GEO_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+/** Provider-reported sources kept per answer. */
+export const CUSTOM_GEO_MAX_SOURCES = 50;
+export const CUSTOM_GEO_MAX_SOURCE_URL = 2048;
+export const CUSTOM_GEO_MAX_SOURCE_TITLE = 300;
 
 export interface CustomGeoProviderConfig {
   /** "custom_geo:<row id>" */
@@ -43,8 +59,12 @@ export interface CustomGeoProviderConfig {
 interface ChatBody {
   id?: unknown;
   model?: unknown;
-  choices?: Array<{ message?: { content?: unknown; refusal?: unknown } | null; finish_reason?: unknown }>;
+  choices?: Array<{ message?: { content?: unknown; refusal?: unknown; annotations?: unknown } | null; finish_reason?: unknown }>;
   usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
+  /** Perplexity Sonar CompletionResponse: URLs of sources used to generate the response. */
+  citations?: unknown;
+  /** Perplexity Sonar CompletionResponse: search results used for context ({title, url, date, ...}). */
+  search_results?: unknown;
 }
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
@@ -53,6 +73,8 @@ const str = (v: unknown): string | null => (typeof v === "string" && v.length > 
 export interface ParsedCustomGeo {
   status: "ok" | "incomplete" | "failed";
   text: string | null;
+  /** Valid provider-reported web sources (empty when none); grounded iff non-empty. */
+  citations: GeoCitation[];
   model: string | null;
   requestId: string | null;
   finishReason: string | null;
@@ -60,7 +82,80 @@ export interface ParsedCustomGeo {
   error: string | null;
 }
 
-/** Pure parse of a Chat Completions body. Text is untrusted evidence (stored as plain text only). */
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001F\u007F-\u009F]/;
+// eslint-disable-next-line no-control-regex
+const CONTROL_G = /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g;
+
+/** A provider-reported source URL, or null: http/https only, no credentials, <= 2048 chars, no control chars. */
+export function cleanSourceUrl(v: unknown): { url: string; key: string } | null {
+  if (typeof v !== "string") return null;
+  const raw = v.trim();
+  if (!raw || raw.length > CUSTOM_GEO_MAX_SOURCE_URL || CONTROL.test(raw)) return null;
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+  if (u.username || u.password || !u.hostname) return null;
+  if (u.href.length > CUSTOM_GEO_MAX_SOURCE_URL) return null;
+  return { url: raw, key: u.href };
+}
+
+/** Plain-text title (control and bidi/zero-width characters removed, whitespace collapsed, <= 300 chars), or null. */
+export function cleanSourceTitle(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.replace(CONTROL_G, " ").replace(/\s+/g, " ").trim().slice(0, CUSTOM_GEO_MAX_SOURCE_TITLE).trim();
+  return t.length > 0 ? t : null;
+}
+
+/**
+ * Provider-reported sources of an OpenAI-compatible Chat Completions body, in order of first appearance:
+ * choices[0].message.annotations url_citation entries, then top-level `citations` (string URLs), then
+ * top-level `search_results` ({url, title}). Invalid entries are dropped; duplicates (same parsed URL) keep
+ * the first position (a later title fills a missing one); at most CUSTOM_GEO_MAX_SOURCES; position = 1-based
+ * order of first appearance. Never fetched; untrusted evidence.
+ */
+export function parseCustomGeoSources(body: unknown): GeoCitation[] {
+  const b = (body && typeof body === "object" ? body : {}) as ChatBody;
+  const out: GeoCitation[] = [];
+  const index = new Map<string, number>();
+  const add = (urlValue: unknown, titleValue: unknown) => {
+    const u = cleanSourceUrl(urlValue);
+    if (!u) return;
+    const title = cleanSourceTitle(titleValue);
+    const at = index.get(u.key);
+    if (at !== undefined) {
+      if (out[at]!.title === null && title !== null) out[at]!.title = title;
+      return;
+    }
+    if (out.length >= CUSTOM_GEO_MAX_SOURCES) return;
+    index.set(u.key, out.length);
+    out.push({ url: u.url, title, position: out.length + 1 });
+  };
+  const choice = Array.isArray(b.choices) ? b.choices[0] : undefined;
+  const annotations = choice?.message && typeof choice.message === "object" ? choice.message.annotations : undefined;
+  if (Array.isArray(annotations)) {
+    for (const a of annotations) {
+      if (!a || typeof a !== "object" || (a as { type?: unknown }).type !== "url_citation") continue;
+      const c = (a as { url_citation?: unknown }).url_citation;
+      if (!c || typeof c !== "object") continue;
+      add((c as { url?: unknown }).url, (c as { title?: unknown }).title);
+    }
+  }
+  if (Array.isArray(b.citations)) for (const c of b.citations) add(c, null);
+  if (Array.isArray(b.search_results)) {
+    for (const r of b.search_results) {
+      if (!r || typeof r !== "object") continue;
+      add((r as { url?: unknown }).url, (r as { title?: unknown }).title);
+    }
+  }
+  return out;
+}
+
+/** Pure parse of a Chat Completions body. Text and sources are untrusted evidence (stored as plain text only). */
 export function parseCustomGeoResponse(body: unknown): ParsedCustomGeo {
   const b = (body && typeof body === "object" ? body : {}) as ChatBody;
   const choice = Array.isArray(b.choices) ? b.choices[0] : undefined;
@@ -69,12 +164,14 @@ export function parseCustomGeoResponse(body: unknown): ParsedCustomGeo {
   const finishReason = str(choice?.finish_reason);
   const usage = { inputTokens: num(b.usage?.prompt_tokens), outputTokens: num(b.usage?.completion_tokens) };
   // Untrusted host strings: bounded (200 characters, no control characters) or dropped.
-  const base = { model: cleanModelId(b.model), requestId: cleanModelId(b.id), finishReason: cleanModelId(choice?.finish_reason), usage };
+  const base = { model: cleanModelId(b.model), requestId: cleanModelId(b.id), finishReason: cleanModelId(choice?.finish_reason), usage, citations: [] as GeoCitation[] };
   if (!choice) return { ...base, status: "failed", text: null, error: "Custom provider returned no choices." };
   if (str(choice.message?.refusal) && !text?.trim()) return { ...base, status: "failed", text: null, error: "The custom provider's model declined to answer." };
   if (!text || !text.trim()) return { ...base, status: "failed", text: null, error: "Custom provider returned no answer text." };
-  if (finishReason === "length") return { ...base, status: "incomplete", text, error: `Answer truncated: finish_reason "length" (max_completion_tokens ${CUSTOM_GEO_MAX_COMPLETION_TOKENS}).` };
-  return { ...base, status: "ok", text, error: null };
+  const citations = parseCustomGeoSources(b);
+  if (finishReason === "length")
+    return { ...base, citations, status: "incomplete", text, error: `Answer truncated: finish_reason "length" (max_completion_tokens ${CUSTOM_GEO_MAX_COMPLETION_TOKENS}).` };
+  return { ...base, citations, status: "ok", text, error: null };
 }
 
 export function createCustomGeoProvider(cfg: CustomGeoProviderConfig): GeoProviderAdapter {
@@ -104,7 +201,8 @@ export function createCustomGeoProvider(cfg: CustomGeoProviderConfig): GeoProvid
     id: cfg.id,
     label: cfg.label,
     model,
-    groundingMode: CUSTOM_GEO_GROUNDING_MODE,
+    // Lane-level mode (cohort key): fixed per lane; each answer records its own mode (sources or none).
+    groundingMode: CUSTOM_GEO_LANE_GROUNDING_MODE,
     samplingOptions,
     async ask(prompt, opts) {
       if (!cfg.apiKey || !model) return answer({ status: "failed", outcome: "not_sent", error: "Custom GEO engine is not configured (key or model missing)." });
@@ -163,10 +261,15 @@ export function createCustomGeoProvider(cfg: CustomGeoProviderConfig): GeoProvid
         return answer({ status: "failed", outcome: "server_error", error: "Custom provider returned a non-JSON response body.", latencyMs });
       }
       const p = parseCustomGeoResponse(json);
+      // Grounded only with at least one valid provider-reported source (never for a failed answer).
+      const grounded = p.status !== "failed" && p.citations.length > 0;
       return answer({
         status: p.status,
         outcome: "ok",
         text: p.text,
+        grounded,
+        groundingMode: grounded ? CUSTOM_GEO_SOURCES_MODE : CUSTOM_GEO_GROUNDING_MODE,
+        citations: grounded ? p.citations : [],
         // The configured model, never the host-reported one (see the header).
         model,
         requestId: p.requestId,

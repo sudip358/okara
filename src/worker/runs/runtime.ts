@@ -258,7 +258,7 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
   if (anthropicGeoKey && am && anthropicGeoConfigured(env, anthropicGeoKey, am)) {
     geoProviders.push(createAnthropicGeoProvider({ apiKey: anthropicGeoKey, model: am, fetchImpl: apiFetch, now: clock }));
   }
-  // Custom GEO engines: ungrounded lanes (mention rate only), each reaching only its own host.
+  // Custom GEO engines: grounded only when the provider returns web sources, each reaching only its own host.
   for (const row of customGeoRows) {
     const use = await resolveCustomProviderRow(env, db, ref.workspaceId, row);
     if (!use) continue;

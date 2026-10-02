@@ -15,7 +15,7 @@
  */
 import { Hono } from "hono";
 import { z } from "zod";
-import type { GeoEngineProviderId } from "@shared/types";
+import type { BoardLaneProviderId } from "@shared/types";
 import type { AppEnv } from "../app";
 import type { Env } from "../env";
 import type { Db } from "../lib/db";
@@ -28,6 +28,7 @@ import { buildDecisionsForWorkspace } from "../redirects/decisions";
 import { createBudget } from "../runs/budget";
 import type { Budget } from "../runs/context";
 import { buildEngineBoard, BOARD_LANES } from "../geo/board";
+import { isCustomGeoId } from "../geo/custom-lanes";
 import { approveCompetitorPage, citedPageFactors, listCompetitorPages, MAX_URL_LENGTH, RateLimitedError } from "../geo/competitor-pages";
 import { buildRewritePlans } from "../geo/rewrite-plan";
 import { buildPageSkipFactors } from "../geo/skip-factors";
@@ -64,8 +65,9 @@ export function setGeoBoardHooks(h: GeoBoardHooks): void {
   };
 }
 
-function isEngine(v: string): v is GeoEngineProviderId {
-  return (BOARD_LANES as readonly string[]).includes(v);
+function isEngine(v: string): v is BoardLaneProviderId {
+  // Built-in engines, or a custom GEO engine lane id (bounded; its grounded answers are measured like any engine).
+  return (BOARD_LANES as readonly string[]).includes(v) || (isCustomGeoId(v) && v.length <= 120);
 }
 
 // ------------------------------------------------------------------ routes
@@ -83,8 +85,8 @@ geoBoardRoutes.get("/projects/:pid/geo/pages/:pageId/skip-factors", async (c) =>
   const promptId = c.req.query("promptId")?.trim() || null;
   const engineRaw = c.req.query("engine")?.trim() || null;
   if (promptId && promptId.length > 100) throw badRequest("promptId is too long.");
-  if (engineRaw !== null && !isEngine(engineRaw)) throw badRequest(`engine must be one of ${BOARD_LANES.join(", ")}.`);
-  const data = await buildPageSkipFactors(db, project, c.req.param("pageId"), { promptId, engine: engineRaw as GeoEngineProviderId | null }, c.get("now"), citedPageFactors);
+  if (engineRaw !== null && !isEngine(engineRaw)) throw badRequest(`engine must be one of ${BOARD_LANES.join(", ")}, or a custom GEO engine id (custom_geo:<id>).`);
+  const data = await buildPageSkipFactors(db, project, c.req.param("pageId"), { promptId, engine: engineRaw as BoardLaneProviderId | null }, c.get("now"), citedPageFactors);
   return c.json({ data });
 });
 

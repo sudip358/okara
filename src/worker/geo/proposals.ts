@@ -193,12 +193,13 @@ async function loadInputs(ctx: RunContext) {
   const ws = ctx.project.workspaceId;
   const pid = ctx.project.id;
   const since = iso(new Date(ctx.clock().getTime() - PROPOSAL_WINDOW_DAYS * 86400_000));
-  // Custom GEO engine lanes (custom_geo:<id>) are excluded: their answers come from an owner-chosen model with
-  // no web search proof and count toward mention rate only (geo/custom-lanes.ts); they never create proposals.
+  // Custom GEO engine lanes (custom_geo:<id>): only answers with provider-reported sources (grounded = 1) are
+  // inputs, like any grounded answer; their answers without sources count toward mention rate only
+  // (geo/custom-lanes.ts) and never create proposals.
   const all = await ctx.db.all<ObsLite>(
     `SELECT id, provider, model, prompt_id, prompt_text, prompt_type, cohort_key, grounded, created_at FROM geo_observations
       WHERE workspace_id = ? AND project_id = ? AND measurement_type = 'api' AND status = 'ok' AND created_at >= ?
-        AND substr(provider, 1, 11) <> 'custom_geo:'
+        AND (substr(provider, 1, 11) <> 'custom_geo:' OR grounded = 1)
       ORDER BY created_at DESC LIMIT 1000`,
     ws,
     pid,

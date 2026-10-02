@@ -41,7 +41,7 @@ import { getActivePromptSet } from "./prompts";
 import { normalizeQuery } from "./analyze";
 import { isSourceType } from "./source-type";
 import { GEO_ENGINE_IDS, isGeoEngineId } from "./engines";
-import { CUSTOM_GEO_NOTE, customGeoLabelFor, customGeoLabels, isCustomGeoId } from "./custom-lanes";
+import { CUSTOM_GEO_NO_SOURCES_NOTE, CUSTOM_GEO_NOTE, CUSTOM_GEO_SOURCES_NOTE, customGeoLabelFor, customGeoLabels, isCustomGeoId } from "./custom-lanes";
 
 export const OBSERVATION_LOAD_LIMIT = 2000;
 export const API_PROVIDERS = GEO_ENGINE_IDS;
@@ -64,7 +64,7 @@ export const GEO_LABELS = {
   smallSample: `Small sample: fewer than ${SMALL_SAMPLE_MIN} responses in a denominator; do not draw conclusions from these rates.`,
   demo: "Demo data - simulated run",
   noCausal: "Rates describe sampled answers only; they do not show that a specific change caused a difference.",
-  customLanes: `Custom GEO engines (${CUSTOM_GEO_NOTE}): no web search is requested, so their answers are ungrounded and count toward mention rate and share of voice only; their citation rate is unavailable.`,
+  customLanes: `Custom GEO engines (${CUSTOM_GEO_NOTE}): answers with ${CUSTOM_GEO_SOURCES_NOTE} are grounded and count toward citation rate like any grounded answer; answers without sources (${CUSTOM_GEO_NO_SOURCES_NOTE}) count toward mention rate and share of voice only.`,
 } as const;
 
 interface ObsRow {

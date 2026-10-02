@@ -13,7 +13,7 @@
  * (null without GSC) and stored API-sampled answers citing the page in the same window (null without
  * GEO data). No projected traffic, conversions, revenue, rankings, or citations.
  */
-import type { DateWindow, FactorStatus, GeoEngineProviderId, RewritePlan, RewritePlanItem, RewritePlanItemKey, RewritePlansResponse, SkipFactor } from "@shared/types";
+import type { BoardLaneProviderId, DateWindow, FactorStatus, GeoEngineProviderId, RewritePlan, RewritePlanItem, RewritePlanItemKey, RewritePlansResponse, SkipFactor } from "@shared/types";
 import type { Db } from "../lib/db";
 import { parseJson } from "../lib/db";
 import type { ProjectRow } from "../platform/access";
@@ -25,6 +25,7 @@ import { resolveCitationHost, selfDomains } from "./detect";
 import { canonicalExternalUrl, citationUses, type CompetitorExtraction } from "./competitor-pages";
 import { evaluateFactors, inlinkCache, loadOurPagesEvidence } from "./skip-factors";
 import { BOARD_LANES } from "./board";
+import { isCustomGeoId } from "./custom-lanes";
 
 export const REWRITE_PLAN_VERSION = "rewrite-plan-2026-09-30.1";
 export const MAX_PLANS = 50;
@@ -75,8 +76,10 @@ function measuredItem(key: RewritePlanItemKey, f: SkipFactor | undefined, crawlD
   return { key, label: ITEM_LABELS[key], status: statusOf(f.status), evidence: `${f.measured}${crawlDay ? ` (crawl of ${crawlDay})` : ""}`, method: "measured", optional: false };
 }
 
-function asEngine(p: string | null | undefined): GeoEngineProviderId | null {
-  return p && (BOARD_LANES as readonly string[]).includes(p) ? (p as GeoEngineProviderId) : null;
+function asEngine(p: string | null | undefined): BoardLaneProviderId | null {
+  if (p && (BOARD_LANES as readonly string[]).includes(p)) return p as GeoEngineProviderId;
+  // A custom GEO engine lane: its citations exist only for grounded answers (provider-reported sources).
+  return isCustomGeoId(p) ? p : null;
 }
 
 /** Default window when there is no GSC: the 28 days ending yesterday (UTC). */

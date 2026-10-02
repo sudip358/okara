@@ -1,7 +1,8 @@
 /**
  * Lane header (design §2): engine name, exact model, grounding, citation-rate gauge, stats. No brand logos.
- * A custom GEO engine lane has no web search, so it shows its mention rate instead of a citation gauge and no
- * citation-based stats ("Citation rate: not measured").
+ * A custom GEO engine lane shows the citation gauge and stats like any engine when its cohort has grounded
+ * answers (provider-reported sources); without any, it shows its mention rate instead of a citation gauge and
+ * no citation-based stats ("Citation rate: not measured (no sources returned)").
  */
 import type { EngineLaneSummary, Ratio } from "@shared/types";
 import { formatDateTime, formatNumber, formatRelative } from "@web/lib/format";
@@ -13,6 +14,8 @@ import {
   LABELS,
   apiSampledTipFor,
   citedInsteadShare,
+  customLaneHasSources,
+  customSourcesLine,
   costDisplay,
   countsLine,
   engineGlyph,
@@ -60,6 +63,8 @@ export function LaneHeader({ lane, showMetrics }: { lane: EngineLaneSummary; sho
   const cost = costDisplay(lane.costUsd);
   const name = engineName(lane.provider);
   const custom = isCustomEngine(lane.provider);
+  // A custom lane without any grounded answer in its cohort: mention rate only.
+  const mentionOnly = custom && !customLaneHasSources(lane);
   return (
     <header className="min-w-0 space-y-3">
       <div className="flex min-w-0 items-start gap-2">
@@ -85,7 +90,11 @@ export function LaneHeader({ lane, showMetrics }: { lane: EngineLaneSummary; sho
           {LABELS.apiSampled}
         </Badge>
         {custom && (
-          <Badge tone="warning" className="whitespace-normal" title="No web search is requested; answers count toward mention rate only, never citation rate.">
+          <Badge
+            tone="warning"
+            className="whitespace-normal"
+            title="No tool is requested. Answers count toward citation rate only when the provider returns web sources; answers without sources count toward mention rate only."
+          >
             {CUSTOM_ENGINE_NOTE}
           </Badge>
         )}
@@ -99,7 +108,7 @@ export function LaneHeader({ lane, showMetrics }: { lane: EngineLaneSummary; sho
         </span>
       </div>
 
-      {showMetrics && custom && (
+      {showMetrics && mentionOnly && (
         <>
           <dl className="grid grid-cols-2 gap-x-3 gap-y-2">
             <Stat label="Mention rate" value={mentionStatText(lane.mentionRate)} title="Valid answers that name your brand" />
@@ -107,13 +116,15 @@ export function LaneHeader({ lane, showMetrics }: { lane: EngineLaneSummary; sho
             <Stat label="Cost (latest cohort)" value={cost.value} sub={cost.basis} />
           </dl>
           <p className="text-[11px] text-zinc-600 dark:text-zinc-400">{CUSTOM_CITATION_NOT_MEASURED}</p>
+          <p className="text-[11px] text-zinc-600 dark:text-zinc-400">{customSourcesLine(lane)}</p>
           <p className="text-[11px] text-zinc-600 dark:text-zinc-400">{countsLine(lane.counts)}</p>
           {lane.cohortKey && <p className="break-all text-[11px] text-zinc-500 dark:text-zinc-400">Cohort {lane.cohortKey}</p>}
         </>
       )}
-      {showMetrics && !custom && (
+      {showMetrics && !mentionOnly && (
         <>
           <CitationGauge rate={lane.citationRate} />
+          {custom && <p className="text-[11px] text-zinc-600 dark:text-zinc-400">{customSourcesLine(lane)}</p>}
           <dl className="grid grid-cols-2 gap-x-3 gap-y-2">
             <Stat
               label="Answers citing us"

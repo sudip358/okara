@@ -723,7 +723,7 @@ export function decisionCounts(items: readonly ActivityItem[]): { act: number; f
 // ------------------------------------------------------------------ GEO
 /** This lane's answers by outcome, from revealed rows (replay counters; the server totals replace them at the end). */
 export function laneTotalsFrom(answers: readonly LiveGeoAnswerRow[], provider: string): LiveGeoLaneTotals {
-  const t: LiveGeoLaneTotals = { provider: provider as LiveGeoLaneTotals["provider"], cited: 0, named: 0, missing: 0, failed: 0, pending: 0, cost: { value: null, isEstimate: false }, citedInstead: null };
+  const t: LiveGeoLaneTotals = { provider: provider as LiveGeoLaneTotals["provider"], cited: 0, named: 0, missing: 0, grounded: 0, failed: 0, pending: 0, cost: { value: null, isEstimate: false }, citedInstead: null };
   let sum = 0;
   let any = false;
   let unknown = false;
@@ -733,6 +733,7 @@ export function laneTotalsFrom(answers: readonly LiveGeoAnswerRow[], provider: s
     if (a.provider !== provider) continue;
     if (a.outcome === null) t.pending++;
     else t[a.outcome]++;
+    if (a.grounded && (a.outcome === "cited" || a.outcome === "named" || a.outcome === "missing")) t.grounded++;
     any = true;
     if (a.cost.value === null || !Number.isFinite(a.cost.value)) unknown = true;
     else {
@@ -752,11 +753,24 @@ export function laneTotalsFrom(answers: readonly LiveGeoAnswerRow[], provider: s
   return t;
 }
 
-/** Gauge ratio for a lane: citation rate cited/(cited+named+missing); custom lanes: mention rate (cited+named)/valid. */
-export function laneRatio(t: Pick<LiveGeoLaneTotals, "cited" | "named" | "missing">, custom: boolean): Ratio {
-  const denominator = t.cited + t.named + t.missing;
+/** A custom lane whose run has grounded answers (provider-reported sources) is measured on citation rate. */
+export function customLaneMeasured(t: Partial<Pick<LiveGeoLaneTotals, "grounded">>, custom: boolean): boolean {
+  return custom && (t.grounded ?? 0) > 0;
+}
+
+/**
+ * Gauge ratio for a lane: citation rate cited/(cited+named+missing). Custom lanes: citation rate over their
+ * grounded answers cited/grounded when the provider returned sources in this run (an answer can only cite us
+ * with sources), else mention rate (cited+named)/valid.
+ */
+export function laneRatio(t: Pick<LiveGeoLaneTotals, "cited" | "named" | "missing"> & Partial<Pick<LiveGeoLaneTotals, "grounded">>, custom: boolean): Ratio {
+  const valid = t.cited + t.named + t.missing;
+  if (customLaneMeasured(t, custom)) {
+    const denominator = t.grounded ?? 0;
+    return { numerator: t.cited, denominator, value: denominator > 0 ? t.cited / denominator : null };
+  }
   const numerator = custom ? t.cited + t.named : t.cited;
-  return { numerator, denominator, value: denominator > 0 ? numerator / denominator : null };
+  return { numerator, denominator: valid, value: valid > 0 ? numerator / valid : null };
 }
 
 /** Newest STRIP_MAX revealed answers of a lane, oldest first (newest at the right of the strip). */

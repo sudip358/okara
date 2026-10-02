@@ -4,7 +4,9 @@
  *
  * One lane per engine in fixed order (openai_geo, anthropic_geo, gemini, perplexity), always present, then
  * one lane per custom GEO engine ("custom_geo:<id>": configured ones, then removed ones with history in this
- * project; ungrounded, so their citation rate is unavailable and they count toward mention rate only):
+ * project; their answers count toward citation rate only when the provider returned web sources (grounded),
+ * otherwise mention rate only; a custom lane without grounded answers in its cohort has citation rate
+ * unavailable, denominator 0):
  *   - metrics over the engine's LATEST cohort (geo_observations with measurement_type 'api', same
  *     cohort_key), with the metrics.ts definitions used by GeoResults lanes (discovery prompts; 'ok' rows
  *     not analysed yet are excluded and reported in labels): citationRate, mentionRate, laneCounts;
@@ -38,7 +40,7 @@ import { parseJson } from "../lib/db";
 import type { ProjectRow } from "../platform/access";
 import { capabilityPresence, type CapabilityPresence } from "../runs/runtime";
 import { resolveWorkspaceModels, type ResolvedModels } from "../platform/provider-models";
-import { CUSTOM_GEO_NOTE, customGeoLabelFor, customGeoLabels, isCustomGeoId } from "./custom-lanes";
+import { CUSTOM_GEO_NO_SOURCES_NOTE, CUSTOM_GEO_NOTE, CUSTOM_GEO_SOURCES_NOTE, customGeoLabelFor, customGeoLabels, isCustomGeoId } from "./custom-lanes";
 import { answerOutcome } from "../runs/activity";
 import { inChunks } from "../coverage/common";
 import { resolveCitation } from "../coverage/geo-data";
@@ -114,7 +116,7 @@ function setupDetail(provider: GeoEngineProviderId, models: ResolvedModels): str
   return `Add ${key} (or check that the ${VENDOR[provider]} model id is valid)`;
 }
 
-export const CUSTOM_LANE_BOARD_LABEL = `Custom GEO engines (${CUSTOM_GEO_NOTE}): no web search is requested, so their answers count toward mention rate only; citation rate is unavailable.`;
+export const CUSTOM_LANE_BOARD_LABEL = `Custom GEO engines (${CUSTOM_GEO_NOTE}): an answer counts toward citation rate only when the provider returned web sources (${CUSTOM_GEO_SOURCES_NOTE}); answers without sources (${CUSTOM_GEO_NO_SOURCES_NOTE}). Citation rate is not measured for a custom lane with no sourced answers.`;
 
 export function laneCost(rows: Array<{ cost_usd: number | null; cost_is_estimate: number }>): CostUsd {
   if (rows.length === 0) return { value: null, isEstimate: true };

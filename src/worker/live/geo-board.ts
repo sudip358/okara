@@ -479,8 +479,8 @@ async function laneTotals(db: Db, project: ProjectRow, runId: string): Promise<{
   const ws = project.workspace_id;
   const pid = project.id;
   const [obs, cits] = await Promise.all([
-    db.all<Pick<ObsRaw, "id" | "provider" | "status" | "cost_usd" | "cost_is_estimate" | "analysed" | "self_cited" | "self_mentioned">>(
-      `SELECT o.id, o.provider, o.status, o.cost_usd, o.cost_is_estimate,
+    db.all<Pick<ObsRaw, "id" | "provider" | "status" | "grounded" | "cost_usd" | "cost_is_estimate" | "analysed" | "self_cited" | "self_mentioned">>(
+      `SELECT o.id, o.provider, o.status, o.grounded, o.cost_usd, o.cost_is_estimate,
               EXISTS (SELECT 1 FROM geo_brand_observations b WHERE b.observation_id = o.id AND b.workspace_id = o.workspace_id AND b.project_id = o.project_id) AS analysed,
               (SELECT MAX(b.cited) FROM geo_brand_observations b
                 WHERE b.observation_id = o.id AND b.workspace_id = o.workspace_id AND b.project_id = o.project_id AND b.is_self = 1) AS self_cited,
@@ -521,12 +521,13 @@ async function laneTotals(db: Db, project: ProjectRow, runId: string): Promise<{
   const order = [...BOARD_LANES.filter((p) => byProvider.has(p)), ...[...byProvider.keys()].filter(isCustomGeoId).sort()];
   const lanes = order.map((provider): LiveGeoLaneTotals => {
     const rows = byProvider.get(provider)!;
-    const t: LiveGeoLaneTotals = { provider: provider as BoardLaneProviderId, cited: 0, named: 0, missing: 0, failed: 0, pending: 0, cost: laneCost(rows) as CostUsd, citedInstead: null };
+    const t: LiveGeoLaneTotals = { provider: provider as BoardLaneProviderId, cited: 0, named: 0, missing: 0, grounded: 0, failed: 0, pending: 0, cost: laneCost(rows) as CostUsd, citedInstead: null };
     const hosts = new Map<string, { answers: number; sourceType: SourceType }>();
     for (const o of rows) {
       const out = outcomeOf(o);
       if (out === null) t.pending++;
       else t[out]++;
+      if ((out === "cited" || out === "named" || out === "missing") && o.grounded === 1) t.grounded++;
       if (out === "missing" || out === "named") {
         const h = firstOther.get(o.id);
         if (h) {

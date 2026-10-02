@@ -2,7 +2,7 @@
  * Workspace custom providers: an OpenAI-compatible endpoint (OpenRouter, Groq, Together, DeepSeek, Mistral,
  * a self-hosted gateway, ...) that the workspace owner adds with a base URL, an API key and a model id, and
  * selects as the workspace's writer (role 'writer'), or adds as a custom GEO engine lane (role 'geo', at most
- * 2; ungrounded, mention rate only; see geo/custom-lanes.ts). Table: workspace_custom_providers (migrations
+ * 2; citation rate only for answers with provider-reported sources, else mention rate only; see geo/custom-lanes.ts). Table: workspace_custom_providers (migrations
  * 0010, 0011 adds `role`). A GEO row is never the writer.
  *
  * Safety rules (CLAUDE.md, build kit SSRF rules):
