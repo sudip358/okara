@@ -1519,3 +1519,93 @@ export interface LiveGeoAnswerRow {
   /** geo_observations.grounding_mode, e.g. "google_search"; null when not recorded. */
   groundingMode: string | null;
 }
+
+// ------------------------------------------------------------------ Ask Okara (chat agent; docs/api.md "Ask Okara (chat)")
+/** read = a data tool; action = state-changing, runs only after the user confirms; output = a link or export prepared for the UI. */
+export type ChatStepKind = "read" | "action" | "output";
+export type ChatStepStatus = "ok" | "error" | "awaiting_confirmation" | "executed" | "failed" | "cancelled" | "expired";
+
+export interface ChatStep {
+  id: string;
+  kind: ChatStepKind;
+  /** Tool name as the model called it, e.g. "search_console_queries". */
+  tool: string;
+  /** Short plain-text summary of the arguments, e.g. "mode=declining, dimension=page, limit=10". */
+  args: string;
+  /** Short plain-text summary of the result, e.g. "10 pages · 2026-08-30..2026-09-26 vs previous 28 days". */
+  result: string;
+  status: ChatStepStatus;
+  /** Set for kind "action": the action to confirm or cancel. */
+  actionId?: string | null;
+  /** Set for kind "output": an in-app route the user can open (always under /projects/<pid>/). */
+  navigate?: { path: string; label: string } | null;
+  /** Set for kind "output": rows for a client-side CSV download (capped server-side). */
+  download?: { filename: string; columns: string[]; rows: Array<Array<string | number | null>>; truncated: boolean } | null;
+}
+
+export type ChatMessageStatus = "complete" | "running" | "awaiting_confirmation" | "stopped" | "error";
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  /** User text, or the model's answer (render as sanitized markdown-lite, never raw HTML). */
+  content: string;
+  status: ChatMessageStatus;
+  steps: ChatStep[];
+  error: string | null;
+  model: { provider: string; model: string } | null;
+  createdAt: string;
+}
+
+export interface ChatAction {
+  id: string;
+  messageId: string;
+  name: string;
+  /** Plain-text question shown on the confirmation card, e.g. "Run the SEO agent now?". */
+  title: string;
+  detail: string;
+  args: Record<string, unknown>;
+  status: "pending" | "executing" | "executed" | "failed" | "cancelled" | "expired";
+  result: string | null;
+  createdAt: string;
+  decidedAt: string | null;
+}
+
+export interface ChatSessionSummary {
+  id: string;
+  title: string;
+  status: "idle" | "running" | "awaiting_confirmation";
+  messageCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ChatSessionDetail extends ChatSessionSummary {
+  messages: ChatMessage[];
+  actions: ChatAction[];
+}
+
+export interface ChatStatus {
+  state: "ready" | "setup_required";
+  /** The configured chat model (the workspace writer); never a default id. */
+  model: { provider: string; model: string } | null;
+  message: string | null;
+  limits: { maxMessageChars: number; maxToolRounds: number; sessionsKept: number };
+}
+
+/** POST .../messages and .../actions/:id/(confirm|cancel) response (JSON mode; the ndjson stream ends with the same object). */
+export interface ChatTurnResult {
+  session: ChatSessionSummary;
+  /** The user message (absent for confirm/cancel) and the assistant message of this turn. */
+  userMessage: ChatMessage | null;
+  message: ChatMessage;
+  actions: ChatAction[];
+}
+
+/** One line of the ndjson stream (?stream=1). */
+export type ChatStreamEvent =
+  | { type: "started"; sessionId: string; userMessage: ChatMessage | null; messageId: string }
+  | { type: "step"; step: ChatStep }
+  | { type: "status"; text: string }
+  | { type: "done"; result: ChatTurnResult }
+  | { type: "error"; code: string; message: string };
