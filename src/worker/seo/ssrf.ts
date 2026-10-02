@@ -234,7 +234,7 @@ export interface GuardedFetchOptions {
   /** robots.txt may be served with a missing/odd content type; allow any text-like body. */
   lenientContentType?: boolean;
   /**
-   * robots.txt only (RFC 9309 2.5: parse at least 500 KiB): stop reading at the cap and return the
+   * robots.txt (RFC 9309 2.5: parse at least 500 KiB) and HTML pages (analysed from their first bytes): stop reading at the cap and return the
    * truncated prefix instead of failing. The reader is still cancelled at the cap.
    */
   truncateAtCap?: boolean;

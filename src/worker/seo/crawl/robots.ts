@@ -148,25 +148,37 @@ export function robotsCrawlDelay(state: RobotsState, token: string): number | nu
   return selectGroup(state.parsed, token)?.crawlDelay ?? null;
 }
 
+/** Waits before re-asking for robots.txt after a 429/503 (total ≤ 10 s of wall time, no CPU). */
+export const ROBOTS_RETRY_DELAYS_MS: readonly number[] = [3_000, 7_000];
+
 /** Fetch /robots.txt through the SSRF guard (512 KB cap). */
 export async function fetchRobots(
   fetchImpl: typeof fetch,
   verifiedHost: string,
   userAgent: string,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; retryDelaysMs?: readonly number[] } = {},
 ): Promise<RobotsState> {
   const empty: ParsedRobots = { groups: [], sitemaps: [] };
   try {
-    const res = await guardedFetch(fetchImpl, `https://${verifiedHost}/robots.txt`, {
-      verifiedHost,
-      maxBytes: ROBOTS_MAX_BYTES,
-      timeoutMs: opts.timeoutMs ?? 10_000,
-      maxRedirects: 5,
-      kind: "robots",
-      lenientContentType: true,
-      truncateAtCap: true,
-      userAgent,
-    });
+    const fetchOnce = () =>
+      guardedFetch(fetchImpl, `https://${verifiedHost}/robots.txt`, {
+        verifiedHost,
+        maxBytes: ROBOTS_MAX_BYTES,
+        timeoutMs: opts.timeoutMs ?? 10_000,
+        maxRedirects: 5,
+        kind: "robots",
+        lenientContentType: true,
+        truncateAtCap: true,
+        userAgent,
+      });
+    // Rate limiting (429) and temporary errors (503) are retried before falling back to disallow-all:
+    // storefront platforms throttle bursts from shared egress IPs, and one refusal should not void a run.
+    let res = await fetchOnce();
+    for (const delay of opts.retryDelaysMs ?? ROBOTS_RETRY_DELAYS_MS) {
+      if (res.status !== 429 && res.status !== 503) break;
+      await new Promise((r) => setTimeout(r, delay));
+      res = await fetchOnce();
+    }
     if (res.status >= 200 && res.status < 300) {
       return { status: "ok", httpStatus: res.status, parsed: parseRobots(res.body), note: `robots.txt fetched (${res.status})${res.truncated ? "; truncated at 512 KB" : ""}.` };
     }

@@ -236,7 +236,17 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
     await ctx.log.event("crawl", "info", robots.note);
 
     // ---- sitemaps
-    const sitemapCandidates = robots.parsed.sitemaps.length > 0 ? robots.parsed.sitemaps : [`https://${host}/sitemap.xml`];
+    // Sitemap lines may be relative (Shopify serves "Sitemap: /sitemap.xml"): resolve against the robots.txt URL.
+    const declaredSitemaps = robots.parsed.sitemaps
+      .map((s) => {
+        try {
+          return new URL(s, `https://${host}/robots.txt`).href;
+        } catch {
+          return null;
+        }
+      })
+      .filter((s): s is string => s !== null);
+    const sitemapCandidates = declaredSitemaps.length > 0 ? declaredSitemaps : [`https://${host}/sitemap.xml`];
     const sitemap =
       robots.status === "unreachable"
         ? { urls: [] as string[], source: new Map<string, string>(), entries: [] as SitemapResult["entries"], fetched: [] as string[], refused: [] as SitemapResult["refused"], notes: ["Sitemaps not read because robots.txt disallows all."] }
@@ -449,6 +459,9 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
           timeoutMs: opts.pageTimeoutMs ?? 12_000,
           maxRedirects: 5,
           kind: "html",
+          // Large storefront pages (often over 2 MB of inline JSON/CSS) are analysed from their first 2 MB,
+          // which holds the head and main content, instead of being skipped as too_large.
+          truncateAtCap: true,
           userAgent: ua,
         });
       } catch (e) {

@@ -92,7 +92,7 @@ describe("seo-crawl robots.txt (RFC 9309)", () => {
     const s404 = await fetchRobots(mk(404), "shop.example.com", "OkaraBot/0.1");
     expect(s404.status).toBe("not_found");
     expect(robotsAllows(s404, "OkaraBot", "https://shop.example.com/anything")).toBe(true);
-    const s503 = await fetchRobots(mk(503), "shop.example.com", "OkaraBot/0.1");
+    const s503 = await fetchRobots(mk(503), "shop.example.com", "OkaraBot/0.1", { retryDelaysMs: [] });
     expect(s503.status).toBe("unreachable");
     expect(robotsAllows(s503, "OkaraBot", "https://shop.example.com/")).toBe(false);
     const failing = (async () => {
@@ -100,6 +100,29 @@ describe("seo-crawl robots.txt (RFC 9309)", () => {
     }) as unknown as typeof fetch;
     const down = await fetchRobots(failing, "shop.example.com", "OkaraBot/0.1");
     expect(down.status).toBe("unreachable");
+  });
+
+  it("retries a rate-limited (429) or temporarily unavailable (503) robots.txt before giving up", async () => {
+    let n = 0;
+    const flaky = fakeSite({
+      "https://shop.example.com/robots.txt": () => {
+        n++;
+        return n < 3
+          ? new Response("slow down", { status: 429, headers: { "content-type": "text/plain" } })
+          : new Response("User-agent: *\nDisallow: /cart\n", { status: 200, headers: { "content-type": "text/plain" } });
+      },
+    }).fetch;
+    const ok = await fetchRobots(flaky, "shop.example.com", "OkaraBot/0.1", { retryDelaysMs: [1, 1] });
+    expect(n).toBe(3);
+    expect(ok.status).toBe("ok");
+    expect(robotsAllows(ok, "OkaraBot", "https://shop.example.com/")).toBe(true);
+    // Still 429 after every retry: disallow-all, as before.
+    let m = 0;
+    const always = fakeSite({ "https://shop.example.com/robots.txt": () => (m++, new Response("x", { status: 429 })) }).fetch;
+    const no = await fetchRobots(always, "shop.example.com", "OkaraBot/0.1", { retryDelaysMs: [1, 1] });
+    expect(m).toBe(3);
+    expect(no.status).toBe("unreachable");
+    expect(robotsAllows(no, "OkaraBot", "https://shop.example.com/")).toBe(false);
   });
 
   it("fetches robots.txt with the crawler UA through the guard and truncates at 512 KB", async () => {

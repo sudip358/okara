@@ -126,6 +126,26 @@ describe("seo-crawl runCrawl end-to-end", () => {
     expect(ctx.events.some((e) => e.step === "crawl" && e.status === "completed")).toBe(true);
   });
 
+  it("resolves a relative Sitemap line (Shopify: \"Sitemap: /sitemap.xml\") and analyses an over-2 MB page from its first 2 MB", async () => {
+    const { env, db, workspaceId, projectId } = await setup();
+    const big = HOME.replace("</main>", `<script type="application/json">${"x".repeat(2_300_000)}</script></main>`);
+    const site = sixPageSite({
+      [U("/robots.txt")]: { status: 200, contentType: "text/plain", body: "User-agent: *\nDisallow: /private/\n\nSitemap: /sitemap.xml\n" },
+      [U("/")]: html(big),
+    });
+    const ctx = makeTestContext(env, { id: projectId, workspaceId }, { crawlFetch: site.fetch, budget: unlimitedBudget() });
+    const summary = await runCrawl(ctx);
+    expect(site.urls()).toContain(U("/sitemap.xml"));
+    expect(site.urls()).toContain(U("/collections/pulls"));
+    const home = await db.first<{ skipped_reason: string | null; title: string | null }>(
+      "SELECT s.skipped_reason, s.title FROM page_snapshots s JOIN pages p ON p.id = s.page_id WHERE p.url = ? AND s.crawl_run_id = ?",
+      U("/"),
+      summary.crawlRunId,
+    );
+    expect(home?.skipped_reason).toBeNull();
+    expect(home?.title).toBeTruthy();
+  });
+
   it("reuses extraction for unchanged content on a re-crawl and keeps user page-type corrections", async () => {
     const { env, db, workspaceId, projectId } = await setup();
     const ctx = makeTestContext(env, { id: projectId, workspaceId }, { crawlFetch: sixPageSite().fetch });
