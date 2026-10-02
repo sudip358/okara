@@ -77,6 +77,17 @@ need more than 10 ms of CPU per step, so agent runs will fail on the free plan. 
        them to reconnect Search Console every 7 days.
      ([OAuth 2.0 refresh token expiration](https://developers.google.com/identity/protocols/oauth2#expiration),
      [Manage app audience](https://support.google.com/cloud/answer/15549945).)
+   - **Optional: Google Sheets import** (Import page → "Connect Google Sheets"; CSV import works without it).
+     - Enable the **Google Sheets API** in the same Cloud project (APIs & Services → Library). Without it every
+       sheet read returns 403 and the Import page says so.
+     - Add the scope `https://www.googleapis.com/auth/spreadsheets.readonly` on the consent screen (Data access).
+       Google classifies it as **sensitive**: same verification path and "unverified app" warning as
+       `webmasters.readonly`. In *Testing*, add each user as a test user; their Sheets refresh token expires after
+       **7 days**, after which syncs report "Google authorization expired" (Import page and Overview) until they
+       reconnect.
+     - **No new redirect URI**: the Sheets consent reuses `<APP_ORIGIN>/api/gsc/callback` (the callback dispatches
+       on the stored state's purpose). Nothing else to register.
+     - Apply migration `0015_sheet_imports.sql` (`npm run db:migrate:remote`) before using the Import page.
 
 3. **Secrets and vars**
    Secrets are never committed; set each with `npx wrangler secret put <NAME>`:

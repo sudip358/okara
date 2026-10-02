@@ -9,6 +9,7 @@ import { ApiError, api, errorMessage, isSetupRequired } from "@web/lib/api";
 import { formatDateTime } from "@web/lib/format";
 import { useApi } from "@web/lib/hooks";
 import { useProject } from "@web/lib/project-context";
+import { PromptSheetNote, noteFor, usePromptNotes } from "@web/pages/import/ImportedPanels";
 import {
   Badge,
   Button,
@@ -50,6 +51,7 @@ export function GeoPromptsPage() {
   const { project } = useProject();
   const base = `/projects/${encodeURIComponent(projectId)}`;
   const { data, error, loading, reload, setData } = useApi<GeoPromptSet | null>(projectId ? `${base}/geo/prompts` : null);
+  const sheetNotes = usePromptNotes(projectId);
 
   const original = useMemo(() => (data?.prompts ?? []).slice().sort((a, b) => a.position - b.position).map(toDraft), [data]);
   const [drafts, setDrafts] = useState<DraftPrompt[]>([]);
@@ -145,6 +147,7 @@ export function GeoPromptsPage() {
           <>
             {data ? <Badge tone="info">Version {data.version}</Badge> : <Badge>No saved version</Badge>}
             {data && <span className="text-xs text-zinc-600 dark:text-zinc-400">Saved {formatDateTime(data.createdAt)}</span>}
+            {data?.label && <Badge tone="neutral">{data.label}</Badge>}
           </>
         }
       />
@@ -217,6 +220,7 @@ export function GeoPromptsPage() {
                         aria-describedby={named.length > 0 ? `p-warn-${d.key}` : undefined}
                         placeholder="e.g. Which lighting stores offer solid brass fixtures with UL listing?"
                       />
+                      <PromptSheetNote note={noteFor(sheetNotes, d.text)} />
                       {named.length > 0 && (
                         <p id={`p-warn-${d.key}`} className="text-xs text-amber-800 dark:text-amber-300">
                           This discovery prompt appears to name {named.join(", ")}. Make it brand-blind or change the type to reputation.

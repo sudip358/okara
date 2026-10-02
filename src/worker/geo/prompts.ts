@@ -74,8 +74,8 @@ interface PromptRow {
 }
 
 export async function getActivePromptSet(db: Db, workspaceId: string, projectId: string): Promise<GeoPromptSet | null> {
-  const set = await db.first<{ id: string; version: number; created_at: string }>(
-    "SELECT id, version, created_at FROM geo_prompt_sets WHERE workspace_id = ? AND project_id = ? AND active = 1 ORDER BY version DESC LIMIT 1",
+  const set = await db.first<{ id: string; version: number; created_at: string; label: string | null }>(
+    "SELECT id, version, created_at, label FROM geo_prompt_sets WHERE workspace_id = ? AND project_id = ? AND active = 1 ORDER BY version DESC LIMIT 1",
     workspaceId,
     projectId,
   );
@@ -90,6 +90,7 @@ export async function getActivePromptSet(db: Db, workspaceId: string, projectId:
     id: set.id,
     version: set.version,
     createdAt: set.created_at,
+    label: set.label ?? null,
     prompts: rows.map(
       (r): GeoPrompt => ({
         id: r.id,
@@ -116,7 +117,7 @@ export interface ProjectForPrompts extends ProjectBrandSource {
  * Validate and save a new prompt-set version. Throws 400 when a discovery prompt breaks the
  * brand-blind rule (details list each offending prompt and term).
  */
-export async function savePromptSet(db: Db, project: ProjectForPrompts, prompts: PromptInput[], now: Date): Promise<GeoPromptSet> {
+export async function savePromptSet(db: Db, project: ProjectForPrompts, prompts: PromptInput[], now: Date, opts: { label?: string | null } = {}): Promise<GeoPromptSet> {
   if (prompts.length > MAX_PROMPTS_PER_SET) throw badRequest(`At most ${MAX_PROMPTS_PER_SET} prompts per set.`);
   const violations = prompts
     .map((p, index) => ({ index, text: p.text, matched: p.promptType === "discovery" ? [...new Set(brandBlindViolations(p.text, project).map((v) => v.matched))] : [] }))
@@ -144,7 +145,10 @@ export async function savePromptSet(db: Db, project: ProjectForPrompts, prompts:
   const created = iso(now);
   const stmts: Array<[string, ...unknown[]]> = [
     ["UPDATE geo_prompt_sets SET active = 0 WHERE workspace_id = ? AND project_id = ?", project.workspace_id, project.id],
-    ["INSERT INTO geo_prompt_sets (id, workspace_id, project_id, version, active, created_at) VALUES (?,?,?,?,1,?)", setId, project.workspace_id, project.id, version, created],
+    [
+      "INSERT INTO geo_prompt_sets (id, workspace_id, project_id, version, active, created_at, label) VALUES (?,?,?,?,1,?,?)",
+      setId, project.workspace_id, project.id, version, created, opts.label ?? null,
+    ],
   ];
   prompts.forEach((p, position) => {
     stmts.push([

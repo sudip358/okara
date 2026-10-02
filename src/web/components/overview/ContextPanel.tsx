@@ -96,6 +96,8 @@ export function ContextPanel({ project }: { project: Project }) {
           )}
         </div>
 
+        <ImportedDocs docs={(docs.data ?? []).filter((d) => d.kind === "imported")} projectId={project.id} />
+
         <div>
           <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
             Competitors ({project.competitors.length})
@@ -188,5 +190,31 @@ function ContextEditor({ projectId, kind, doc, onSaved }: { projectId: string; k
         </Button>
       </div>
     </form>
+  );
+}
+
+/** Imported research (Import page): read-only, plain text, labelled with source and import date in its first lines. */
+export function ImportedDocs({ docs, projectId }: { docs: ContextDocument[]; projectId: string }) {
+  if (docs.length === 0) return null;
+  return (
+    <div data-testid="imported-docs">
+      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Imported research ({docs.length})</h3>
+      <ul className="space-y-2">
+        {docs.map((d) => (
+          <li key={d.id} className="rounded-lg border border-zinc-200 p-2.5 dark:border-zinc-800">
+            <details>
+              <summary className="cursor-pointer text-sm font-medium">
+                {d.title ?? "Imported document"} <span className="text-xs font-normal text-zinc-600 dark:text-zinc-400">v{d.version} · {formatDateTime(d.createdAt)}</span>
+              </summary>
+              <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words text-xs">{d.content.slice(0, 20_000)}</pre>
+              {d.content.length > 20_000 && <p className="text-xs text-zinc-600 dark:text-zinc-400">Showing the first 20,000 characters.</p>}
+            </details>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-1 text-xs">
+        <Link to={projectPath(projectId, "import")}>Manage imports</Link>
+      </p>
+    </div>
   );
 }

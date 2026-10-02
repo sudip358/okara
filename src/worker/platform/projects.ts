@@ -292,6 +292,8 @@ export function initialContextDocs(input: ProjectInput): Array<{ kind: ContextKi
 export interface ContextDocRow {
   id: string;
   kind: ContextKind;
+  doc_key?: string;
+  title?: string | null;
   version: number;
   content: string;
   facts_json: string;
@@ -312,28 +314,31 @@ export function contextInsertStatement(
   return [
     `INSERT INTO context_documents (id, workspace_id, project_id, kind, version, content, facts_json, created_by, created_at)
      SELECT ?, ?, ?, ?, COALESCE(MAX(version), 0) + 1, ?, ?, ?, ?
-       FROM context_documents WHERE workspace_id = ? AND project_id = ? AND kind = ?`,
+       FROM context_documents WHERE workspace_id = ? AND project_id = ? AND kind = ? AND doc_key = ''`,
     id, workspaceId, projectId, kind, content, JSON.stringify(facts), userId, now, workspaceId, projectId, kind,
   ];
 }
 
 export async function listLatestContext(db: Db, workspaceId: string, projectId: string): Promise<ContextDocument[]> {
   const rows = await db.all<ContextDocRow>(
-    `SELECT d.id, d.kind, d.version, d.content, d.facts_json, d.created_at FROM context_documents d
+    `SELECT d.id, d.kind, d.doc_key, d.title, d.version, d.content, d.facts_json, d.created_at FROM context_documents d
       WHERE d.workspace_id = ? AND d.project_id = ?
         AND d.version = (SELECT MAX(d2.version) FROM context_documents d2
-                          WHERE d2.workspace_id = d.workspace_id AND d2.project_id = d.project_id AND d2.kind = d.kind)`,
+                          WHERE d2.workspace_id = d.workspace_id AND d2.project_id = d.project_id AND d2.kind = d.kind
+                            AND d2.doc_key = d.doc_key)`,
     workspaceId,
     projectId,
   );
   const usage = await contextUsage(db, workspaceId, projectId, rows.map((r) => r.id));
   const order = new Map(CONTEXT_KINDS.map((k, i) => [k, i]));
-  return rows.map((r) => toContextDocument(r, usage.get(r.id) ?? 0)).sort((a, b) => (order.get(a.kind) ?? 9) - (order.get(b.kind) ?? 9));
+  return rows
+    .map((r) => toContextDocument(r, usage.get(r.id) ?? 0))
+    .sort((a, b) => (order.get(a.kind) ?? 9) - (order.get(b.kind) ?? 9) || (a.title ?? "").localeCompare(b.title ?? ""));
 }
 
 export async function getContextDoc(db: Db, workspaceId: string, projectId: string, id: string): Promise<ContextDocument | null> {
   const row = await db.first<ContextDocRow>(
-    "SELECT id, kind, version, content, facts_json, created_at FROM context_documents WHERE workspace_id = ? AND project_id = ? AND id = ?",
+    "SELECT id, kind, doc_key, title, version, content, facts_json, created_at FROM context_documents WHERE workspace_id = ? AND project_id = ? AND id = ?",
     workspaceId,
     projectId,
     id,
@@ -348,6 +353,7 @@ function toContextDocument(r: ContextDocRow, used: number): ContextDocument {
   return {
     id: r.id,
     kind: r.kind,
+    ...(r.kind === "imported" ? { docKey: r.doc_key ?? "", title: r.title ?? null } : {}),
     version: r.version,
     content: r.content,
     facts,

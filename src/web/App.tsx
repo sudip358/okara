@@ -52,6 +52,7 @@ const router = createBrowserRouter([
               { path: "pages/:pageId/checklist", lazy: page(() => import("./pages/checklists/PageChecklistPage"), "PageChecklistPage") },
               { path: "runs", lazy: page(() => import("./pages/RunHistory"), "RunHistoryPage") },
               { path: "runs/:runId", lazy: page(() => import("./pages/RunDetail"), "RunDetailPage") },
+              { path: "import", lazy: page(() => import("./pages/import/ImportPage"), "ImportPage") },
               { path: "integrations", lazy: page(() => import("./pages/Integrations"), "IntegrationsPage") },
               { path: "usage", lazy: page(() => import("./pages/Usage"), "UsagePage") },
               { path: "settings", lazy: page(() => import("./pages/Settings"), "SettingsPage") },

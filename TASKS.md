@@ -17,6 +17,7 @@ Spec: `docs/build-kit.md`. API contract: `docs/api.md` + `src/shared/types.ts`. 
 | web-shell | src/web/{main,App}.tsx, src/web/lib/**, src/web/components/**, pages: SignIn, Workspace/Projects, Onboarding, Overview, Integrations (+ pages/integrations/**: writer card custom provider flow), Usage, Settings, RunHistory | — |
 | web-features | src/web/pages/{seo,geo,recommendations}/** | SEO audit, recommendations list/detail, GEO prompts, GEO results, observation drawer, competitors |
 | competitor-data | providers/dataforseo.ts, competitors/dataforseo.ts, platform/dataforseo-credentials.ts, routes/competitor-data.ts, src/shared/competitor-data.ts, migrations/0014_dataforseo_competitors.sql, web pages/geo/{CompetitorDataPanel.tsx,competitor-data-lib.ts}, pages/integrations/DataForSeo.tsx, tests/dataforseo-*.test.ts, tests/fixtures/dataforseo.ts | /workspaces/:wid/dataforseo/*, /projects/:pid/competitors/dataforseo/* (DataForSEO Labs competitor data, [A26]) |
+| import | src/shared/import.ts, src/worker/imports/**, src/worker/routes/imports.ts, migrations/0015_sheet_imports.sql, src/web/pages/import/**, tests/import-*.test.ts, tests/fixtures/sheets.ts | /projects/:pid/import/* (Google Sheets / CSV import, live sync, [A28]) |
 | ask-okara | src/worker/chat/**, src/worker/routes/chat.ts, src/web/components/chat/**, migrations/0013_chat.sql, tests/chat-*.test.ts | /projects/:pid/chat/* |
 
 ## Milestones

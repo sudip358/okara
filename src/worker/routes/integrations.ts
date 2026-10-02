@@ -17,6 +17,7 @@ import { disconnectGsc, gscOAuthConfigured, handleGscCallback, integrationsPath,
 import { outbound, parseBody, siteHost } from "../platform/projects";
 import { gscEntryVerifiesHost, markVerified, verificationStatus } from "../platform/verification";
 import { listProviderStatuses } from "./credentials";
+import { handleSheetsCallback, oauthStatePurpose } from "../imports/sheets";
 
 export const integrationRoutes = new Hono<AppEnv>();
 
@@ -64,6 +65,14 @@ integrationRoutes.get("/projects/:pid/gsc/connect", async (c) => {
 });
 
 integrationRoutes.get("/gsc/callback", async (c) => {
+  // The registered redirect URI is shared with the optional Google Sheets consent (Import page): dispatch on the
+  // pending state's purpose. Unknown states go to the Search Console handler, which rejects them.
+  const query = new URL(c.req.url).searchParams;
+  if ((await oauthStatePurpose(c.get("db"), query.get("state"))) === "sheets") {
+    const r = await handleSheetsCallback(c.env, c.get("db"), { query, user: c.get("user"), sessionId: c.get("session")?.id ?? null, now: c.get("now") });
+    c.header("Cache-Control", "no-store");
+    return c.redirect(r.redirectTo, 302);
+  }
   const result = await handleGscCallback(c.env, c.get("db"), {
     query: new URL(c.req.url).searchParams,
     user: c.get("user"),

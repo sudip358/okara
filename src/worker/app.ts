@@ -31,6 +31,7 @@ import { activityRoutes } from "./routes/activity";
 import { liveRoutes } from "./routes/live";
 import { chatRoutes } from "./routes/chat";
 import { competitorDataRoutes } from "./routes/competitor-data";
+import { importRoutes } from "./routes/imports";
 
 export interface AppVariables {
   db: Db;
@@ -78,6 +79,7 @@ export function createApp() {
   app.route("/", liveRoutes);
   app.route("/", chatRoutes);
   app.route("/", competitorDataRoutes);
+  app.route("/", importRoutes);
 
   app.notFound((c) => c.json({ error: { code: "not_found", message: "Not found." } }, 404));
   app.onError((err, c) => {

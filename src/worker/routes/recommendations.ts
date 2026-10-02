@@ -32,6 +32,7 @@ import { capabilityPresence, writerStatusForWorkspace, type RunRow } from "../ru
 import { toRunSummary } from "../runs/runs-service";
 import { mapDecision, mapEvent } from "./runs";
 import { anyGeoEngineConfigured } from "../geo/engines";
+import { failingSyncs } from "../imports/service";
 
 export const ZERO_STATE_MESSAGE = "No new verified opportunities today.";
 export const IMPLEMENTED_NOTE = "Marked implemented by a reviewer. The site change is not verified by this app.";
@@ -465,6 +466,11 @@ recommendationRoutes.get("/projects/:pid/attention", async (c) => {
     project.workspace_id,
     project.id,
   );
-  const feed: AttentionFeed = { agents, recentEvents: events.map(mapEvent) };
+  const syncs = await failingSyncs(db, project);
+  const feed: AttentionFeed = {
+    agents,
+    recentEvents: events.map(mapEvent),
+    importSyncs: syncs.map((s) => ({ id: s.id, spreadsheetTitle: s.spreadsheetTitle, tab: s.tab, destination: s.destination, code: s.lastErrorCode, message: s.lastError, lastRunAt: s.lastRunAt })),
+  };
   return c.json({ data: feed });
 });

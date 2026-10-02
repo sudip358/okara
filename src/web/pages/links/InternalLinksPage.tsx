@@ -11,6 +11,7 @@ import { api, ApiError, errorMessage } from "@web/lib/api";
 import { formatDateTime, formatNumber } from "@web/lib/format";
 import { useApi, useMutation } from "@web/lib/hooks";
 import { projectPath } from "@web/lib/project-context";
+import { PlacedLinksPanel } from "@web/pages/import/ImportedPanels";
 import {
   Badge,
   Button,
@@ -117,6 +118,7 @@ export function InternalLinksPage() {
       ) : r ? (
         <ReportView report={r} projectId={projectId} base={base} onChange={replaceSuggestion} />
       ) : null}
+      <PlacedLinksPanel projectId={projectId} crawlCounts={r && r.generatedAt ? { pagesAnalysed: r.pagesAnalysed, orphanPages: r.orphanPages.length } : null} />
     </div>
   );
 }

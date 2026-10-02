@@ -12,6 +12,7 @@ import { Badge, Card, EmptyState, ErrorState, LoadingState, PageHeader, TBody, T
 import { ExternalUrl } from "@web/components/ExternalUrl";
 import { ShareOfVoiceTable } from "./components/ShareOfVoiceTable";
 import { CompetitorDataSection } from "./CompetitorDataPanel";
+import { SheetCompetitorMetrics } from "@web/pages/import/ImportedPanels";
 import { sourceTypeLabel } from "./lib";
 
 const GSC_MATCH: Record<SearchQuerySummary["gscMatch"], { label: string; tone: BadgeTone; hint: string }> = {
@@ -61,6 +62,7 @@ export function CompetitorsPage() {
       </Card>
 
       <CompetitorDataSection projectId={projectId} />
+      <SheetCompetitorMetrics projectId={projectId} />
 
       <Card
         title="Cited instead"

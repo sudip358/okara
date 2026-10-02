@@ -4,7 +4,9 @@ import type { AttentionFeed as Feed } from "@shared/types";
 import { agentLabel, formatRelative } from "@web/lib/format";
 import { projectPath } from "@web/lib/project-context";
 import { RunNowButton } from "../RunNowButton";
-import { StateBadge, StatusBadge } from "../ui";
+import { Badge, StateBadge, StatusBadge } from "../ui";
+import { DESTINATION_LABELS, type ImportDestination } from "@shared/import";
+import { syncErrorLabel } from "@web/pages/import/lib";
 
 export function AttentionFeed({ projectId, feed, onRunStarted }: { projectId: string; feed: Feed; onRunStarted: () => void }) {
   return (
@@ -49,6 +51,22 @@ export function AttentionFeed({ projectId, feed, onRunStarted }: { projectId: st
               onStarted={onRunStarted}
               disabled={a.lastRun?.status === "running" || a.lastRun?.status === "pending"}
             />
+          </li>
+        ))}
+        {(feed.importSyncs ?? []).map((s) => (
+          <li key={s.id} className="space-y-1 px-4 py-3" data-testid="attention-import-sync">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-semibold">Sheet sync failed</span>
+              <Badge tone="danger">{syncErrorLabel(s.code)}</Badge>
+            </div>
+            <p className="text-sm text-zinc-700 dark:text-zinc-300">
+              {s.spreadsheetTitle} · tab {s.tab} → {DESTINATION_LABELS[s.destination as ImportDestination] ?? s.destination}
+              {s.lastRunAt ? ` · ${formatRelative(s.lastRunAt)}` : ""}
+            </p>
+            {s.message && <p className="text-xs text-zinc-600 dark:text-zinc-400">{s.message}</p>}
+            <Link className="text-sm" to={projectPath(projectId, "import")}>
+              Fix on the Import page
+            </Link>
           </li>
         ))}
       </ul>

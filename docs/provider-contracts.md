@@ -249,6 +249,23 @@ Implemented in `src/worker/platform/gsc-client.ts` and `gsc-oauth.ts` (platform-
 Pagination does not guarantee complete query data; property totals come from a separate aggregate
 request and are never computed by summing slices.
 
+## Google Sheets API v4 — Import (`google_sheets`, implemented)
+
+Implemented in `src/worker/imports/sheets.ts` (client + separate OAuth consent), used by `src/worker/imports/*` and
+`src/worker/routes/imports.ts`. Read 2026-10-02.
+
+| Item | Contract |
+|---|---|
+| Docs | https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets/get, https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets.values/get, https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets.values (ValueRange), https://developers.google.com/workspace/sheets/api/scopes |
+| Tabs | `GET https://sheets.googleapis.com/v4/spreadsheets/{spreadsheetId}?fields=spreadsheetId,properties.title,sheets.properties(sheetId,title,index,sheetType,gridProperties(rowCount,columnCount))` → `Spreadsheet { spreadsheetId, properties{title}, sheets[{properties{sheetId, title, index, sheetType, gridProperties{rowCount, columnCount}}}] }` (a `fields` mask is documented; only `GRID` sheets are offered) |
+| Values | `GET https://sheets.googleapis.com/v4/spreadsheets/{spreadsheetId}/values/{range}?majorDimension=ROWS&valueRenderOption=FORMATTED_VALUE` → `ValueRange { range, majorDimension, values: string[][] }`. "For output, empty trailing rows and columns will not be included", so rows are ragged and are padded to the header width. Range: `'<tab>'!A1:CV<n+1>` (tab quoted, `'` doubled; at most 100 columns; n = 20 preview / 5,000 rows for prompts, competitors, links / 20,000 for documents) |
+| Auth | `Authorization: Bearer <access token>` from the stored refresh token (`POST https://oauth2.googleapis.com/token`, `grant_type=refresh_token`); one retry with a fresh token on 401 |
+| Scope | `https://www.googleapis.com/auth/spreadsheets.readonly` only ("See all your Google Sheets spreadsheets", classified **Sensitive**: app verification needed beyond 100 users / to drop the unverified-app warning) |
+| OAuth | `https://accounts.google.com/o/oauth2/v2/auth` with `scope=spreadsheets.readonly`, `access_type=offline`, `prompt=consent`, `include_granted_scopes=false`, PKCE S256, single-use `state` (oauth_states purpose `sheets`); redirect URI is the existing `<APP_ORIGIN>/api/gsc/callback` (the callback dispatches on the state's purpose). Token row: `oauth_connections.provider = 'google_sheets'` (separate from `google_gsc`), refresh token AES-GCM encrypted (AAD `oauth_connections:<projectId>:google_sheets`). A token response whose `scope` lacks spreadsheets.readonly is refused (`insufficient_scope`) |
+| Errors | `invalid_grant` on refresh → `token_expired` (connection marked error; in Testing mode Google expires refresh tokens after 7 days); 404 → `not_found`; 403 → `forbidden` (sheet not shared with the account, or Sheets API not enabled for the Cloud project); 400 "Unable to parse range" → `tab_missing`; 429 → rate limited |
+| Limits | Response body read with a 24 MB cap; 25 s timeout per call; allowlisted host `sheets.googleapis.com` (runs/runtime.ts `API_HOST_ALLOWLIST`), redirects never followed. The Sheets API is free (quota-limited); calls are not reserved against the dollar budget |
+| Untrusted data | Cell text is stored and shown as plain text only (control characters removed, clipped), never interpreted as instructions; imported values are labelled "from your sheet, not measured by Okara" |
+
 ## OpenAI Responses API web search — GEO (`openai_geo`, implemented)
 
 Implemented in `src/worker/providers/openai-geo.ts` (grounding mode `openai_web_search`; cohort

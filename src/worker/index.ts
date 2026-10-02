@@ -3,6 +3,7 @@ import type { Env } from "./env";
 import { createApp } from "./app";
 import { dispatchDueRuns, sweepOrphans } from "./runs/scheduler";
 import { processQueuedCompetitorFetches } from "./competitors/dataforseo";
+import { processDueImportSyncs } from "./imports/sync";
 
 export { AgentRunWorkflow } from "./runs/workflow";
 
@@ -29,6 +30,12 @@ export default {
     ctx.waitUntil(
       processQueuedCompetitorFetches(env, now).catch((e) => {
         console.error("competitor data queue failed", e instanceof Error ? e.message.slice(0, 200) : "unknown");
+      }),
+    );
+    // Sheet-linked imports kept in sync (Import page "Keep in sync"): due tabs are re-read with the stored token.
+    ctx.waitUntil(
+      processDueImportSyncs(env, now).catch((e) => {
+        console.error("import sync tick failed", e instanceof Error ? e.message.slice(0, 200) : "unknown");
       }),
     );
   },

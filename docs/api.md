@@ -391,6 +391,57 @@ docs/provider-contracts.md "DataForSEO Labs". Types: `src/shared/competitor-data
   Console support. TODO (needs an owner decision): an `external_estimate` evidence source plus a candidate kind
   that pairs a gap keyword with a crawled page, labelled as a third-party estimate.
 
+## Import (Google Sheets / CSV) (amends docs/build-kit.md [A28], 2026-10-02)
+
+Types: `src/shared/import.ts`. Code: `src/worker/imports/{sheets,source,destinations,service,sync}.ts`,
+`src/worker/routes/imports.ts`, web `src/web/pages/import/*`. Migration `0015_sheet_imports.sql`. Provider contract:
+docs/provider-contracts.md "Google Sheets API v4".
+
+| Method | Path | Who | Body → Response |
+|---|---|---|---|
+| GET | `/projects/:pid/import` | member | `ImportOverview` {canManage, sheets: SheetsConnectionStatus, history (30), syncs, documents, limits} |
+| GET | `/projects/:pid/import/links` | member | `ImportedLinksReport` (links placed per sheet + latest-crawl check, imported internal-link reference tables) |
+| GET | `/projects/:pid/import/records/competitors` | member | `ImportedCompetitorRow[]` (sheet metrics per domain, status tracked / not_tracked_limit / removed_from_sheet) |
+| GET | `/projects/:pid/import/records/geo_prompts` | member | reference notes per imported question |
+| GET | `/projects/:pid/import/sheets/connect` | owner | 302 to Google consent (`spreadsheets.readonly` only); callback is `GET /gsc/callback` (dispatch by state purpose) → `/projects/:pid/import?sheets=connected` or `?sheetsError=<code>` |
+| DELETE | `/projects/:pid/import/sheets` | owner | `{ok}`; deletes the stored Sheets token (no remote revoke) |
+| POST | `/projects/:pid/import/sheets/tabs` | owner | `{spreadsheet: url or id}` → `SheetTabsResult` {spreadsheetId, title, tabs[{sheetId,title,index,rowCount,columnCount}]} |
+| POST | `/projects/:pid/import/sheets/preview` | owner | `{spreadsheetId, tabs: string[≤10]}` → `TabPreview[]` {tab, headers, rows (≤20), suggestion {destination, mapping, reason}} |
+| POST | `/projects/:pid/import/dry-run` | owner | `{source, destination, mapping, options}` → `ImportPlan` (no writes) |
+| POST | `/projects/:pid/import/commit` | owner | same + `keepInSync?: {frequencyHours: 6/12/24}` → 201 `{plan, import, changes, sync}`; 200 with `import: null` when nothing changed |
+| POST | `/projects/:pid/import/:importId/undo` | owner | `ImportRecordSummary` (status undone); 409 unless it is the latest completed import of its destination |
+| PATCH | `/projects/:pid/import/syncs/:syncId` | owner | `{enabled?, frequencyHours?}` → `ImportSyncSummary` |
+| POST | `/projects/:pid/import/syncs/:syncId/run` | owner | Sync now → `{outcome {status ok/error/busy, code, message, warning, changes, import}, sync}` (6 per sync per hour) |
+| DELETE | `/projects/:pid/import/syncs/:syncId` | owner | `{ok}`; stops syncing, imported data stays |
+
+- **Source:** `{kind:"csv", name, text}` (≤ 10 MB of text, ≤ 100,000 rows, ≤ 100 columns, cells clipped at 2,000
+  characters; comma/tab/semicolon detected; BOMs removed; the browser decodes UTF-8/UTF-16 files) or
+  `{kind:"sheets", spreadsheetId, tab}` (needs the Sheets connection; 412 `setup_required` otherwise; rows read: 5,000
+  for prompts/competitors/links, 20,000 for documents, cap stated in the plan).
+- **Destinations and mappings** (column names from the header row; unknown column → 400 `header_changed`):
+  `geo_prompts {question, done?, notes?[]}` + options `{approvePrompts?, addCompetitors?[]}`;
+  `competitors {domain, notes?, assignedTo?, metrics?[]}`; `implemented_links {source, target, anchor?, date?,
+  method?, hub?, status?}` (absolute URLs or `/paths` on the verified host); `context_doc` / `reference
+  {columns?[], sortBy?, title?}`. `options.excludeKeys[]`: record keys unchecked in the dry run (also excluded on
+  later syncs).
+- **Auto-mapping** (`suggestDestination`): `Question` → GEO prompts; `Competing Domains` → competitors;
+  `Source … URL` + `Target URL` → placed links; tab names like Titles/H1/Meta/30x/40x/Indexed and internal-link
+  or orphan tabs → reference; anything else → imported research document.
+- **ImportPlan:** `counts {add, update, unchanged, skip, remove, not_added}`, `summary[]` (e.g. "42 prompts new, 3
+  skipped" + "3 skipped: duplicate question in the sheet"), `notes[]`, `items[]` (≤ 300, changes first, each with
+  row number and reason), `suggestedCompetitors` for prompts.
+- **Idempotency and provenance:** `import_records` keeps one row per (project, destination, normalized key) with the
+  sheet's values; `imports` one row per applied import (manual or sync) with counts and a change log
+  (`+ lumens.com`, `− 1800lighting.com`); `import_changes` the previous state of each record changed (undo).
+- **Sync:** `import_syncs` (destinations competitors, geo_prompts, implemented_links; Sheets source only). The cron
+  (every 15 min) runs up to 3 due syncs per tick with a 10-minute lease. Error codes: `token_expired`,
+  `not_connected`, `tab_missing`, `header_changed`, `forbidden`, `not_found`, `api_error`, `apply_error`; failing
+  syncs appear in `GET /projects/:pid/attention` as `importSyncs[]` (additive field) and on the Import page.
+- **Other surfaces:** `GET /projects/:pid/context` now also returns `kind: "imported"` documents (`docKey`,
+  `title`); `GeoPromptSet.label`; the link suggester marks pairs placed per the sheet `implemented`; Ask Okara has an
+  `imported_research` read tool and a `navigate` view `import`; the project export includes the four import tables.
+- **Limits:** dry run 30/min, commit and undo 10/min, Sheets reads 30/min per user and project.
+
 ## Sign-in errors
 
 `GET /auth/login` and `GET /auth/callback` report failures by redirecting to `/?authError=<code>`. The sign-in

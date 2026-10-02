@@ -28,7 +28,8 @@ export type EvidenceSource = "gsc" | "crawl" | "context_doc" | "geo_observation"
 export type SourceType = "brand_page" | "listicle_roundup" | "review_site" | "forum_ugc" | "publisher" | "marketplace" | "other";
 export type Sentiment = "positive" | "neutral" | "negative" | "mixed" | "unknown" | "not_applicable";
 export type RecommendationStatusInAnswer = "recommended" | "listed_neutral" | "mentioned_negatively" | "not_mentioned" | "unknown";
-export type ContextKind = "product" | "positioning" | "competitors" | "voice" | "pillars";
+/** "imported": Imported research (a sheet tab or CSV as a capped plain-text table; several per project, see docKey). */
+export type ContextKind = "product" | "positioning" | "competitors" | "voice" | "pillars" | "imported";
 export type ProviderId = "typesafe" | "gemini" | "perplexity" | "writer";
 export type CapabilityState = "ready" | "setup_required" | "disabled" | "error" | "demo";
 
@@ -103,6 +104,9 @@ export interface ContextFact {
 export interface ContextDocument {
   id: string;
   kind: ContextKind;
+  /** Imported research only: which sheet tab / CSV this document holds, and its display title. */
+  docKey?: string;
+  title?: string | null;
   version: number;
   content: string;
   facts: ContextFact[];
@@ -467,6 +471,8 @@ export interface GeoPromptSet {
   version: number;
   prompts: GeoPrompt[];
   createdAt: string;
+  /** e.g. "Imported from sheet 2026-10-02"; null for sets saved on the GEO prompts page. */
+  label?: string | null;
 }
 
 export interface GeoLane {
@@ -620,6 +626,8 @@ export interface AttentionFeed {
     zeroStateMessage: string | null;
   }>;
   recentEvents: RunEvent[];
+  /** Sheet-linked imports whose last sync failed (token expired, tab renamed/deleted, header changed...). */
+  importSyncs?: Array<{ id: string; spreadsheetTitle: string; tab: string; destination: string; code: string | null; message: string | null; lastRunAt: string | null }>;
 }
 
 // ------------------------------------------------------------------ SEO and GEO readiness checklists [A21]

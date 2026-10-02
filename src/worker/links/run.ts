@@ -52,6 +52,7 @@ import {
 import { decideLinks, LINK_BATCH_SIZE, type LinkJevOutcome, type LinkJevPair, type LinkJevRun } from "./jev";
 import { emptyReport, getLinkReport, linkSetup, type LinkRunSummary, type LinkSuggestionRow } from "./report";
 import { MAX_SENTENCES_PER_PAIR, rankSentences, type RankedSentence } from "./sentences";
+import { placedLinkPairs } from "../imports/service";
 import { brandStopwords, computeDefiningTerms, termStems, TERMS_VERSION, TOP_TERMS, type DefiningTerm } from "./terms";
 
 export const LINKS_METHOD_VERSION = `${TERMS_VERSION}+${CANDIDATES_VERSION}+${ANCHORS_VERSION}`;
@@ -361,6 +362,15 @@ export async function runLinkSuggestions(env: Env, db: Db, project: ProjectRow, 
 
     // ------------------------------------------------------------ carry over user_status
     const superseded = await carryOverUserStatus(db, project, rows);
+    // Links the owner already placed per their imported sheet (Import page): never re-suggested as open.
+    const placed = await placedLinkPairs(db, project);
+    if (placed.size) {
+      for (const r of rows) {
+        if (r.user_status !== "open" || !placed.has(`${urlKey(r.source_url)}>${urlKey(r.target_url)}`)) continue;
+        r.user_status = "implemented";
+        r.reasons_json = JSON.stringify(["Placed per your imported sheet (Import page); kept as implemented, not re-suggested.", ...parseJson<string[]>(r.reasons_json, [])]);
+      }
+    }
 
     const stmts: Array<[string, ...unknown[]]> = rows.map((r) => insertRow(r));
     for (let i = 0; i < stmts.length; i += 50) await db.batch(stmts.slice(i, i + 50));

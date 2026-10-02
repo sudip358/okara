@@ -55,6 +55,8 @@ export const API_HOST_ALLOWLIST: readonly string[] = [
   "searchconsole.googleapis.com",
   // DataForSEO (competitor data; HTTP Basic auth, see providers/dataforseo.ts). Not used by agent runs.
   "api.dataforseo.com",
+  // Google Sheets API v4 (Import page, read-only; spreadsheets.readonly token). Not used by agent runs.
+  "sheets.googleapis.com",
 ];
 
 export class OutboundBlockedError extends Error {}

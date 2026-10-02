@@ -49,6 +49,11 @@ export const EXPORT_TABLES = [
   "competitor_data_settings",
   "competitor_fetches",
   "competitor_snapshots",
+  // Import (Google Sheets / CSV), migration 0015: history, sheet reference records, provenance, sync settings.
+  "imports",
+  "import_records",
+  "import_changes",
+  "import_syncs",
 ] as const;
 
 /** Column names that must never appear in an export, whichever table they are in. */
