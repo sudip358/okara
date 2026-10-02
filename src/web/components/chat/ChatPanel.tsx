@@ -612,7 +612,7 @@ export function ChatPanel({ projectId, onClose, onMinimize }: { projectId: strin
             <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-800 dark:bg-amber-950/40">
               <p className="font-semibold">Setup required</p>
               <p className="mt-1 break-words text-zinc-700 dark:text-zinc-300">{chat.status.message ?? "No chat model is configured."}</p>
-              <p className="mt-1 text-zinc-700 dark:text-zinc-300">Ask Okara uses the workspace writer model (Anthropic or an OpenAI-compatible endpoint with tool calling).</p>
+              <p className="mt-1 text-zinc-700 dark:text-zinc-300">The writer model must support tool calling (Anthropic, or an OpenAI-compatible endpoint with tools).</p>
               <Link className={cx(buttonClass("secondary", "sm"), "mt-2")} to={projectPath(projectId, "integrations")} onClick={() => onMinimize()}>
                 Open Integrations
               </Link>
