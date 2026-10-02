@@ -423,7 +423,13 @@ export async function runLinkSuggestions(env: Env, db: Db, project: ProjectRow, 
     } else if (!isDemo && kept.length > 0) {
       notes.push("Jev (TypeSafe) is not configured for this workspace: suggestions are deterministic (best sentence and anchor by score) and marked review.");
     }
-    if (kept.length === 0) notes.push("No new internal-link opportunities found in the latest crawl: every candidate pair already links, or no page's sentences mention another page's defining terms.");
+    if (kept.length === 0) {
+      notes.push(
+        analysed.length < 2
+          ? `Not enough crawled pages to suggest links: the latest crawl has ${analysed.length} usable page${analysed.length === 1 ? "" : "s"} (${htmlPages.length} fetched with HTTP 2xx${skippedInCrawl ? `, ${skippedInCrawl} skipped by the crawl` : ""}); at least 2 are needed. Run the SEO agent again and check the crawl notes on the Runs page.`
+          : "No new internal-link opportunities found in the latest crawl: every candidate pair already links, or no page's sentences mention another page's defining terms.",
+      );
+    }
     notes.push(
       `Candidates (${CANDIDATES_VERSION}): up to ${MAX_TARGETS_PER_SOURCE} targets per source, scored by the overlap of the source's sentence terms with the target's defining terms (TF-IDF over the crawl: title x3, H1 x3, headings x2, sentences x1; top ${TOP_TERMS} terms; overlap weight at least ${MIN_BASE_SCORE}), x${ORPHAN_BOOST} for orphan targets, x${LOW_INLINK_BOOST} for targets with one inlink, and a GSC impressions boost of 1 + log10(1 + impressions)/10 (at most +${GSC_BOOST_CAP}). Up to ${MAX_SENTENCES_PER_PAIR} sentences and ${MAX_ANCHORS_PER_PAIR} anchor phrases per pair; generic anchors are never proposed. Pages that already link, self links, and non-2xx, noindex, redirecting, non-canonical, or off-host targets are excluded.`,
     );

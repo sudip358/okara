@@ -38,6 +38,18 @@ describe("links: run setup", () => {
   });
 });
 
+describe("links: crawl too small", () => {
+  it("says the crawl had too few usable pages instead of 'every pair already links'", async () => {
+    const { env, db, workspaceId, projectId } = await setup();
+    await seedLinkCrawl(db, workspaceId, projectId, STORE.slice(0, 1));
+    const r = await runLinkSuggestions(env, db, await projectRow(db, projectId), FIXED_NOW, { decisions: null });
+    expect(r.suggestions).toHaveLength(0);
+    const text = r.labels.concat((r as unknown as { notes?: string[] }).notes ?? []).join(" ") + JSON.stringify(r);
+    expect(text).toMatch(/Not enough crawled pages to suggest links/);
+    expect(text).not.toMatch(/every candidate pair already links/);
+  });
+});
+
 describe("links: deterministic run (no Jev)", () => {
   it("produces review suggestions from the latest crawl with exclusions, orphans, labels, and completeness", async () => {
     const { env, db, workspaceId, projectId } = await setup();
