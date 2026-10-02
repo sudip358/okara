@@ -27,6 +27,7 @@ import {
   initClock,
   itemsOf,
   laneRatio,
+  customLaneMeasured,
   laneStateAt,
   laneStrip,
   laneTotalsFrom,
@@ -281,6 +282,21 @@ describe("GEO selectors", () => {
     expect(laneRatio({ cited: 23, named: 10, missing: 65 }, false)).toEqual({ numerator: 23, denominator: 98, value: 23 / 98 });
     expect(laneRatio({ cited: 23, named: 10, missing: 65 }, true).numerator).toBe(33);
     expect(laneRatio({ cited: 0, named: 0, missing: 0 }, false).value).toBeNull();
+  });
+  it("gauge ratio: a custom lane with grounded answers uses citation rate over its grounded answers only", () => {
+    expect(laneRatio({ cited: 2, named: 1, missing: 3, grounded: 4 }, true)).toEqual({ numerator: 2, denominator: 4, value: 0.5 });
+    expect(laneRatio({ cited: 0, named: 1, missing: 3, grounded: 0 }, true)).toEqual({ numerator: 1, denominator: 4, value: 0.25 });
+    expect(customLaneMeasured({ grounded: 1 }, true)).toBe(true);
+    expect(customLaneMeasured({ grounded: 0 }, true)).toBe(false);
+    expect(customLaneMeasured({ grounded: 5 }, false)).toBe(false);
+    // Built-in lanes are unchanged by the grounded count.
+    expect(laneRatio({ cited: 2, named: 1, missing: 3, grounded: 4 }, false)).toEqual({ numerator: 2, denominator: 6, value: 2 / 6 });
+    const answers = [
+      answer({ id: "obs:g1", provider: "custom_geo:z", outcome: "cited", grounded: true }),
+      answer({ id: "obs:g2", provider: "custom_geo:z", outcome: "named", grounded: false }),
+      answer({ id: "obs:g3", provider: "custom_geo:z", outcome: "failed", grounded: true }),
+    ];
+    expect(laneTotalsFrom(answers, "custom_geo:z")).toMatchObject({ cited: 1, named: 1, failed: 1, grounded: 1 });
   });
   it("strip keeps the newest STRIP_MAX of the lane, newest at the right", () => {
     const s = laneStrip(answers, "gemini");

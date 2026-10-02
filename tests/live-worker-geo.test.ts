@@ -44,6 +44,8 @@ interface ObsSeed {
   self?: { mentioned: 0 | 1; cited: 0 | 1; rank?: number | null; sentiment?: string; status?: string; method?: string };
   citations?: Array<{ url: string; position: number | null; sourceType?: string; title?: string | null }>;
   queries?: string[];
+  /** default 1 */
+  grounded?: 0 | 1;
 }
 
 async function seedObs(db: Db, ws: string, pid: string, runId: string, o: ObsSeed) {
@@ -53,7 +55,7 @@ async function seedObs(db: Db, ws: string, pid: string, runId: string, o: ObsSee
   S.push(insertStatement("geo_observations", {
     id, workspace_id: ws, project_id: pid, run_id: runId, prompt_id: o.promptId ?? null, prompt_set_id: o.setId ?? null, prompt_text: o.text ?? "best oak table",
     prompt_type: "discovery", cohort_key: "c1", provider: o.provider ?? "gemini", model: "m", grounding_mode: "g", measurement_type: "api",
-    status: o.status ?? "ok", grounded: 1, request_id: req, usage_json: JSON.stringify(o.usage ?? {}), cost_usd: o.cost ?? null, cost_is_estimate: o.estimate ?? 1,
+    status: o.status ?? "ok", grounded: o.grounded ?? 1, request_id: req, usage_json: JSON.stringify(o.usage ?? {}), cost_usd: o.cost ?? null, cost_is_estimate: o.estimate ?? 1,
     error: null, created_at: o.at,
   }));
   S.push(insertStatement("provider_calls", {
@@ -264,10 +266,23 @@ describe("live GEO feed: totals and matching", () => {
     await seedObs(ctx.db, ctx.ws, ctx.pid, other, { provider: "openai_geo", at: t(7), self: { mentioned: 0, cited: 0 } }); // another run
     const r = await build(ctx, run);
     expect(r.totals!.lanes).toEqual([
-      { provider: "gemini", cited: 1, named: 1, missing: 1, failed: 1, pending: 0, cost: { value: 0.007, isEstimate: true }, citedInstead: { host: "b.example", sourceType: "other", answers: 2 } },
-      { provider: "perplexity", cited: 0, named: 0, missing: 1, failed: 0, pending: 1, cost: { value: null, isEstimate: true }, citedInstead: { host: "c.example", sourceType: "other", answers: 1 } },
+      { provider: "gemini", cited: 1, named: 1, missing: 1, grounded: 3, failed: 1, pending: 0, cost: { value: 0.007, isEstimate: true }, citedInstead: { host: "b.example", sourceType: "other", answers: 2 } },
+      { provider: "perplexity", cited: 0, named: 0, missing: 1, grounded: 1, failed: 0, pending: 1, cost: { value: null, isEstimate: true }, citedInstead: { host: "c.example", sourceType: "other", answers: 1 } },
     ]);
     expect(r.totals!.truncated).toBe(false);
+  });
+
+  it("custom GEO lanes: grounded counts only valid answers with provider-reported sources", async () => {
+    const ctx = await setup();
+    const run = await seedRun(ctx.db, ctx.ws, ctx.pid, "geo", "completed");
+    await seedObs(ctx.db, ctx.ws, ctx.pid, run, { provider: "custom_geo:a", at: t(1), grounded: 1, self: { mentioned: 1, cited: 1 }, citations: [{ url: `${ORIGIN}/p`, position: 1 }] });
+    await seedObs(ctx.db, ctx.ws, ctx.pid, run, { provider: "custom_geo:a", at: t(2), grounded: 0, self: { mentioned: 1, cited: 0 } });
+    await seedObs(ctx.db, ctx.ws, ctx.pid, run, { provider: "custom_geo:b", at: t(3), grounded: 0, self: { mentioned: 0, cited: 0 } });
+    const r = await build(ctx, run);
+    expect(r.totals!.lanes.map((l) => [l.provider, l.cited, l.named, l.missing, l.grounded])).toEqual([
+      ["custom_geo:a", 1, 1, 0, 1],
+      ["custom_geo:b", 0, 0, 1, 0],
+    ]);
   });
 
   it("matches our best page from the answer's engine search queries and Search Console, else title/H1 overlap", async () => {

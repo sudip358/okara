@@ -462,10 +462,23 @@ describe("GEO engine column and panels", () => {
     expect(text(done)).toContain("Not analysed");
     expect(text(done)).not.toContain("Analysing…");
     expect(done).toMatch(/aria-label="Gemini, Not analysed: /);
-    const c = text(render(h(lane.LaneColumn, { ...props, provider: "custom_geo:abc", lane: { ...gem, provider: "custom_geo:abc" }, board: undefined })));
-    expect(c).toContain("Mention rate (no web search)");
-    expect(c).toContain("mention rate only");
+    const noSources = { ...props.totals, provider: "custom_geo:abc" as const, grounded: 0 };
+    const c = text(render(h(lane.LaneColumn, { ...props, provider: "custom_geo:abc", lane: { ...gem, provider: "custom_geo:abc" }, board: undefined, totals: noSources })));
+    expect(c).toContain("Mention rate (no sources returned)");
+    expect(c).toContain("Custom · citations count only when the provider returns sources");
+    expect(c).toContain("no sources returned · mention rate only");
     expect(c).not.toContain("approved pages cited by");
+    expect(c).not.toContain("no web search proof");
+  });
+  it("a custom lane whose run returned provider-reported sources is measured on citation rate with B/C/D", () => {
+    const withSources = { ...props.totals, provider: "custom_geo:abc" as const, cited: 2, named: 1, missing: 3, grounded: 4 };
+    const c = text(render(h(lane.LaneColumn, { ...props, provider: "custom_geo:abc", lane: { ...gem, provider: "custom_geo:abc" }, board: undefined, totals: withSources })));
+    expect(c).toContain("Citation rate, this run (answers with sources)");
+    expect(c).toContain("provider-reported sources in 4 of 6 answers");
+    expect(c).toContain("2 of 4 answers");
+    expect(c).not.toContain("Mention rate (no sources returned)");
+    expect(c).toContain("approved pages cited by Custom engine");
+    expect(c).toContain("rewrite plans for pages Custom engine skips");
   });
   it("01 heatmap: letters with colour, real table with caption, pending only for pending pairs, hatched not run", () => {
     const idx = geoLib.answerIndex(feed.answers);

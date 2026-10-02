@@ -35,6 +35,7 @@ import {
   lanesApiSampledTip,
   mentionStatText,
 } from "@web/pages/geo/board/lib";
+import * as board_lib from "@web/pages/geo/board/lib";
 import { readyLane } from "./geo-batch-board-fixtures";
 import { activity, item } from "./activity-web-fixtures";
 
@@ -207,7 +208,11 @@ describe("custom GEO engine markup", () => {
     const t = text(renderToStaticMarkup(h(geo.CustomGeoEngines, { workspaceId: "ws1" })));
     expect(t).toContain("Custom GEO engines");
     expect(t).toContain(CUSTOM_GEO_NOTE);
-    expect(t).toContain("never citation rate");
+    expect(t).toContain("pick a model or provider that searches the web and returns its sources");
+    expect(t).toContain("OpenRouter model with web search");
+    expect(t).toContain("Perplexity-compatible API");
+    expect(t).toContain("Answers without sources count toward mention rate only");
+    expect(t).not.toContain("no web search proof");
     expect(t).toContain("At most 2 per workspace");
   });
 });
@@ -302,6 +307,7 @@ describe("AI engines board: a custom GEO lane", () => {
       expect(t).toContain(CUSTOM_CITATION_NOT_MEASURED);
       expect(t).toContain("Named in 3 of 4");
       expect(t).toContain(CUSTOM_GEO_NOTE);
+      expect(t).toContain("no sources returned · mention rate only");
       for (const banned of ["no valid answers", "skips you: your pages, measured", "Pages Custom engine cites", "Pages to rewrite for Custom engine", "Answers citing us", "Cited instead", "Our pages", "Cited pages", "Plans"]) {
         expect(t, banned).not.toContain(banned);
       }
@@ -321,16 +327,69 @@ describe("AI engines board: a custom GEO lane", () => {
     expect(text(builtIn)).toContain("Answers citing us");
   });
 
+  it("labels: lane note and per-cohort source wording", () => {
+    expect(CUSTOM_GEO_NOTE).toBe("Custom · citations count only when the provider returns sources");
+    expect(board_lib.CUSTOM_ENGINE_NOTE).toBe(CUSTOM_GEO_NOTE);
+    expect(board_lib.customSourcesLine({ counts: { valid: 4, grounded: 0, failed: 0, incomplete: 0 } })).toBe("no sources returned · mention rate only");
+    expect(board_lib.customSourcesLine({ counts: { valid: 4, grounded: 3, failed: 0, incomplete: 0 } })).toBe(
+      "provider-reported sources in 3 of 4 valid answers · 1 with no sources returned · mention rate only",
+    );
+    expect(board_lib.customSourcesLine({ counts: { valid: 2, grounded: 2, failed: 0, incomplete: 0 } })).toBe("provider-reported sources in 2 of 2 valid answers");
+    expect(board_lib.customLaneHasSources({ provider: "custom_geo:a", citationRate: { numerator: 0, denominator: 2, value: 0 } })).toBe(true);
+    expect(board_lib.customLaneHasSources({ provider: "custom_geo:a", citationRate: { numerator: 0, denominator: 0, value: null } })).toBe(false);
+    expect(board_lib.customLaneHasSources({ provider: "gemini", citationRate: { numerator: 1, denominator: 2, value: 0.5 } })).toBe(false);
+  });
+
+  const sourcedLane = () =>
+    ({
+      ...customLane(),
+      groundingMode: "custom (provider-reported sources)",
+      counts: { valid: 4, grounded: 2, failed: 0, incomplete: 0 },
+      citationRate: { numerator: 1, denominator: 2, value: 0.5 },
+      answersCitingUs: 1,
+      citedInstead: { host: "reviews.example", share: { numerator: 1, denominator: 1, value: 1 } },
+    }) as never;
+  for (const compact of [false, true]) {
+    it(`${compact ? "mobile" : "desktop"}: a custom lane with provider-reported sources shows the citation gauge and B-D like any engine`, () => {
+      const html = renderToStaticMarkup(
+        h(
+          MemoryRouter,
+          null,
+          h(board.EngineColumn, {
+            projectId: "proj1",
+            lane: sourcedLane(),
+            compact,
+            defaultOpen: true,
+            competitors: listState([]),
+            plans: listState([]),
+            skipInputs: { coverage: null, pages: null, loading: false, error: null, reload: () => {} },
+            onNeedSkipInputs: () => {},
+            onApproved: () => {},
+          }),
+        ),
+      );
+      const t = text(html);
+      expect(html).toContain('role="img"'); // citation gauge
+      expect(t).toContain("Citation rate (valid answers citing your site)");
+      expect(t).toContain("Answers citing us");
+      expect(t).toContain("provider-reported sources in 2 of 4 valid answers");
+      expect(t).toContain(CUSTOM_GEO_NOTE);
+      expect(t).not.toContain(CUSTOM_CITATION_NOT_MEASURED);
+      expect(t).not.toContain(CUSTOM_LANE_BODY_NOTE);
+      expect(t).toContain(compact ? "Cited pages" : "Pages Custom engine cites");
+    });
+  }
+
   it("helpers: tooltip per lane, mention stat, lane groups", () => {
     expect(apiSampledTipFor("custom_geo:x")).toBe(LABELS.customApiSampledTip);
     expect(apiSampledTipFor("gemini")).toBe(LABELS.apiSampledTip);
     expect(apiSampledTipFor(null)).toBe(LABELS.apiSampledTip);
-    expect(LABELS.customApiSampledTip).toContain("without web search");
+    expect(LABELS.customApiSampledTip).toContain("web sources count only when the provider returns them");
     expect(mentionStatText({ numerator: 3, denominator: 4, value: 0.75 })).toBe("Named in 3 of 4");
     expect(mentionStatText({ numerator: 0, denominator: 0, value: null })).toBe("Unavailable (no valid answers)");
     expect(lanesApiSampledTip([{ provider: "gemini" }])).toBe(LABELS.apiSampledTip);
     expect(lanesApiSampledTip([{ provider: "custom_geo:a" }])).toBe(LABELS.customApiSampledTip);
-    expect(lanesApiSampledTip([{ provider: "gemini" }, { provider: "custom_geo:a" }])).toContain("Custom engines: Answers from the custom provider's API, without web search");
+    expect(lanesApiSampledTip([{ provider: "gemini" }, { provider: "custom_geo:a" }])).toContain("Custom engines: Answers from the custom provider's API; no tool is requested");
   });
 });
 
