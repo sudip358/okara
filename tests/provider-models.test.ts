@@ -38,7 +38,16 @@ import { OutboundBlockedError, buildRunContext, capabilityPresence } from "@work
 import { createRun } from "@worker/runs/runs-service";
 import { runGeoBatch } from "@worker/geo/batch";
 import { citationRate, mentionRate, type MetricObservation } from "@worker/geo/metrics";
-import { CUSTOM_GEO_GROUNDING_MODE, CUSTOM_GEO_NOTE, customGeoLaneLabel, isCustomGeoId } from "@worker/geo/custom-lanes";
+import {
+  CUSTOM_GEO_GROUNDING_MODE,
+  CUSTOM_GEO_LANE_GROUNDING_MODE,
+  CUSTOM_GEO_NO_SOURCES_NOTE,
+  CUSTOM_GEO_NOTE,
+  CUSTOM_GEO_SOURCES_MODE,
+  CUSTOM_GEO_SOURCES_NOTE,
+  customGeoLaneLabel,
+  isCustomGeoId,
+} from "@worker/geo/custom-lanes";
 import { createCustomGeoProvider, parseCustomGeoResponse } from "@worker/providers/custom-geo";
 import { budgetFor, createBudget } from "@worker/runs/budget";
 import { buildRunActivity } from "@worker/runs/activity";
@@ -669,7 +678,7 @@ describe("custom GEO engines (role geo)", () => {
     expect(JSON.stringify(bodies)).not.toContain(CUSTOM_KEY);
   });
 
-  it("runs as an ungrounded lane: own host-only fetch, no tools, cost unknown, no usd reservation, mention rate only", async () => {
+  it("without sources it runs as an ungrounded lane: own host-only fetch, no tools, cost unknown, no usd reservation, mention rate only", async () => {
     const env = createTestEnv();
     const u = await seedUser(env);
     const pid = await seedProject(env, u.workspaceId);
@@ -692,7 +701,7 @@ describe("custom GEO engines (role geo)", () => {
     const runId = await geoRun(env, u.db, u.workspaceId, pid);
     const ctx = await buildRunContext(env, runId, { fetchImpl: fakeFetch() });
     const lane = ctx.geoProviders.find((p) => isCustomGeoId(p.id))!;
-    expect(lane).toMatchObject({ id: `custom_geo:${rowId}`, model: "meta/llama-3.3-70b", groundingMode: CUSTOM_GEO_GROUNDING_MODE });
+    expect(lane).toMatchObject({ id: `custom_geo:${rowId}`, model: "meta/llama-3.3-70b", groundingMode: CUSTOM_GEO_LANE_GROUNDING_MODE });
     expect(lane.label).toBe(customGeoLaneLabel("llm.example.com", "llm.example.com"));
     expect(lane.label).toContain(CUSTOM_GEO_NOTE);
     // The shared provider fetch does not admit the custom host (only the lane's own fetch does).
@@ -709,7 +718,7 @@ describe("custom GEO engines (role geo)", () => {
     expect(JSON.stringify(sent)).not.toContain("Residence Example"); // brand-blind
 
     const obs = await u.db.first<Record<string, unknown>>("SELECT * FROM geo_observations WHERE workspace_id = ? AND project_id = ?", u.workspaceId, pid);
-    expect(obs).toMatchObject({ provider: `custom_geo:${rowId}`, grounded: 0, grounding_mode: "none (custom provider)", cost_usd: null, status: "ok" });
+    expect(obs).toMatchObject({ provider: `custom_geo:${rowId}`, grounded: 0, grounding_mode: CUSTOM_GEO_GROUNDING_MODE, cost_usd: null, status: "ok" });
     expect(await u.db.all("SELECT * FROM geo_citations WHERE observation_id = ?", obs!.id)).toHaveLength(0);
     const self = await u.db.first<{ mentioned: number; cited: number }>("SELECT mentioned, cited FROM geo_brand_observations WHERE observation_id = ? AND is_self = 1", obs!.id);
     expect(self).toEqual({ mentioned: 1, cited: 0 });
@@ -737,7 +746,8 @@ describe("custom GEO engines (role geo)", () => {
     expect(bl.citationRate.value).toBeNull();
     expect(bl.mentionRate.numerator).toBe(1);
     expect(bl.costUsd).toEqual({ value: null, isEstimate: true });
-    expect(board.labels.join(" ")).toContain("count toward mention rate only");
+    expect(board.labels.join(" ")).toContain(CUSTOM_GEO_NO_SOURCES_NOTE);
+    expect(board.labels.join(" ")).not.toContain("no web search proof");
 
     // Activity window: the lane and its answer carry the label.
     const project = (await u.db.first<ProjectRow>("SELECT * FROM projects WHERE id = ?", pid))!;
@@ -745,7 +755,103 @@ describe("custom GEO engines (role geo)", () => {
     expect(activity.lanes.map((l) => [l.provider, l.label])).toEqual([[`custom_geo:${rowId}`, lane.label]]);
     const answer = activity.items.find((i) => i.kind === "engine_answer")!;
     expect(answer.title).toMatch(/^Custom engine answered/);
-    expect(answer.detail).toContain(CUSTOM_GEO_NOTE);
+    expect(answer.detail).toContain(CUSTOM_GEO_NO_SOURCES_NOTE);
+    expect(answer.detail).not.toContain(CUSTOM_GEO_SOURCES_NOTE);
+  });
+
+  it("with provider-reported sources (url_citation annotations) the answer is grounded, cited and counted in citation rate; proposals may use it", async () => {
+    const env = createTestEnv();
+    const u = await seedUser(env);
+    const pid = await seedProject(env, u.workspaceId);
+    const project = (await u.db.first<ProjectRow>("SELECT * FROM projects WHERE id = ?", pid))!;
+    const site = new URL(project.site_url).origin;
+    const geo = (await addGeo(env, u)).json!.data as CustomProvidersResponse;
+    const rowId = geo.providers[0]!.id;
+    await u.db.insert("geo_prompt_sets", { id: "gps_1", workspace_id: u.workspaceId, project_id: pid, version: 1, active: 1, created_at: FIXED_NOW.toISOString() });
+    await u.db.insert("geo_prompts", { id: "gp_1", workspace_id: u.workspaceId, project_id: pid, prompt_set_id: "gps_1", text: "Best brass cabinet knobs?", prompt_type: "discovery", stage: null, locale: "en-US", language: "en", approved: 1, position: 0 });
+    await u.db.insert("geo_prompts", { id: "gp_2", workspace_id: u.workspaceId, project_id: pid, prompt_set_id: "gps_1", text: "Brass pulls for a kitchen?", prompt_type: "discovery", stage: null, locale: "en-US", language: "en", approved: 1, position: 1 });
+    handler = (url, init) => {
+      if (url !== `${BASE}/chat/completions`) return new Response("unexpected", { status: 500 });
+      const body = JSON.parse(String(init?.body ?? "{}")) as { messages: Array<{ content: string }> };
+      const prompt = body.messages[body.messages.length - 1]!.content;
+      if (prompt.startsWith("Best brass")) {
+        return Response.json({
+          id: "chatcmpl-1",
+          model: "meta/llama-3.3-70b:online",
+          choices: [
+            {
+              message: {
+                content: "Residence Example sells solid brass knobs [1]; reviewers also like other shops [2].",
+                annotations: [
+                  { type: "url_citation", url_citation: { url: `${site}/knobs`, title: "Solid brass knobs", start_index: 0, end_index: 10 } },
+                  { type: "url_citation", url_citation: { url: "https://reviews.example/brass", title: "Best brass <b>knobs</b>", start_index: 11, end_index: 20 } },
+                  { type: "url_citation", url_citation: { url: "javascript:alert(1)", title: "x" } },
+                ],
+              },
+              finish_reason: "stop",
+            },
+          ],
+        });
+      }
+      return Response.json({ id: "chatcmpl-2", choices: [{ message: { content: "Residence Example has brass pulls." }, finish_reason: "stop" }] });
+    };
+    const runId = await geoRun(env, u.db, u.workspaceId, pid);
+    const ctx = await buildRunContext(env, runId, { fetchImpl: fakeFetch() });
+    const r = await runGeoBatch(ctx);
+    expect(r).toMatchObject({ observations: 2, failed: 0, grounded: 1 });
+    const sent = JSON.parse(seen.find((s) => s.url === `${BASE}/chat/completions`)!.body!);
+    expect(sent.tools).toBeUndefined(); // no tool or plugin is ever requested
+    expect(sent.plugins).toBeUndefined();
+
+    const rows = await u.db.all<{ id: string; prompt_id: string; grounded: number; grounding_mode: string; cohort_key: string }>(
+      "SELECT id, prompt_id, grounded, grounding_mode, cohort_key FROM geo_observations WHERE workspace_id = ? AND project_id = ? ORDER BY prompt_id",
+      u.workspaceId,
+      pid,
+    );
+    expect(rows.map((o) => [o.prompt_id, o.grounded, o.grounding_mode])).toEqual([
+      ["gp_1", 1, CUSTOM_GEO_SOURCES_MODE],
+      ["gp_2", 0, CUSTOM_GEO_GROUNDING_MODE],
+    ]);
+    // Answers with and without sources of one lane and model stay in ONE cohort (series).
+    expect(new Set(rows.map((o) => o.cohort_key)).size).toBe(1);
+    const cits = await u.db.all<{ url: string; title: string | null; position: number; brand_key: string | null }>(
+      "SELECT url, title, position, brand_key FROM geo_citations WHERE workspace_id = ? AND observation_id = ? ORDER BY position",
+      u.workspaceId,
+      rows[0]!.id,
+    );
+    expect(cits.map((c) => [c.url, c.position])).toEqual([
+      [`${site}/knobs`, 1],
+      ["https://reviews.example/brass", 2],
+    ]);
+    expect(cits[0]!.brand_key).toBe("self");
+    expect(cits[1]!.title).toBe("Best brass <b>knobs</b>"); // stored as plain text; rendered as text, never HTML
+    expect(await u.db.all("SELECT id FROM geo_citations WHERE observation_id = ?", rows[1]!.id)).toHaveLength(0);
+    const selfRows = await u.db.all<{ observation_id: string; mentioned: number; cited: number }>(
+      "SELECT observation_id, mentioned, cited FROM geo_brand_observations WHERE workspace_id = ? AND is_self = 1 ORDER BY observation_id",
+      u.workspaceId,
+    );
+    expect(selfRows.find((x) => x.observation_id === rows[0]!.id)).toMatchObject({ mentioned: 1, cited: 1 });
+    expect(selfRows.find((x) => x.observation_id === rows[1]!.id)).toMatchObject({ mentioned: 1, cited: 0 });
+
+    // Results: citation rate counts the grounded answer only; mention rate counts both.
+    const results = (await call(env, u, "GET", `/projects/${pid}/geo/results`)).json!.data as GeoResults;
+    const cl = results.lanes.find((l) => l.provider === `custom_geo:${rowId}`)!;
+    expect(cl.citationRate).toEqual({ numerator: 1, denominator: 1, value: 1 });
+    expect(cl.mentionRate).toEqual({ numerator: 2, denominator: 2, value: 1 });
+    expect(cl.counts).toMatchObject({ valid: 2, grounded: 1 });
+
+    // Board: the custom lane now has a measured citation rate (the web shows the gauge for it).
+    const board = (await call(env, u, "GET", `/projects/${pid}/geo/board`)).json!.data as EngineBoardResponse;
+    const bl = board.lanes.find((l) => l.provider === `custom_geo:${rowId}`)!;
+    expect(bl.citationRate).toEqual({ numerator: 1, denominator: 1, value: 1 });
+    expect(bl.answersCitingUs).toBe(1);
+    expect(board.labels.join(" ")).toContain(CUSTOM_GEO_SOURCES_NOTE);
+
+    // Activity: each answer says whether sources were returned.
+    const activity = (await buildRunActivity(u.db, project, runId, { now: FIXED_NOW }))!;
+    const details = activity.items.filter((i) => i.kind === "engine_answer").map((i) => i.detail ?? "");
+    expect(details.filter((d) => d.includes(CUSTOM_GEO_SOURCES_NOTE))).toHaveLength(1);
+    expect(details.filter((d) => d.includes(CUSTOM_GEO_NO_SOURCES_NOTE))).toHaveLength(1);
   });
 
   it("an unusable custom GEO engine is skipped with a run note, never faked", async () => {
@@ -871,8 +977,8 @@ describe("custom GEO adapter and metrics", () => {
   });
 });
 
-describe("custom GEO lanes never create GEO proposals", () => {
-  async function scenario(providers: [string, string]) {
+describe("GEO proposals: custom lanes only through answers with provider-reported sources", () => {
+  async function scenario(providers: [string, string], grounded = false) {
     const env = createTestEnv();
     const u = await seedUser(env);
     const pid = await seedProject(env, u.workspaceId);
@@ -883,7 +989,7 @@ describe("custom GEO lanes never create GEO proposals", () => {
     // Same displacing entity (Brass Co) in every answer: 2 prompts x 2 lanes meets the recurring minimum.
     for (const [i, prompt] of prompts.entries()) {
       for (const provider of providers) {
-        const id = await seedObservation(env, project, { ...fixture("competitor_only"), prompt, grounded: false, citations: [] }, { provider, model: "m-1", promptId: promptIds[i]!, createdAt: new Date(FIXED_NOW.getTime() - 3600_000).toISOString() });
+        const id = await seedObservation(env, project, grounded ? { ...fixture("competitor_only"), prompt, grounded: true } : { ...fixture("competitor_only"), prompt, grounded: false, citations: [] }, { provider, model: "m-1", promptId: promptIds[i]!, createdAt: new Date(FIXED_NOW.getTime() - 3600_000).toISOString() });
         await analyzeObservation(ctx, id);
       }
     }
@@ -893,7 +999,14 @@ describe("custom GEO lanes never create GEO proposals", () => {
     return { disps, summary, recs };
   }
 
-  it("built-in lanes with a recurring displacing entity propose; the same answers from two custom lanes do not", async () => {
+  it("custom lanes whose answers returned sources (grounded) are proposal inputs like any grounded answer", async () => {
+    const custom = await scenario(["custom_geo:cprov_a", "custom_geo:cprov_b"], true);
+    expect(custom.disps.length).toBeGreaterThanOrEqual(4);
+    expect(custom.summary.candidates).toBeGreaterThan(0);
+    expect(custom.recs.some((r) => r.issue_type === "geo_displacement")).toBe(true);
+  });
+
+  it("built-in lanes with a recurring displacing entity propose; the same ungrounded answers from two custom lanes do not", async () => {
     const builtIn = await scenario(["gemini", "perplexity"]);
     expect(builtIn.disps.length).toBeGreaterThanOrEqual(4);
     expect(builtIn.recs.some((r) => r.issue_type === "geo_displacement")).toBe(true);

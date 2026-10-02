@@ -285,8 +285,17 @@ The custom provider routes below also manage custom GEO engines: `POST /workspac
 - Runs: each valid GEO row becomes a lane with provider id `custom_geo:<id>` and its own guarded fetch that
   admits only its host (the shared `ctx.apiFetch` does not). The prompt (plus the neutral locale instruction)
   goes to `{base}/chat/completions` with `max_completion_tokens` 4096 and no tools; response body capped at
-  2 MiB; HTTP errors are stored by status only. Observations: `grounded = 0`, `grounding_mode`
-  `none (custom provider)`, no citations, no search queries (`searchQueriesExposed: false`), `cost_usd` NULL,
+  2 MiB; HTTP errors are stored by status only. No tool or plugin is ever requested (the owner picks a
+  model/provider that searches by itself, e.g. an OpenRouter `:online` model). Sources (amendment
+  2026-10-02): when the response returns at least one valid web source in a documented OpenAI-compatible
+  shape (`choices[0].message.annotations[]` with `type: "url_citation"` and `url_citation.{url, title}`, or
+  Perplexity-style top-level `citations: string[]` / `search_results: [{url, title}]`; see
+  docs/provider-contracts.md), the observation is `grounded = 1`, `grounding_mode`
+  `custom (provider-reported sources)`, with those sources as `geo_citations` (http/https only, no
+  credentials, at most 2,048 characters, no control characters; titles plain text at most 300 characters;
+  deduplicated by URL keeping the first position; at most 50; position = order of first appearance).
+  Otherwise: `grounded = 0`, `grounding_mode` `none (custom provider)`, no citations. Always: no search
+  queries (`searchQueriesExposed: false`), `cost_usd` NULL,
   `model` = the configured model id (never the host-reported one, so the cohort is fixed by the owner's
   selection), `request_id` only when at most 200 characters without control characters (else NULL).
   A row that cannot be used (base URL no longer valid, key not decryptable) is skipped with a `runtime` run
@@ -295,17 +304,31 @@ The custom provider routes below also manage custom GEO engines: `POST /workspac
   attributed to the tenant's own key (project limits only, never the `GLOBAL_*` operator caps); no
   `usd_micros` reservation (unknown price). `MAX_GEO_PROVIDERS` (daily `geo_prompts` ceiling) is 6: four
   built-in engines plus two custom.
-- Metrics: mention rate and tracked-brand share of voice only. `citationRate` counts grounded responses only
-  (`geo/metrics.ts`), so a custom lane's citation rate is always unavailable (denominator 0).
-- Labels: `GeoResults` lanes (label `<name> (<host>) · Custom · no web search proof · mention rate only`, plus
-  a disclosure in `labels`), `EngineBoardResponse` (custom lanes after the four built-in lanes, same label, a
-  disclosure in `labels`; a removed engine with history shows as setup_required "removed"), and the run
-  activity window (lane label, answer detail suffix, title "Custom engine answered ..."). On the board a
-  custom lane shows its prompt feed, mention rate and "Citation rate: not measured (no web search proof)"
-  only; it never requests `/geo/pages/:id/skip-factors` (which accepts the four built-in engines only) and
-  shows no cited pages or rewrite plans. Its "API-sampled" tooltip says "without web search".
-- Proposals: custom lanes are not inputs to GEO recommendations (`geo/proposals.ts`); their answers count
-  toward mention rate only.
+- Cohort: the cohort key of a custom lane uses the lane's fixed grounding mode
+  (`custom (sources only when the provider returns them)`), not each answer's, so answers with and without
+  sources from one model stay in one series; a model change still starts a new series. (Series recorded
+  before 2026-10-02 used `none (custom provider)` and stay separate.)
+- Metrics: `citationRate` counts grounded responses only (`geo/metrics.ts`), so a custom lane's citation rate
+  is measured over its answers with provider-reported sources, and is unavailable (denominator 0) when none
+  returned sources; mention rate and tracked-brand share of voice count every valid answer.
+- Labels: lane/engine note "Custom · citations count only when the provider returns sources"; per answer or
+  cohort "provider-reported sources" or "no sources returned · mention rate only". `GeoResults` lanes (label
+  `<name> (<host>) · Custom · citations count only when the provider returns sources`, plus a disclosure in
+  `labels`), `EngineBoardResponse` (custom lanes after the four built-in lanes, same label, a disclosure in
+  `labels`; a removed engine with history shows as setup_required "removed"), and the run activity window
+  (lane label; answer detail suffix "provider-reported sources" or "no sources returned · mention rate only";
+  title "Custom engine answered ..."). On the board a custom lane whose latest cohort has grounded answers
+  (`citationRate.denominator > 0`) shows the citation gauge, stats, cited pages, skip factors and rewrite plans
+  like any engine, plus "provider-reported sources in X of Y valid answers"; without any it shows its prompt
+  feed, mention rate and "Citation rate: not measured (no sources returned)" only, and never requests skip
+  factors. `/geo/pages/:id/skip-factors` accepts `engine=custom_geo:<id>`; rewrite plans carry the custom
+  lane id as `engine` when their competitor page was cited by it.
+- Live view: `LiveGeoLaneTotals.grounded` counts valid answers (cited + named + missing) that were grounded;
+  a custom lane's gauge is citation rate `cited / grounded` when `grounded > 0`, else mention rate.
+- Proposals: custom-lane answers with provider-reported sources (`grounded = 1`) are inputs to GEO
+  recommendations like any grounded answer; answers without sources are not (`geo/proposals.ts`).
+- Competitor pages: only stored citations can be approved, and a custom lane stores citations only for
+  grounded answers.
 
 ## Sign-in errors
 
@@ -355,7 +378,8 @@ probability [A11]; there is no aggregate "citability" score.
 
 ### GET /projects/:pid/geo/pages/:pageId/skip-factors?promptId=&engine= → `PageSkipFactors`
 - `pageId` must belong to the project (404 otherwise). `promptId` optional (must be an approved prompt of the
-  project); `engine` optional (`GeoEngineProviderId`).
+  project); `engine` optional (`GeoEngineProviderId`, or a custom GEO engine lane id `custom_geo:<id>`, at most
+  120 characters).
 - Factors come from the latest `page_snapshots` row: `answer_first` (heuristic: word index of the first
   sentence sharing the prompt's content tokens, "answer at word N"; without a prompt, first paragraph
   length), `faq_schema` (FAQPage JSON-LD types; measured), `author` (byline/author markup; measured),

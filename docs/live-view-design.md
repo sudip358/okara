@@ -408,8 +408,10 @@ what is configured. Model id, grounding, `state` and `stateDetail` come from the
   It never says "Asking and reading" unless the state is `asking`.
 - **Gauge:** the existing `CitationGauge`, fed with this run's lane `Ratio`: `cited / (cited + named +
   missing)` from `LiveGeoBoardResponse.totals.lanes[]`, with "23 of 98 answers" printed under it.
-  - Custom lanes have no web search, so the gauge shows the mention rate, `(cited + named) / valid`, under
-    "Mention rate (no web search)".
+  - Custom lanes (amended 2026-10-02): when this run has answers with provider-reported sources
+    (`totals.lanes[].grounded > 0`) the gauge is citation rate over those answers, `cited / grounded`, under
+    "Citation rate, this run (answers with sources)", and sections B-D show as for any engine; otherwise it
+    shows the mention rate, `(cited + named) / valid`, under "Mention rate (no sources returned)".
   - With no valid answers yet, the gauge is empty and reads "No answers yet".
 - **Stats row** (Ryze's five stats, honest):
 
@@ -662,7 +664,7 @@ Legend:
 |---|---|---|
 | 44 | Engine logo + "ChatGPT" | R: letter badge + lane label (`LANE_LABELS`, e.g. "OpenAI Responses API · web_search") |
 | 45 | "OpenAI · gpt-5.2 · web · Asking and reading" | D: board `model` (exact id) · `groundingMode` · `ActivityLane.state` ("Asking" only when asking) |
-| 46 | Citation-rate gauge "21%" | D: this run's `cited / (cited+named+missing)` from `totals.lanes[]`, with n of m; custom lanes use mention rate |
+| 46 | Citation-rate gauge "21%" | D: this run's `cited / (cited+named+missing)` from `totals.lanes[]`, with n of m; custom lanes use `cited / grounded` when the run returned sources, else mention rate |
 | 47 | Prompts / sec "82" | X: throughput is not a user metric. R: "Answered 41 of 60 planned" (`ActivityLane.done/planned`) + last latency |
 | 48 | Answers citing us | D: lane `cited` |
 | 49 | Answers skipping us | D: lane `missing`; plus "Naming us, not citing" = lane `named` |
