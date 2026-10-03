@@ -280,10 +280,46 @@ export function a1Range(tab: string, dataRows: number, columns = MAX_IMPORT_COLU
   return `'${tab.replace(/'/g, "''")}'!A1:${columnLetters(columns)}${dataRows + 1}`;
 }
 
+/** fields mask for spreadsheets.get: title and grid tabs only (no cell data). */
+export const SPREADSHEET_FIELDS = "spreadsheetId,properties.title,sheets.properties(sheetId,title,index,sheetType,gridProperties(rowCount,columnCount))";
+
+/** Native Spreadsheet resource -> tabs (grid sheets only), shared by the direct and the Maton transport. */
+export function parseSpreadsheet(raw: unknown, spreadsheetId: string): SheetTabsResult {
+  const json = raw as {
+    properties?: { title?: unknown };
+    sheets?: Array<{ properties?: { sheetId?: unknown; title?: unknown; index?: unknown; sheetType?: unknown; gridProperties?: { rowCount?: unknown; columnCount?: unknown } } }>;
+  } | null;
+  const tabs: SheetTab[] = [];
+  for (const s of Array.isArray(json?.sheets) ? json!.sheets : []) {
+    const p = s?.properties;
+    if (!p || typeof p.title !== "string" || typeof p.sheetId !== "number") continue;
+    // Only grid sheets hold cell values (object/chart sheets have no values).
+    if (p.sheetType !== undefined && p.sheetType !== "GRID") continue;
+    tabs.push({
+      sheetId: p.sheetId,
+      title: p.title.slice(0, 200),
+      index: typeof p.index === "number" ? p.index : tabs.length,
+      rowCount: typeof p.gridProperties?.rowCount === "number" ? p.gridProperties.rowCount : null,
+      columnCount: typeof p.gridProperties?.columnCount === "number" ? p.gridProperties.columnCount : null,
+    });
+  }
+  tabs.sort((a, b) => a.index - b.index);
+  const title = typeof json?.properties?.title === "string" ? json.properties.title.slice(0, 300) : spreadsheetId;
+  return { spreadsheetId, title, tabs };
+}
+
+/** Native ValueRange -> ragged rows of strings. */
+export function parseValueRange(raw: unknown): string[][] {
+  const values = (raw as { values?: unknown } | null)?.values;
+  return (Array.isArray(values) ? values : []).map((r: unknown) => (Array.isArray(r) ? r.map((c) => (c === null || c === undefined ? "" : String(c))) : []));
+}
+
 export interface SheetsClient {
   getSpreadsheet(spreadsheetId: string): Promise<SheetTabsResult>;
   /** Rows of a tab (header row + at most `dataRows` rows), each row a ragged array of strings. */
   getValues(spreadsheetId: string, tab: string, dataRows: number): Promise<string[][]>;
+  /** How the sheet is read (absent = the project's direct Google Sheets OAuth connection). */
+  transport?: { kind: "direct" | "maton"; label: string | null };
 }
 
 /** Null when Sheets is not connected for the project (or OAuth is not configured). */
@@ -388,36 +424,12 @@ export async function createSheetsClient(
 
   return {
     async getSpreadsheet(spreadsheetId) {
-      const fields = "spreadsheetId,properties.title,sheets.properties(sheetId,title,index,sheetType,gridProperties(rowCount,columnCount))";
-      const json = (await call(`${SHEETS_API_BASE}/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=${encodeURIComponent(fields)}`)) as {
-        spreadsheetId?: unknown;
-        properties?: { title?: unknown };
-        sheets?: Array<{ properties?: { sheetId?: unknown; title?: unknown; index?: unknown; sheetType?: unknown; gridProperties?: { rowCount?: unknown; columnCount?: unknown } } }>;
-      } | null;
-      const tabs: SheetTab[] = [];
-      for (const s of json?.sheets ?? []) {
-        const p = s.properties;
-        if (!p || typeof p.title !== "string" || typeof p.sheetId !== "number") continue;
-        // Only grid sheets hold cell values (object/chart sheets have no values).
-        if (p.sheetType !== undefined && p.sheetType !== "GRID") continue;
-        tabs.push({
-          sheetId: p.sheetId,
-          title: p.title.slice(0, 200),
-          index: typeof p.index === "number" ? p.index : tabs.length,
-          rowCount: typeof p.gridProperties?.rowCount === "number" ? p.gridProperties.rowCount : null,
-          columnCount: typeof p.gridProperties?.columnCount === "number" ? p.gridProperties.columnCount : null,
-        });
-      }
-      tabs.sort((a, b) => a.index - b.index);
-      const title = typeof json?.properties?.title === "string" ? json.properties.title.slice(0, 300) : spreadsheetId;
-      return { spreadsheetId, title, tabs };
+      return parseSpreadsheet(await call(`${SHEETS_API_BASE}/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=${encodeURIComponent(SPREADSHEET_FIELDS)}`), spreadsheetId);
     },
     async getValues(spreadsheetId, tab, dataRows) {
       const range = a1Range(tab, dataRows);
       const url = `${SHEETS_API_BASE}/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}?majorDimension=ROWS&valueRenderOption=FORMATTED_VALUE`;
-      const json = (await call(url)) as { values?: unknown } | null;
-      const values = Array.isArray(json?.values) ? json!.values : [];
-      return (values as unknown[]).map((r) => (Array.isArray(r) ? r.map((c) => (c === null || c === undefined ? "" : String(c))) : []));
+      return parseValueRange(await call(url));
     },
   };
 }

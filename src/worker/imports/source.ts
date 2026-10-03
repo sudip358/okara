@@ -16,7 +16,8 @@ import type { Env } from "../env";
 import type { Db } from "../lib/db";
 import { HttpError, badRequest } from "../lib/errors";
 import type { ProjectRow } from "../platform/access";
-import { createSheetsClient, SheetsApiError, type SheetsClient } from "./sheets";
+import { SheetsApiError, type SheetsClient } from "./sheets";
+import { resolveSheetsClient, transportOf } from "./sheets-maton";
 
 export interface ImportSource {
   kind: "csv" | "sheets";
@@ -27,6 +28,8 @@ export interface ImportSource {
   sheetTabId: number | null;
   /** Owner of import records: 'sheet:<spreadsheetId>:<sheetId>' or 'csv:<normalized name>'. */
   sourceKey: string;
+  /** Sheets only: how the tab was read ('direct' OAuth or the workspace's Maton gateway key). */
+  transport?: "direct" | "maton";
 }
 
 export interface LoadedTable {
@@ -64,8 +67,15 @@ export function sheetsHttpError(e: unknown): HttpError {
 }
 
 export async function sheetsClientFor(env: Env, db: Db, project: ProjectRow, deps: SourceDeps = {}): Promise<SheetsClient> {
-  const client = deps.sheets !== undefined ? deps.sheets : await createSheetsClient(env, db, { id: project.id, workspaceId: project.workspace_id });
-  if (!client) throw new HttpError(412, "setup_required", "Connect Google Sheets on the Import page first (or download the tab as CSV and upload it).");
+  // Direct Google Sheets OAuth first; else the workspace's Maton google-sheets connection (imports/sheets-maton.ts).
+  const client = deps.sheets !== undefined ? deps.sheets : await resolveSheetsClient(env, db, { id: project.id, workspaceId: project.workspace_id });
+  if (!client) {
+    throw new HttpError(
+      412,
+      "setup_required",
+      "Connect Google Sheets on the Import page first, or add a Maton.ai key with a Google Sheets connection on the Integrations page (or download the tab as CSV and upload it).",
+    );
+  }
   return client;
 }
 
@@ -102,7 +112,7 @@ export async function sheetTable(
   const table = toTable(values);
   const truncated = values.length >= cap + 1 && (found.rowCount === null || found.rowCount > cap + 1);
   return {
-    source: { kind: "sheets", name: meta.title, spreadsheetId, tab: found.title, sheetTabId: found.sheetId, sourceKey: sheetSourceKey(spreadsheetId, found.sheetId, found.title) },
+    source: { kind: "sheets", name: meta.title, spreadsheetId, tab: found.title, sheetTabId: found.sheetId, sourceKey: sheetSourceKey(spreadsheetId, found.sheetId, found.title), transport: transportOf(client) },
     table,
     rowsRead: table.rows.length,
     truncated,

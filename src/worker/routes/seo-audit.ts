@@ -10,9 +10,9 @@ import { z } from "zod";
 import type { AiCrawlerAccess, AuditFinding, CapabilityState, PageRow, SeoAudit, Severity } from "@shared/types";
 import type { AppEnv } from "../app";
 import { requireUser } from "../platform/require-user";
-import { requireProject } from "../platform/access";
+import { requireProject, type ProjectRow } from "../platform/access";
 import { badRequest, notFound } from "../lib/errors";
-import { parseJson } from "../lib/db";
+import { parseJson, type Db } from "../lib/db";
 import { getRule } from "../seo/rules/registry";
 import { completenessNote } from "../seo/crawl/run";
 
@@ -28,7 +28,7 @@ export const AUDIT_LIMITATIONS = [
 
 const SEVERITY_ORDER: Record<Severity, number> = { critical: 0, major: 1, moderate: 2, minor: 3, advisory: 4 };
 
-const PAGE_TYPES = ["home", "collection", "product", "article", "landing", "other"] as const;
+export const PAGE_TYPES = ["home", "collection", "product", "article", "landing", "other"] as const;
 const patchPageSchema = z.object({ pageType: z.enum(PAGE_TYPES) }).strict();
 
 interface PageJoinRow {
@@ -69,6 +69,11 @@ seoCrawlRoutes.get("/projects/:pid/seo/audit", async (c) => {
   const user = requireUser(c);
   const db = c.get("db");
   const project = await requireProject(db, user.id, c.req.param("pid"));
+  return c.json({ data: await buildSeoAudit(db, project) });
+});
+
+/** The SEO audit of the latest crawl (route GET /seo/audit and Ask Okara's seo_audit tool). Workspace-scoped. */
+export async function buildSeoAudit(db: Db, project: ProjectRow): Promise<SeoAudit> {
   const ws = project.workspace_id;
 
   const empty = (state: CapabilityState, note: string): SeoAudit => ({
@@ -84,7 +89,7 @@ seoCrawlRoutes.get("/projects/:pid/seo/audit", async (c) => {
 
   // Demo projects are deliberately unverified but carry seeded crawl data: show it, labelled 'demo'.
   if (!project.verified_host && !project.is_demo) {
-    return c.json({ data: empty("setup_required", "Verify site ownership (GSC, DNS, or file) before crawling. No audit findings are produced for unverified sites.") });
+    return empty("setup_required", "Verify site ownership (GSC, DNS, or file) before crawling. No audit findings are produced for unverified sites.");
   }
 
   const run = await db.first<{
@@ -104,7 +109,7 @@ seoCrawlRoutes.get("/projects/:pid/seo/audit", async (c) => {
     project.id,
   );
   const baseState: CapabilityState = project.is_demo ? "demo" : "ready";
-  if (!run) return c.json({ data: empty(baseState, "No crawl has run yet.") });
+  if (!run) return empty(baseState, "No crawl has run yet.");
 
   const skippedRows = await db.all<{ url: string; skipped_reason: string }>(
     `SELECT p.url, s.skipped_reason FROM page_snapshots s JOIN pages p ON p.id = s.page_id
@@ -160,8 +165,8 @@ seoCrawlRoutes.get("/projects/:pid/seo/audit", async (c) => {
     aiCrawlerAccess: robots?.aiCrawlerAccess ?? null,
     limitations: [...AUDIT_LIMITATIONS, ...runNotes.slice(run.status === "failed" ? 0 : 1, 20)],
   };
-  return c.json({ data: audit });
-});
+  return audit;
+}
 
 seoCrawlRoutes.get("/projects/:pid/pages", async (c) => {
   const user = requireUser(c);
@@ -183,14 +188,19 @@ seoCrawlRoutes.patch("/projects/:pid/pages/:pageId", async (c) => {
   }
   const parsed = patchPageSchema.safeParse(body);
   if (!parsed.success) throw badRequest("Invalid page type.", parsed.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })));
+  return c.json({ data: await setPageType(db, project, c.req.param("pageId"), parsed.data.pageType) });
+});
+
+/** Correct a page's type (route PATCH /pages/:pageId and Ask Okara's confirmed set_page_type). 404 outside the project. */
+export async function setPageType(db: Db, project: ProjectRow, pageId: string, pageType: (typeof PAGE_TYPES)[number]): Promise<PageRow> {
   const { changes } = await db.run(
     "UPDATE pages SET page_type = ?, page_type_method = 'user' WHERE id = ? AND project_id = ? AND workspace_id = ?",
-    parsed.data.pageType,
-    c.req.param("pageId"),
+    pageType,
+    pageId,
     project.id,
     project.workspace_id,
   );
   if (changes === 0) throw notFound("Page");
-  const row = await db.first<PageJoinRow>(`${PAGE_SELECT} AND p.id = ?`, project.workspace_id, project.id, c.req.param("pageId"));
-  return c.json({ data: toPageRow(row!) });
-});
+  const row = await db.first<PageJoinRow>(`${PAGE_SELECT} AND p.id = ?`, project.workspace_id, project.id, pageId);
+  return toPageRow(row!);
+}

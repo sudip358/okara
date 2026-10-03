@@ -19,7 +19,7 @@ import { z } from "zod";
 import type { AppEnv } from "../app";
 import { requireUser } from "../platform/require-user";
 import { badRequest, HttpError } from "../lib/errors";
-import { requireProject } from "../platform/access";
+import { requireProject, type ProjectRow } from "../platform/access";
 import { CSV_MAX_BYTES, EXPECTED_CSV_HEADERS, importGscCsv } from "../seo/gsc/csv";
 import { buildSeoOverview } from "../seo/gsc/overview";
 import { buildTranslationOpportunities } from "../seo/gsc/translation";
@@ -50,36 +50,46 @@ async function buyerQueries(c: Context<AppEnv, "/projects/:pid/seo/buyer-queries
   const user = requireUser(c);
   const db = c.get("db");
   const project = await requireProject(db, user.id, c.req.param("pid"));
-  const now = c.get("now");
+  const r = await buyerQueriesFor(c.env, db, project, user.id, c.get("now"), classify);
+  if ("rateLimited" in r) return c.json({ error: { code: "rate_limited", message: r.message } }, 429, { "Retry-After": String(r.retryAfterSeconds) });
+  return c.json({ data: r.data });
+}
+
+/**
+ * Buyer-query view (route GET/POST /seo/buyer-queries and Ask Okara). classify=false reads the 7-day decision cache
+ * only; classify=true asks Jev for uncached queries under BUYER_QUERIES_RATE_LIMIT (per project + user) and
+ * BUYER_CLASSIFY_DAILY_LIMIT (per project), budgeted. Both limits are shared by every caller.
+ */
+export async function buyerQueriesFor(
+  env: Env,
+  db: Db,
+  project: ProjectRow,
+  userId: string,
+  now: Date,
+  classify: boolean,
+): Promise<{ data: Awaited<ReturnType<typeof buildBuyerQueries>> } | { rateLimited: true; message: string; retryAfterSeconds: number }> {
   if (classify) {
-    const rl = await hitRateLimit(db, `buyer_queries:${project.id}:${user.id}`, BUYER_QUERIES_RATE_LIMIT.limit, BUYER_QUERIES_RATE_LIMIT.windowSeconds, now);
-    if (!rl.allowed) {
-      return c.json({ error: { code: "rate_limited", message: "Too many buyer-query requests. Try again in a minute." } }, 429, { "Retry-After": String(rl.retryAfterSeconds) });
-    }
+    const rl = await hitRateLimit(db, `buyer_queries:${project.id}:${userId}`, BUYER_QUERIES_RATE_LIMIT.limit, BUYER_QUERIES_RATE_LIMIT.windowSeconds, now);
+    if (!rl.allowed) return { rateLimited: true, message: "Too many buyer-query requests. Try again in a minute.", retryAfterSeconds: rl.retryAfterSeconds };
   }
-  const decisions = project.is_demo === 1 ? null : await decisionsFactory(c.env, db, project.workspace_id, project.id);
+  const decisions = project.is_demo === 1 ? null : await decisionsFactory(env, db, project.workspace_id, project.id);
   if (classify && decisions) {
     // Separate daily cap so buyer-query spending cannot drain the project's shared Jev/provider allowance.
     const day = await hitRateLimit(db, `buyer_queries_day:${project.id}`, BUYER_CLASSIFY_DAILY_LIMIT, 86_400, now);
     if (!day.allowed) {
-      return c.json(
-        {
-          error: {
-            code: "rate_limited",
-            message: `Buyer-query classification is limited to ${BUYER_CLASSIFY_DAILY_LIMIT} requests per project per day. Cached answers are kept; continue tomorrow.`,
-          },
-        },
-        429,
-        { "Retry-After": String(day.retryAfterSeconds) },
-      );
+      return {
+        rateLimited: true,
+        message: `Buyer-query classification is limited to ${BUYER_CLASSIFY_DAILY_LIMIT} requests per project per day. Cached answers are kept; continue tomorrow.`,
+        retryAfterSeconds: day.retryAfterSeconds,
+      };
     }
   }
   const scope = { workspaceId: project.workspace_id, projectId: project.id, runId: null };
   const clock = () => now;
   // Optional operator setting: BUYER_QUERIES_MAX caps the queries in scope.
-  const maxQueries = buyerQueryCap(c.env.BUYER_QUERIES_MAX);
-  const data = await buildBuyerQueries({ db, project, now, decisions, budget: budgetFor(createBudget(db, c.env, scope, clock), "typesafe"), calls: createCallRecorder(db, scope, clock), classify, maxQueries });
-  return c.json({ data });
+  const maxQueries = buyerQueryCap(env.BUYER_QUERIES_MAX);
+  const data = await buildBuyerQueries({ db, project, now, decisions, budget: budgetFor(createBudget(db, env, scope, clock), "typesafe"), calls: createCallRecorder(db, scope, clock), classify, maxQueries });
+  return { data };
 }
 
 /** Cached decisions only: a GET never spends Jev budget. */

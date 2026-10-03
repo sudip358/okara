@@ -27,7 +27,7 @@ const userOf = (c: { get(key: "user"): SessionUser | null }): SessionUser => {
   return u;
 };
 
-async function gscStatus(env: Env, db: Db, p: ProjectRow): Promise<IntegrationsStatus["gsc"]> {
+export async function gscStatus(env: Env, db: Db, p: ProjectRow): Promise<IntegrationsStatus["gsc"]> {
   if (p.is_demo === 1) return { state: "demo", property: p.gsc_property, connectedAt: null, lastError: null };
   const conn = await loadGscConnection(db, p.workspace_id, p.id);
   if (!conn || conn.status === "revoked") {

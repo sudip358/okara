@@ -29,7 +29,7 @@
  */
 import { Hono } from "hono";
 import { z } from "zod";
-import type { LinkGraphFilter, LinkGraphSort } from "@shared/types";
+import type { LinkClusterReport, LinkGraphFilter, LinkGraphSort, LinkGraphSummary, LinkSuggestionReport } from "@shared/types";
 import type { AppEnv } from "../app";
 import type { Env } from "../env";
 import type { Db } from "../lib/db";
@@ -98,7 +98,7 @@ async function body(c: { req: { json: () => Promise<unknown> } }): Promise<unkno
 }
 
 /** A URL on the project's verified host (http/https), or a 400. */
-function ownUrl(project: ProjectRow, raw: string): string {
+export function ownUrl(project: ProjectRow, raw: string): string {
   const host = graphHost(project);
   let u: URL;
   try {
@@ -112,12 +112,6 @@ function ownUrl(project: ProjectRow, raw: string): string {
   return u.toString();
 }
 
-async function limited(c: { json: (b: unknown, s: number, h?: Record<string, string>) => Response }, db: Db, key: string, rl: { limit: number; windowSeconds: number }, now: Date, what: string): Promise<Response | null> {
-  const r = await hitRateLimit(db, key, rl.limit, rl.windowSeconds, now);
-  if (r.allowed) return null;
-  return c.json({ error: { code: "rate_limited", message: `${what} are limited to ${rl.limit} per hour per project. Try again later.` } }, 429, { "Retry-After": String(r.retryAfterSeconds) });
-}
-
 const download = (c: { body: (b: string, s: number, h: Record<string, string>) => Response }, out: { body: string; contentType: string; filename: string }) =>
   c.body(out.body, 200, { "Content-Type": out.contentType, "Content-Disposition": `attachment; filename="${out.filename}"`, "Cache-Control": "no-store" });
 
@@ -127,22 +121,68 @@ linkRoutes.post("/projects/:pid/seo/internal-links/run", async (c) => {
   const user = requireUser(c);
   const db = c.get("db");
   const project = await requireProject(db, user.id, c.req.param("pid"));
-  const now = c.get("now");
+  const r = await runLinkAnalysisFor(c.env, db, project, user.id, c.get("now"));
+  if ("rateLimited" in r) return denial(c, r);
+  return c.json({ data: r.data });
+});
 
+export type Limited<T> = { data: T } | { rateLimited: true; message: string; retryAfterSeconds: number };
+
+function denial(c: { json: (b: unknown, s: number, h?: Record<string, string>) => Response }, r: { message: string; retryAfterSeconds: number }): Response {
+  return c.json({ error: { code: "rate_limited", message: r.message } }, 429, { "Retry-After": String(r.retryAfterSeconds) });
+}
+
+async function limitFor(db: Db, key: string, rl: { limit: number; windowSeconds: number }, now: Date, what: string): Promise<{ rateLimited: true; message: string; retryAfterSeconds: number } | null> {
+  const r = await hitRateLimit(db, key, rl.limit, rl.windowSeconds, now);
+  if (r.allowed) return null;
+  return { rateLimited: true, message: `${what} are limited to ${rl.limit} per hour per project. Try again later.`, retryAfterSeconds: r.retryAfterSeconds };
+}
+
+/**
+ * Internal-link analysis run (route POST /internal-links/run and Ask Okara's confirmed link_job analysis):
+ * setup_required report without using the rate limit; otherwise LINK_RUN_RATE_LIMIT per project, Jev + writer
+ * from the workspace (none for demo projects).
+ */
+export async function runLinkAnalysisFor(env: Env, db: Db, project: ProjectRow, userId: string, now: Date): Promise<Limited<LinkSuggestionReport>> {
   const setup = await linkSetup(db, project);
   if (setup.state === "setup_required") {
-    return c.json({ data: emptyReport("setup_required", null, [setup.message ?? "Setup required."], project.is_demo === 1) });
+    return { data: emptyReport("setup_required", null, [setup.message ?? "Setup required."], project.is_demo === 1) };
   }
-
-  const denied = await limited(c, db, `internal_links_run:${project.id}`, LINK_RUN_RATE_LIMIT, now, "Internal-link runs");
+  const denied = await limitFor(db, `internal_links_run:${project.id}`, LINK_RUN_RATE_LIMIT, now, "Internal-link runs");
   if (denied) return denied;
-
   const demo = project.is_demo === 1;
-  const decisions = demo ? null : await decisionsFactory(c.env, db, project.workspace_id, project.id);
-  const writer = demo ? null : await writerFactory(c.env, db, project.workspace_id, project.id);
-  const data = await runLinkSuggestions(c.env, db, project, now, { decisions, writer, userId: user.id });
-  return c.json({ data });
-});
+  const decisions = demo ? null : await decisionsFactory(env, db, project.workspace_id, project.id);
+  const writer = demo ? null : await writerFactory(env, db, project.workspace_id, project.id);
+  return { data: await runLinkSuggestions(env, db, project, now, { decisions, writer, userId }) };
+}
+
+/** Deterministic link-graph rebuild (route POST /graph/rebuild and Ask Okara): GRAPH_REBUILD_RATE_LIMIT per project. */
+export async function rebuildLinkGraphFor(db: Db, project: ProjectRow, userId: string, now: Date): Promise<Limited<LinkGraphSummary>> {
+  const setup = await linkSetup(db, project);
+  if (setup.state === "setup_required") return { data: await graphSummary(db, project, now) };
+  const denied = await limitFor(db, `link_graph_rebuild:${project.id}`, GRAPH_REBUILD_RATE_LIMIT, now, "Link graph rebuilds");
+  if (denied) return denied;
+  await buildAndStoreLinkGraph(db, project, { trigger: "manual", now, userId, throwOnBusy: true });
+  return { data: await graphSummary(db, project, now) };
+}
+
+export type ClusterEdit = { kind: "hub"; url: string; hub: boolean | null } | { kind: "assign"; spokeUrl: string; hubUrl: string | null } | { kind: "reset"; spokeUrl: string };
+
+/**
+ * Hub mark/unmark/clear and spoke assign/reset (routes PUT /clusters/hub|assign and Ask Okara): URLs must be on the
+ * verified host (400 otherwise); CLUSTER_EDIT_RATE_LIMIT per project.
+ */
+export async function editClusterFor(db: Db, project: ProjectRow, userId: string, now: Date, edit: ClusterEdit): Promise<Limited<LinkClusterReport>> {
+  const denied = await limitFor(db, `link_cluster_edit:${project.id}`, CLUSTER_EDIT_RATE_LIMIT, now, "Cluster edits");
+  if (denied) return denied;
+  if (edit.kind === "hub") await setHubOverride(db, project, ownUrl(project, edit.url), edit.hub, userId, now);
+  else {
+    const spoke = ownUrl(project, edit.spokeUrl);
+    const hub = edit.kind === "reset" ? undefined : edit.hubUrl === null ? null : ownUrl(project, edit.hubUrl);
+    await setSpokeAssignment(db, project, spoke, hub, userId, now);
+  }
+  return { data: await clusterReport(db, project) };
+}
 
 linkRoutes.get("/projects/:pid/seo/internal-links", async (c) => {
   const user = requireUser(c);
@@ -199,13 +239,9 @@ linkRoutes.post("/projects/:pid/seo/internal-links/graph/rebuild", async (c) => 
   const user = requireUser(c);
   const db = c.get("db");
   const project = await requireProject(db, user.id, c.req.param("pid"));
-  const now = c.get("now");
-  const setup = await linkSetup(db, project);
-  if (setup.state === "setup_required") return c.json({ data: await graphSummary(db, project, now) });
-  const denied = await limited(c, db, `link_graph_rebuild:${project.id}`, GRAPH_REBUILD_RATE_LIMIT, now, "Link graph rebuilds");
-  if (denied) return denied;
-  await buildAndStoreLinkGraph(db, project, { trigger: "manual", now, userId: user.id, throwOnBusy: true });
-  return c.json({ data: await graphSummary(db, project, now) });
+  const r = await rebuildLinkGraphFor(db, project, user.id, c.get("now"));
+  if ("rateLimited" in r) return denial(c, r);
+  return c.json({ data: r.data });
 });
 
 linkRoutes.get("/projects/:pid/seo/internal-links/graph/urls", async (c) => {
@@ -260,28 +296,23 @@ linkRoutes.put("/projects/:pid/seo/internal-links/clusters/hub", async (c) => {
   const user = requireUser(c);
   const db = c.get("db");
   const project = await requireProject(db, user.id, c.req.param("pid"));
-  const now = c.get("now");
   const parsed = hubSchema.safeParse(await body(c));
   if (!parsed.success) throw badRequest("Send {url, hub: true | false | null}.");
-  const denied = await limited(c, db, `link_cluster_edit:${project.id}`, CLUSTER_EDIT_RATE_LIMIT, now, "Cluster edits");
-  if (denied) return denied;
-  await setHubOverride(db, project, ownUrl(project, parsed.data.url), parsed.data.hub, user.id, now);
-  return c.json({ data: await clusterReport(db, project) });
+  const r = await editClusterFor(db, project, user.id, c.get("now"), { kind: "hub", url: parsed.data.url, hub: parsed.data.hub });
+  if ("rateLimited" in r) return denial(c, r);
+  return c.json({ data: r.data });
 });
 
 linkRoutes.put("/projects/:pid/seo/internal-links/clusters/assign", async (c) => {
   const user = requireUser(c);
   const db = c.get("db");
   const project = await requireProject(db, user.id, c.req.param("pid"));
-  const now = c.get("now");
   const parsed = assignSchema.safeParse(await body(c));
   if (!parsed.success) throw badRequest("Send {spokeUrl, hubUrl: url | null} or {spokeUrl, reset: true}.");
-  const denied = await limited(c, db, `link_cluster_edit:${project.id}`, CLUSTER_EDIT_RATE_LIMIT, now, "Cluster edits");
-  if (denied) return denied;
-  const spoke = ownUrl(project, parsed.data.spokeUrl);
-  const hub = "reset" in parsed.data ? undefined : parsed.data.hubUrl === null ? null : ownUrl(project, parsed.data.hubUrl);
-  await setSpokeAssignment(db, project, spoke, hub, user.id, now);
-  return c.json({ data: await clusterReport(db, project) });
+  const edit: ClusterEdit = "reset" in parsed.data ? { kind: "reset", spokeUrl: parsed.data.spokeUrl } : { kind: "assign", spokeUrl: parsed.data.spokeUrl, hubUrl: parsed.data.hubUrl };
+  const r = await editClusterFor(db, project, user.id, c.get("now"), edit);
+  if ("rateLimited" in r) return denial(c, r);
+  return c.json({ data: r.data });
 });
 
 // ------------------------------------------------------------------------------------ broken links, anchors, placed

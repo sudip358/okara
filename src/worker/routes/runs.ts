@@ -177,21 +177,7 @@ export function createRunRoutes(deps: RunRouteDeps = {}) {
     const user = requireUser(c);
     const db = c.get("db");
     const run = await loadRunForUser(db, user.id, c.req.param("id"));
-    const events = await db.all(
-      `SELECT e.*, r.agent FROM run_events e JOIN agent_runs r ON r.id = e.run_id
-        WHERE e.workspace_id = ? AND e.project_id = ? AND e.run_id = ? ORDER BY e.created_at, e.rowid`,
-      run.workspace_id,
-      run.project_id,
-      run.id,
-    );
-    const decisions = await db.all(
-      "SELECT * FROM decision_records WHERE workspace_id = ? AND project_id = ? AND run_id = ? ORDER BY created_at, id LIMIT 500",
-      run.workspace_id,
-      run.project_id,
-      run.id,
-    );
-    const detail: RunDetail = { ...toRunSummary(run), events: events.map(mapEvent), decisions: decisions.map(mapDecision) };
-    return c.json({ data: detail });
+    return c.json({ data: await buildRunDetail(db, run) });
   });
 
   routes.post("/projects/:pid/runs", async (c) => {
@@ -218,86 +204,108 @@ export function createRunRoutes(deps: RunRouteDeps = {}) {
     const db = c.get("db");
     const now = c.get("now");
     const run = await loadRunForUser(db, user.id, c.req.param("id"));
-    if (run.status === "pending" || run.status === "running") {
-      await db.run("UPDATE agent_runs SET cancel_requested = 1 WHERE id = ? AND workspace_id = ?", run.id, run.workspace_id);
-      if (run.status === "pending" && run.started_at === null) {
-        const r = await db.run(
-          "UPDATE agent_runs SET status = 'cancelled', finished_at = ? WHERE id = ? AND status = 'pending' AND started_at IS NULL",
-          iso(now),
-          run.id,
-        );
-        if (r.changes === 1) await releaseRunLock(db, run.project_id, run.agent, run.id);
-      }
-    }
-    const row = await db.first<RunRow>("SELECT * FROM agent_runs WHERE id = ?", run.id);
-    return c.json({ data: toRunSummary(row!) });
+    return c.json({ data: toRunSummary(await cancelRunFor(db, run, now)) });
   });
 
   routes.get("/projects/:pid/usage", async (c) => {
     const user = requireUser(c);
     const db = c.get("db");
-    const now = c.get("now");
     const project = await requireProject(db, user.id, c.req.param("pid"));
-    const day = utcDay(now);
-    const limits = await loadProjectLimits(db, project.workspace_id, project.id);
-    const calls = await db.all<{
-      provider: string;
-      model: string | null;
-      purpose: string;
-      status: string;
-      cost_usd: number | null;
-      cost_is_estimate: number;
-      created_at: string;
-    }>(
-      `SELECT provider, model, purpose, status, cost_usd, cost_is_estimate, created_at FROM provider_calls
-        WHERE workspace_id = ? AND project_id = ? AND substr(created_at, 1, 10) = ?
-        ORDER BY created_at DESC`,
-      project.workspace_id,
-      project.id,
-      day,
-    );
-    const actual = calls.filter((x) => x.cost_usd !== null && x.cost_is_estimate === 0);
-    const estimated = calls.filter((x) => x.cost_usd !== null && x.cost_is_estimate === 1);
-    const unknown = calls.filter((x) => x.cost_usd === null).length;
-    const sum = (xs: typeof calls) => Math.round(xs.reduce((a, x) => a + (x.cost_usd ?? 0), 0) * 1e6) / 1e6;
-    const notes = [
-      `Counts are for ${day} (UTC). Every HTTP attempt, including retries and failures, counts as a provider call.`,
-      "Actual cost is shown only when a provider returned it. Estimates use versioned configured rates and are labelled as estimates.",
-      unknown > 0
-        ? `${unknown} call(s) have unknown cost (no verified rate configured, e.g. TypeSafe/Jev and writer models); they are not counted as $0.`
-        : "No calls with unknown cost today.",
-      `Daily caps: ${limits.provider_calls_per_day} provider calls and $${(limits.usd_micros_per_day / 1e6).toFixed(2)} of priced spend per project, plus a global operator allowance. Spend on providers without returned or configured prices is bounded by call and token caps only.`,
-    ];
-    const summary: UsageSummary = {
-      day,
-      limits: {
-        crawlPages: limits.crawl_pages,
-        gscRows: limits.gsc_rows,
-        geoPromptsPerRun: limits.geo_prompts_per_run,
-        providerCallsPerDay: limits.provider_calls_per_day,
-        usdPerDay: limits.usd_micros_per_day / 1e6,
-      },
-      used: {
-        providerCalls: calls.length,
-        usdActual: actual.length ? sum(actual) : null,
-        usdEstimated: estimated.length ? sum(estimated) : null,
-        usdUnknownCalls: unknown,
-      },
-      calls: calls.slice(0, 200).map((x) => ({
-        provider: x.provider,
-        model: x.model,
-        purpose: x.purpose,
-        status: x.status,
-        costUsd: x.cost_usd,
-        costIsEstimate: x.cost_usd === null ? true : x.cost_is_estimate === 1,
-        createdAt: x.created_at,
-      })),
-      notes,
-    };
-    return c.json({ data: summary });
+    return c.json({ data: await buildUsageSummary(db, project, c.get("now")) });
   });
 
   return routes;
 }
 
 export const runRoutes = createRunRoutes();
+
+/** Today's (UTC) provider calls, spend and daily caps of one project (route GET /usage and Ask Okara). */
+export async function buildUsageSummary(db: Db, project: ProjectRow, now: Date): Promise<UsageSummary> {
+  const day = utcDay(now);
+  const limits = await loadProjectLimits(db, project.workspace_id, project.id);
+  const calls = await db.all<{
+    provider: string;
+    model: string | null;
+    purpose: string;
+    status: string;
+    cost_usd: number | null;
+    cost_is_estimate: number;
+    created_at: string;
+  }>(
+    `SELECT provider, model, purpose, status, cost_usd, cost_is_estimate, created_at FROM provider_calls
+      WHERE workspace_id = ? AND project_id = ? AND substr(created_at, 1, 10) = ?
+      ORDER BY created_at DESC`,
+    project.workspace_id,
+    project.id,
+    day,
+  );
+  const actual = calls.filter((x) => x.cost_usd !== null && x.cost_is_estimate === 0);
+  const estimated = calls.filter((x) => x.cost_usd !== null && x.cost_is_estimate === 1);
+  const unknown = calls.filter((x) => x.cost_usd === null).length;
+  const sum = (xs: typeof calls) => Math.round(xs.reduce((a, x) => a + (x.cost_usd ?? 0), 0) * 1e6) / 1e6;
+  const notes = [
+    `Counts are for ${day} (UTC). Every HTTP attempt, including retries and failures, counts as a provider call.`,
+    "Actual cost is shown only when a provider returned it. Estimates use versioned configured rates and are labelled as estimates.",
+    unknown > 0
+      ? `${unknown} call(s) have unknown cost (no verified rate configured, e.g. TypeSafe/Jev and writer models); they are not counted as $0.`
+      : "No calls with unknown cost today.",
+    `Daily caps: ${limits.provider_calls_per_day} provider calls and $${(limits.usd_micros_per_day / 1e6).toFixed(2)} of priced spend per project, plus a global operator allowance. Spend on providers without returned or configured prices is bounded by call and token caps only.`,
+  ];
+  const summary: UsageSummary = {
+    day,
+    limits: {
+      crawlPages: limits.crawl_pages,
+      gscRows: limits.gsc_rows,
+      geoPromptsPerRun: limits.geo_prompts_per_run,
+      providerCallsPerDay: limits.provider_calls_per_day,
+      usdPerDay: limits.usd_micros_per_day / 1e6,
+    },
+    used: {
+      providerCalls: calls.length,
+      usdActual: actual.length ? sum(actual) : null,
+      usdEstimated: estimated.length ? sum(estimated) : null,
+      usdUnknownCalls: unknown,
+    },
+    calls: calls.slice(0, 200).map((x) => ({
+      provider: x.provider,
+      model: x.model,
+      purpose: x.purpose,
+      status: x.status,
+      costUsd: x.cost_usd,
+      costIsEstimate: x.cost_usd === null ? true : x.cost_is_estimate === 1,
+      createdAt: x.created_at,
+    })),
+    notes,
+  };
+  return summary;
+}
+
+/** Run summary + events + decision records (at most 500) of a run already resolved for its project (route GET /runs/:id and Ask Okara). */
+export async function buildRunDetail(db: Db, run: RunRow): Promise<RunDetail> {
+  const events = await db.all(
+    `SELECT e.*, r.agent FROM run_events e JOIN agent_runs r ON r.id = e.run_id
+      WHERE e.workspace_id = ? AND e.project_id = ? AND e.run_id = ? ORDER BY e.created_at, e.rowid`,
+    run.workspace_id,
+    run.project_id,
+    run.id,
+  );
+  const decisions = await db.all(
+    "SELECT * FROM decision_records WHERE workspace_id = ? AND project_id = ? AND run_id = ? ORDER BY created_at, id LIMIT 500",
+    run.workspace_id,
+    run.project_id,
+    run.id,
+  );
+  return { ...toRunSummary(run), events: events.map(mapEvent), decisions: decisions.map(mapDecision) };
+}
+
+/** Request cancellation of a pending/running run already resolved for its project (route POST /runs/:id/cancel and Ask Okara). */
+export async function cancelRunFor(db: Db, run: RunRow, now: Date): Promise<RunRow> {
+  if (run.status === "pending" || run.status === "running") {
+    await db.run("UPDATE agent_runs SET cancel_requested = 1 WHERE id = ? AND workspace_id = ?", run.id, run.workspace_id);
+    if (run.status === "pending" && run.started_at === null) {
+      const r = await db.run("UPDATE agent_runs SET status = 'cancelled', finished_at = ? WHERE id = ? AND status = 'pending' AND started_at IS NULL", iso(now), run.id);
+      if (r.changes === 1) await releaseRunLock(db, run.project_id, run.agent, run.id);
+    }
+  }
+  return (await db.first<RunRow>("SELECT * FROM agent_runs WHERE id = ? AND workspace_id = ?", run.id, run.workspace_id))!;
+}

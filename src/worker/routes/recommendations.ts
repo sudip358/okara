@@ -433,7 +433,13 @@ recommendationRoutes.get("/projects/:pid/attention", async (c) => {
   const user = requireUser(c);
   const db = c.get("db");
   const project = await requireProject(db, user.id, c.req.param("pid"));
-  const day = utcDay(c.get("now"));
+  return c.json({ data: await buildAttentionFeed(c.env, db, project, c.get("now")) });
+});
+
+/** Attention feed (route GET /attention and Ask Okara): per-agent counts and state, recent events, failing syncs, link checks. */
+export async function buildAttentionFeed(env: AppEnv["Bindings"], db: Db, project: ProjectRow, now: Date): Promise<AttentionFeed> {
+  const c = { env };
+  const day = utcDay(now);
   const agents: AttentionFeed["agents"] = [];
   for (const agent of ["seo", "geo"] as const) {
     const counts = await db.first<{ new_today: number; open: number }>(
@@ -475,5 +481,5 @@ recommendationRoutes.get("/projects/:pid/attention", async (c) => {
     // Internal links workbench: implemented or sheet-placed links the latest crawl of their source page did not find.
     linkVerification: await linkVerificationAttention(db, project),
   };
-  return c.json({ data: feed });
-});
+  return feed;
+}

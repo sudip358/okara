@@ -13,7 +13,9 @@ import { Hono } from "hono";
 import type { CapabilityState, RobotsSuggestion } from "@shared/types";
 import type { AppEnv } from "../app";
 import { requireUser } from "../platform/require-user";
-import { requireProject } from "../platform/access";
+import { requireProject, type ProjectRow } from "../platform/access";
+import type { Env } from "../env";
+import type { Db } from "../lib/db";
 import { hitRateLimit } from "../platform/rate-limit";
 import { badRequest } from "../lib/errors";
 import { CrawlFetchError, guardedFetch, type CrawlFetchErrorCode } from "../seo/ssrf";
@@ -81,7 +83,26 @@ robotsRoutes.get("/projects/:pid/seo/robots-suggestion", async (c) => {
   const db = c.get("db");
   const project = await requireProject(db, user.id, c.req.param("pid"));
   const allowTraining = parseAllowTraining(c.req.query("allowTraining"));
+  const r = await robotsSuggestionFor(c.env, db, project, user.id, allowTraining, c.get("now"));
+  if ("rateLimited" in r) {
+    return c.json({ error: { code: "rate_limited", message: "Too many robots.txt checks. Try again shortly." } }, 429, { "Retry-After": String(r.retryAfterSeconds) });
+  }
+  return c.json({ data: r.data });
+});
 
+/**
+ * The robots.txt suggestion (route GET /seo/robots-suggestion and Ask Okara's seo_audit view robots): demo fixture,
+ * setup_required without a verified host, otherwise one SSRF-guarded GET of the verified host's robots.txt under
+ * ROBOTS_ADVISOR_RATE_LIMIT per user + project (shared by both callers).
+ */
+export async function robotsSuggestionFor(
+  env: Env,
+  db: Db,
+  project: ProjectRow,
+  userId: string,
+  allowTraining: boolean,
+  now: Date,
+): Promise<{ data: RobotsSuggestion } | { rateLimited: true; retryAfterSeconds: number }> {
   // Demo projects never fetch: show a labelled, illustrative robots.txt.
   if (project.is_demo) {
     const text = demoRobotsTxt(DEMO_ORIGIN, DEMO_LABEL);
@@ -93,27 +114,23 @@ robotsRoutes.get("/projects/:pid/seo/robots-suggestion", async (c) => {
       ...core,
       warnings: [`${DEMO_LABEL}: this robots.txt is illustrative (it resembles a typical Shopify default) and was not fetched from a live site.`, ...core.warnings],
     };
-    return c.json({ data });
+    return { data };
   }
 
   const host = project.verified_host;
   if (!host) {
-    return c.json({
+    return {
       data: emptySuggestion("setup_required", allowTraining, {
         notes: [ADVISOR_REVIEW_LABEL, "Verify site ownership (Search Console, DNS, or file) before Okara reads your robots.txt. Nothing was fetched."],
       }),
-    });
+    };
   }
 
-  const now = c.get("now");
-  const rl = await hitRateLimit(db, `robots_suggest:${project.id}:${user.id}`, ROBOTS_ADVISOR_RATE_LIMIT.limit, ROBOTS_ADVISOR_RATE_LIMIT.windowSeconds, now);
-  if (!rl.allowed) {
-    return c.json({ error: { code: "rate_limited", message: "Too many robots.txt checks. Try again shortly." } }, 429, { "Retry-After": String(rl.retryAfterSeconds) });
-  }
+  const rl = await hitRateLimit(db, `robots_suggest:${project.id}:${userId}`, ROBOTS_ADVISOR_RATE_LIMIT.limit, ROBOTS_ADVISOR_RATE_LIMIT.windowSeconds, now);
+  if (!rl.allowed) return { rateLimited: true, retryAfterSeconds: rl.retryAfterSeconds };
 
   const fetchedAt = now.toISOString();
-  const errorResult = (message: string, currentRobotsTxt: string | null = null) =>
-    c.json({
+  const errorResult = (message: string, currentRobotsTxt: string | null = null) => ({
       data: emptySuggestion("error", allowTraining, {
         fetchedAt,
         currentRobotsTxt,
@@ -132,7 +149,7 @@ robotsRoutes.get("/projects/:pid/seo/robots-suggestion", async (c) => {
       kind: "robots",
       lenientContentType: true,
       truncateAtCap: true,
-      userAgent: crawlerUserAgent(c.env.APP_ORIGIN),
+      userAgent: crawlerUserAgent(env.APP_ORIGIN),
     });
   } catch (e) {
     const code: CrawlFetchErrorCode = e instanceof CrawlFetchError ? e.code : "error";
@@ -153,7 +170,7 @@ robotsRoutes.get("/projects/:pid/seo/robots-suggestion", async (c) => {
       ...core,
       notes: shown.capped ? [...core.notes, `Current robots.txt display shows the first ${CURRENT_ROBOTS_DISPLAY_BYTES / 1024} KB; the suggestion uses the whole file.`] : core.notes,
     };
-    return c.json({ data });
+    return { data };
   }
   if (res.status >= 400 && res.status < 500 && res.status !== 429) {
     const core = buildRobotsSuggestion(null, opts);
@@ -164,7 +181,7 @@ robotsRoutes.get("/projects/:pid/seo/robots-suggestion", async (c) => {
       ...core,
       notes: [...core.notes, `https://${host}/robots.txt returned ${res.status}, which crawlers treat as "no robots.txt" (allow all).`],
     };
-    return c.json({ data });
+    return { data };
   }
   return errorResult(`robots.txt returned ${res.status}. Under RFC 9309 crawlers may treat an unreachable robots.txt as "disallow all" until it is served again.`);
-});
+}

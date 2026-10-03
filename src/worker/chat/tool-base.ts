@@ -87,3 +87,51 @@ export const projectRoute = (projectId: string, sub = "") => `/projects/${encode
 export function scoped(ctx: ToolContext): [string, string] {
   return [ctx.project.workspace_id, ctx.project.id];
 }
+
+// ------------------------------------------------------------------ admin-tool helpers (tools-admin*.ts)
+/**
+ * Keys that are never handed to the model, whatever service returned them (defence in depth; the admin tools also
+ * pick fields by hand): encrypted columns, key hints, tokens, secrets, passwords, OAuth state and verifiers.
+ */
+export const SECRET_KEY_RE = /(key_?enc|_enc$|keyhint|key_?hint|api_?key|secret|password|passwd|token$|token_|tokens?_?enc|refresh_?token|access_?token|csrf|cookie|authorization|verifier|session_?id|state_?hash|dnsrecord|filecheck)/i;
+
+/**
+ * Deep copy of a service result for the model: drops secret-looking keys, clips every string (control characters
+ * removed) to `maxStr`, cuts arrays to `maxItems` (recording the original length in `<key>Total`), and stops at
+ * `depth`. Untrusted text stays a JSON string value: data, never instructions.
+ */
+export function compact(value: unknown, opts: { maxStr?: number; maxItems?: number; depth?: number } = {}): unknown {
+  const maxStr = opts.maxStr ?? TOOL_TEXT_MAX;
+  const maxItems = opts.maxItems ?? 25;
+  const walk = (v: unknown, depth: number): unknown => {
+    if (v === null || v === undefined) return v ?? null;
+    if (typeof v === "string") return clip(v, maxStr);
+    if (typeof v === "number") return Number.isFinite(v) ? v : null;
+    if (typeof v === "boolean") return v;
+    if (depth <= 0) return Array.isArray(v) ? `[${v.length} item(s)]` : "[…]";
+    if (Array.isArray(v)) return v.slice(0, maxItems).map((x) => walk(x, depth - 1));
+    if (typeof v === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+        if (SECRET_KEY_RE.test(k)) continue;
+        out[k] = walk(x, depth - 1);
+        if (Array.isArray(x) && x.length > maxItems) out[`${k}Total`] = x.length;
+      }
+      return out;
+    }
+    return null;
+  };
+  return walk(value, opts.depth ?? 7);
+}
+
+/** The signed-in user's role in the project's workspace (membership re-checked on every call). */
+export async function memberRole(ctx: ToolContext): Promise<"owner" | "member"> {
+  const m = await ctx.db.first<{ role: "owner" | "member" }>("SELECT role FROM memberships WHERE workspace_id = ? AND user_id = ?", ctx.project.workspace_id, ctx.userId);
+  if (!m) throw new ToolError("You are no longer a member of this workspace.");
+  return m.role;
+}
+
+/** Owner-only actions: the same rule as the route (requireWorkspaceOwner); members get a plain explanation. */
+export async function requireOwnerTool(ctx: ToolContext, what: string): Promise<void> {
+  if ((await memberRole(ctx)) !== "owner") throw new ToolError(`Only the workspace owner can ${what}.`);
+}

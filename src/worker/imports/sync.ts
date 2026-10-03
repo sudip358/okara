@@ -26,7 +26,8 @@ import type { ProjectRow } from "../platform/access";
 import { loadProjectRow } from "../platform/projects";
 import { clip, type ImportCtx } from "./destinations";
 import { commitImport, toSyncSummary, type CommitResult, type SyncRow } from "./service";
-import { createSheetsClient, loadSheetsConnection, SheetsApiError, type SheetsClient } from "./sheets";
+import { loadSheetsConnection, SheetsApiError, type SheetsClient } from "./sheets";
+import { resolveSheetsClient, transportOf } from "./sheets-maton";
 import { sheetTable } from "./source";
 
 /** A sync holding the lease longer than this was interrupted; the next tick may take it. */
@@ -128,13 +129,17 @@ export async function runSync(env: Env, db: Db, sync: SyncRow, now: Date, userId
   try {
     const project = await loadProjectRow(db, sync.workspace_id, sync.project_id);
     if (!project) throw new SyncFailure("apply_error", "Project not found.");
-    const client = deps.sheets !== undefined ? deps.sheets : await createSheetsClient(env, db, { id: project.id, workspaceId: project.workspace_id });
+    // Same resolution as a manual import: direct Google Sheets OAuth, else the workspace's Maton connection.
+    const client = deps.sheets !== undefined ? deps.sheets : await resolveSheetsClient(env, db, { id: project.id, workspaceId: project.workspace_id });
     if (!client) {
       const conn = deps.sheets !== undefined ? null : await loadSheetsConnection(db, project.workspace_id, project.id);
       if (conn && conn.status === "error") {
         throw new SyncFailure("token_expired", conn.last_error ?? "The Google Sheets authorization expired or was revoked. Reconnect Google Sheets on the Import page.");
       }
-      throw new SyncFailure("not_connected", "Google Sheets is not connected for this project. Connect it on the Import page to resume syncing.");
+      throw new SyncFailure(
+        "not_connected",
+        "Google Sheets is not connected for this project. Connect it on the Import page (or add a Maton.ai key with a Google Sheets connection on the Integrations page) to resume syncing.",
+      );
     }
     let loaded;
     try {
@@ -166,6 +171,7 @@ export async function runSync(env: Env, db: Db, sync: SyncRow, now: Date, userId
       iso(now), warning, nextRunAt(now, sync.frequency_hours), clip(loaded.source.tab ?? sync.tab, 200), loaded.source.sheetTabId, clip(loaded.source.name, 300),
       result.import?.id ?? null, iso(now), sync.workspace_id, sync.project_id, sync.id,
     );
+    await recordSyncTransport(db, sync, transportOf(client));
     outcome = { status: "ok", code: null, message: null, warning, result };
   } catch (e) {
     const code: SyncErrorCode = e instanceof SyncFailure ? e.code : "api_error";
@@ -178,6 +184,15 @@ export async function runSync(env: Env, db: Db, sync: SyncRow, now: Date, userId
     outcome = { status: "error", code, message, warning, result: null };
   }
   return outcome;
+}
+
+/** import_syncs.last_transport (migration 0018); a pending migration only skips the note. */
+async function recordSyncTransport(db: Db, sync: SyncRow, transport: "direct" | "maton"): Promise<void> {
+  try {
+    await db.run("UPDATE import_syncs SET last_transport = ? WHERE workspace_id = ? AND project_id = ? AND id = ?", transport, sync.workspace_id, sync.project_id, sync.id);
+  } catch {
+    // column missing until 0018 is applied
+  }
 }
 
 /** Cron: run up to SYNCS_PER_TICK due syncs. Missing table (migration not applied) is a no-op. */

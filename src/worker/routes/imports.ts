@@ -34,6 +34,8 @@ import {
   type TabPreview,
 } from "@shared/import";
 import type { AppEnv } from "../app";
+import type { Env } from "../env";
+import type { ImportSyncSummary } from "@shared/import";
 import type { Db } from "../lib/db";
 import { HttpError, badRequest, notFound, unauthorized } from "../lib/errors";
 import { requireProject, requireWorkspaceMember, requireWorkspaceOwner, type ProjectRow, type SessionUser } from "../platform/access";
@@ -277,11 +279,15 @@ importRoutes.post("/projects/:pid/import/:importId/undo", async (c) => {
 // ------------------------------------------------------------------ syncs
 importRoutes.patch("/projects/:pid/import/syncs/:syncId", async (c) => {
   const { db, row } = await ownerAccess(c);
-  const sync = await loadSync(db, row, c.req.param("syncId") ?? "");
-  if (!sync) throw notFound("Sync");
   const input = await body(c, z.object({ enabled: z.boolean().optional(), frequencyHours: z.number().int().optional() }).strict());
+  return c.json({ data: await patchSyncFor(db, row, c.req.param("syncId") ?? "", input, c.get("now")) });
+});
+
+/** Enable/disable a sync or change its frequency (route PATCH and Ask Okara). Caller enforces owner. 404 outside the project. */
+export async function patchSyncFor(db: Db, row: ProjectRow, syncId: string, input: { enabled?: boolean; frequencyHours?: number }, now: Date): Promise<ImportSyncSummary> {
+  const sync = await loadSync(db, row, syncId);
+  if (!sync) throw notFound("Sync");
   if (input.frequencyHours !== undefined && !validFrequency(input.frequencyHours)) throw badRequest(`frequencyHours must be one of ${SYNC_FREQUENCIES.join(", ")}.`);
-  const now = c.get("now");
   const freq = input.frequencyHours ?? sync.frequency_hours;
   const enabled = input.enabled ?? sync.enabled === 1;
   await db.run(
@@ -294,19 +300,24 @@ importRoutes.patch("/projects/:pid/import/syncs/:syncId", async (c) => {
     row.id,
     sync.id,
   );
-  const fresh = (await listSyncs(db, row)).find((s) => s.id === sync.id)!;
-  return c.json({ data: fresh });
-});
+  return (await listSyncs(db, row)).find((s) => s.id === sync.id)!;
+}
 
 importRoutes.post("/projects/:pid/import/syncs/:syncId/run", async (c) => {
   const { db, row, user } = await ownerAccess(c);
-  const sync = await loadSync(db, row, c.req.param("syncId") ?? "");
-  if (!sync) throw notFound("Sync");
-  await limit(c, `import_sync_now:${sync.id}`, { limit: SYNC_NOW_PER_HOUR, windowSeconds: 3600 });
-  const outcome = await runSync(c.env, db, sync, c.get("now"), user.id, { ...sourceDeps(), schedule: backgroundScheduler(c) });
-  const fresh = (await listSyncs(db, row)).find((s) => s.id === sync.id)!;
-  return c.json({ data: { outcome: { status: outcome.status, code: outcome.code, message: outcome.message, warning: outcome.warning, changes: outcome.result?.changes ?? [], import: outcome.result?.import ?? null }, sync: fresh } });
+  return c.json({ data: await runSyncNowFor(c.env, db, row, c.req.param("syncId") ?? "", user.id, c.get("now"), backgroundScheduler(c)) });
 });
+
+/** Sync now (route POST .../run and Ask Okara): SYNC_NOW_PER_HOUR per sync (429). Caller enforces owner. */
+export async function runSyncNowFor(env: Env, db: Db, row: ProjectRow, syncId: string, userId: string, now: Date, schedule?: (p: Promise<unknown>) => void) {
+  const sync = await loadSync(db, row, syncId);
+  if (!sync) throw notFound("Sync");
+  const r = await hitRateLimit(db, `import_sync_now:${sync.id}`.slice(0, 300), SYNC_NOW_PER_HOUR, 3600, now);
+  if (!r.allowed) throw new HttpError(429, "rate_limited", "Too many import requests. Try again shortly.", { retryAfterSeconds: r.retryAfterSeconds });
+  const outcome = await runSync(env, db, sync, now, userId, { ...sourceDeps(), schedule });
+  const fresh = (await listSyncs(db, row)).find((s) => s.id === sync.id)!;
+  return { outcome: { status: outcome.status, code: outcome.code, message: outcome.message, warning: outcome.warning, changes: outcome.result?.changes ?? [], import: outcome.result?.import ?? null }, sync: fresh };
+}
 
 importRoutes.delete("/projects/:pid/import/syncs/:syncId", async (c) => {
   const { db, row } = await ownerAccess(c);

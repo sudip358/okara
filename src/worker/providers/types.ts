@@ -149,6 +149,8 @@ export interface GscDimensionFilterGroup {
 }
 
 export interface GscProvider {
+  /** How requests reach Google (absent = the project's direct OAuth connection). Set by platform/gsc-maton.ts. */
+  transport?: { kind: "direct" | "maton"; label: string | null };
   listProperties(): Promise<Array<{ siteUrl: string; permissionLevel: string }>>;
   /** `metadata.first_incomplete_date` is set by Google when fresh (dataState "all") data is incomplete. */
   query(req: GscQueryRequest): Promise<{ rows: GscRow[]; responseAggregationType?: string; metadata?: { first_incomplete_date?: string; first_incomplete_hour?: string } }>;

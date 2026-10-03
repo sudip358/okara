@@ -26,7 +26,7 @@ import { cleanModelId, listCustomGeoEngines, resolveCustomProviderRow, resolveCu
 import { loadWorkspaceModels, modelForKeySource, type ModelInUse } from "../platform/provider-models";
 import { customGeoLaneLabel, customGeoProviderId } from "../geo/custom-lanes";
 import { createCustomGeoProvider } from "../providers/custom-geo";
-import { createGscProvider } from "../platform/gsc-client";
+import { resolveGscProvider } from "../platform/gsc-maton";
 import { anthropicGeoConfigured, createAnthropicGeoProvider } from "../providers/anthropic-geo";
 import { createGeminiProvider, geminiConfigured } from "../providers/gemini";
 import { createOpenAiGeoProvider, openaiGeoConfigured } from "../providers/openai-geo";
@@ -296,7 +296,8 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
 
   let gsc: RunContext["gsc"] = null;
   try {
-    gsc = await createGscProvider(env, db, ref, apiFetch, clock);
+    // Direct OAuth first (unchanged); Maton only when the project chose it and direct is not connected.
+    gsc = await resolveGscProvider(env, db, ref, apiFetch, clock, { calls, purpose: "gsc_sync", fetchImpl: opts.fetchImpl });
   } catch {
     await log.event("runtime", "info", "Search Console connection could not be loaded; treating it as not connected.");
   }

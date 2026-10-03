@@ -139,7 +139,7 @@ export async function syncGsc(ctx: RunContext, opts: SyncOptions = {}): Promise<
   await ctx.log.event(
     "gsc_sync",
     "started",
-    `Importing ${property}: current ${windowLabel(windows.current)}, previous ${windowLabel(windows.previous)} (final data, row cap ${rowCap}).`,
+    `Importing ${property}: current ${windowLabel(windows.current)}, previous ${windowLabel(windows.previous)} (final data, row cap ${rowCap})${gsc.transport?.kind === "maton" ? `, via Maton (${gsc.transport.label ?? "default connection"})` : ""}.`,
   );
 
   let requests = 0;
