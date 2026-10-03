@@ -61,7 +61,8 @@ export interface DecisionProvider {
 
 // ------------------------------------------------------------------ writing
 export interface WritingRequest {
-  purpose: "seo_recommendation" | "geo_proposal" | "geo_prompt_generation";
+  /** seo_link_sentence: one drafted sentence per internal-link pair ("insert PK sentence", links/draft.ts). */
+  purpose: "seo_recommendation" | "geo_proposal" | "geo_prompt_generation" | "seo_link_sentence";
   system: string;
   input: unknown; // serialized to JSON for the model
   jsonSchema: Record<string, unknown>;

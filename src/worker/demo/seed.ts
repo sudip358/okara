@@ -3,6 +3,7 @@
  * populated with fixture data for every screen. Every string says it is demo data; provider/model
  * are labelled "demo-fixture"; costs are unknown (null), never $0 actual.
  */
+import { buildAndStoreLinkGraph } from "../links/graph-store";
 import type { Env } from "../env";
 import { demoModeEnabled } from "../env";
 import type { Db } from "../lib/db";
@@ -243,6 +244,8 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
       h1_json: JSON.stringify(p.h1), headings_json: JSON.stringify(p.h1.map((text) => ({ level: 1, text }))), canonical: url, robots_meta: null,
       jsonld_types_json: JSON.stringify(p.jsonldTypes), jsonld_issues_json: JSON.stringify(p.jsonldIssues),
       internal_links_json: JSON.stringify(DEMO_PAGES.filter((o) => o.path !== p.path).slice(0, 4).map((o) => `${DEMO_ORIGIN}${o.path}`)),
+      // Fictional anchor texts (the linked page's H1) for the internal-links workbench tabs.
+      link_anchors_json: JSON.stringify(DEMO_PAGES.filter((o) => o.path !== p.path).slice(0, 4).map((o) => [`${DEMO_ORIGIN}${o.path}`, o.h1[0] ?? o.title, "c"])),
       word_count: p.wordCount, main_text_excerpt: p.excerpt, first_paragraph: p.firstParagraph || null, author: null, last_updated: null,
       outbound_citations: 0, table_count: 0, fetched_at: fetchedAt,
     });
@@ -625,5 +628,22 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
     await db.run("DELETE FROM projects WHERE workspace_id = ? AND id = ?", wid, pid);
     throw e;
   }
-  return (await db.first<ProjectRow>("SELECT * FROM projects WHERE workspace_id = ? AND id = ?", wid, pid))!;
+  const row = (await db.first<ProjectRow>("SELECT * FROM projects WHERE workspace_id = ? AND id = ?", wid, pid))!;
+  // Internal-links workbench: the demo pages as the fictional sitemap inventory, and the link graph built from the
+  // demo crawl (deterministic; nothing is fetched). Best effort: the demo works without the graph tabs.
+  try {
+    await db.batch(
+      DEMO_PAGES.map((p, i) =>
+        insertStatement("crawl_inventory", {
+          ...base, url_key: `${DEMO_ORIGIN}${p.path}`, url: `${DEMO_ORIGIN}${p.path}`, ord: i, source: p.path === "/" ? "home" : "sitemap", in_sitemap: 1,
+          sitemap_file: "sitemap.xml", first_seen_at: at(123), last_crawled_at: at(123),
+        }),
+      ),
+    );
+    await db.insert("crawl_inventory_state", { project_id: pid, workspace_id: wid, sitemap_urls: DEMO_PAGES.length, sitemap_read_at: at(123), next_ord: DEMO_PAGES.length, cursor_ord: DEMO_PAGES.length - 1, passes: 0, updated_at: at(121) });
+    await buildAndStoreLinkGraph(db, row, { trigger: "demo", now });
+  } catch {
+    /* graph tabs show their empty state */
+  }
+  return row;
 }

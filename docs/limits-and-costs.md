@@ -35,6 +35,11 @@ Other hard caps: 0-2 new recommendations per agent per project per day; manual r
 started per cron tick; Jev 12 s timeout per attempt with 2 retries; writers 90 s timeout per attempt with 2
 retries; GEO raw answers capped at 20,000 characters; evidence text capped at 600 characters.
 
+Internal links ([A25], [A30]): suggestion runs 3 per project per hour (Jev: at most 400 pairs, 10 pairs x 4 questions
+per call); drafted link sentences at most 20 per run in calls of 5 pairs (`provider_calls` + `writer_tokens`); link graph
+rebuilds 6 per project per hour (deterministic, no provider call); cluster edits 120 per project per hour; bulk status
+updates at most 200 ids; exports at most 500 selected ids. The rolling crawl stays inside `crawl_pages` per run.
+
 ## Budget mechanics (`src/worker/runs/budget.ts`)
 
 `usage_counters(scope_key, day, resource, used, limit_value)` holds one row per project (`project:<id>`) or
@@ -132,7 +137,9 @@ Limitations:
 | `provider_calls`, `usage_reservations`, `usage_counters` | Kept for the life of the project as financial/audit metadata (no prompts, answers, or keys) |
 | GSC slice rows (`gsc_metrics`) | Last 3 API syncs per project; totals and daily series kept with their sync |
 | GEO raw answers | Capped at 20,000 characters per observation; deleted with the project |
-| Page snapshots | Compact extracted evidence only (no raw HTML) |
+| Page snapshots | Compact extracted evidence only (no raw HTML). Bounded per crawl ([A30], `seo/crawl/rolling.ts`): every snapshot of the 7 latest crawls; outside them the latest snapshot per page in full and the previous one compacted (evidence columns cleared); older ones deleted; at most 2,000 rows changed per crawl |
+| Crawl inventory (`crawl_inventory`) | At most 10,000 URLs per project (sitemap URLs, up to 1,000 newly discovered link targets per crawl, the home page); URLs that leave the sitemap are marked, not deleted; deleted with the project |
+| Link graph (`link_graphs`, `link_graph_urls`) | Only the latest ready graph (plus a build in progress) per project; `link_verifications` one row per expected link (rows for links no longer expected are removed) |
 | Workflow instance state | Cloudflare Workflows retention only; D1 is the system of record |
 
 Project deletion (`DELETE /projects/:pid`) removes tenant data and deletes the stored Search Console token (Google's

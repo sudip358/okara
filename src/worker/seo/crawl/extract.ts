@@ -31,6 +31,12 @@ export const CAPS = {
   linkContextSentences: 40,
   linkContextChars: 240,
   /**
+   * Internal links with their anchor text stored per snapshot (links-workbench 2026-10-03): content links
+   * (outside nav/header/footer/aside) and breadcrumb links, deduplicated by href + text, in document order.
+   */
+  linkAnchors: 150,
+  linkAnchorText: 80,
+  /**
    * Open-element depth past which a page is not analysed (tooComplex). htmlparser2's cost per tag grows
    * with the open-element stack, so unclosed markup is superlinear (about 2 MB of unclosed tags took 30+ s
    * of CPU). Real pages stay far below this; normal pages are unaffected.
@@ -172,9 +178,20 @@ export interface ExtractedPage {
    * without nav/header/footer/aside), excluding headings and form controls; see linkContextSentences.
    */
   linkContext: string[];
+  /**
+   * Internal links with anchor text (links-workbench 2026-10-03), at most CAPS.linkAnchors, as
+   * [href, text, kind]: kind "c" = a content link (outside nav/header/footer/aside) with visible text,
+   * "i" = a content link whose only text is an image's alt text, "b" = a breadcrumb link (inside markup
+   * labelled breadcrumb, even within <nav>). Navigation, header, footer and sidebar links are not listed here
+   * (they stay in internalLinks). Text is plain, collapsed, and capped at CAPS.linkAnchorText.
+   */
+  linkAnchors: LinkAnchor[];
   /** Parsing stopped at CAPS.maxDepth open elements; the other fields are partial and must not be used. */
   tooComplex?: boolean;
 }
+
+/** [href, anchor text, kind]: "c" content text, "i" content image alt, "b" breadcrumb. */
+export type LinkAnchor = [string, string, "c" | "i" | "b"];
 
 const SKIP_TAGS = new Set(["script", "style", "noscript", "template", "svg", "iframe", "object", "canvas"]);
 const BOILERPLATE_TAGS = new Set(["nav", "header", "footer", "aside"]);
@@ -226,7 +243,12 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
   let viewport: string | null = null;
   let hasBreadcrumbNav = false;
   const genericAnchors: Array<{ href: string; text: string }> = [];
-  let anchor: { href: string; ariaLabel: string | null; buf: string } | null = null;
+  const linkAnchors: LinkAnchor[] = [];
+  const linkAnchorKeys = new Set<string>();
+  /** Open internal <a> in the body: generic-anchor and link-anchor bookkeeping. */
+  let anchor: { href: string; ariaLabel: string | null; buf: string; boiler: boolean; crumb: boolean; imgAlt: string | null } | null = null;
+  /** Depths of open elements marked as breadcrumbs (aria-label/class/id "breadcrumb", BreadcrumbList microdata). */
+  const crumbStack: number[] = [];
 
   const jsonLdRaw: string[] = [];
 
@@ -314,11 +336,11 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
 
         const id = (attrs.id ?? "").toLowerCase();
         if (
-          !hasBreadcrumbNav &&
           skipDepth === 0 &&
           (/breadcrumb/i.test(attrs["aria-label"] ?? "") || /breadcrumb/i.test(attrs.class ?? "") || id.includes("breadcrumb") || /BreadcrumbList/i.test(attrs.itemtype ?? ""))
         ) {
           hasBreadcrumbNav = true;
+          crumbStack.push(depth);
         }
         if (name === "div" && (APP_ROOT_IDS.has(id) || "data-reactroot" in attrs || "ng-app" in attrs || "data-server-rendered" in attrs)) {
           hasAppRoot = true;
@@ -351,12 +373,13 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
             const host = normalizeHost(u.hostname);
             if (host === pageHost) {
               if (internal.size < CAPS.internalLinks) internal.add(u.toString());
-              if (inBody && genericAnchors.length < CAPS.genericAnchors) anchor = { href: u.toString(), ariaLabel: attrs["aria-label"] ?? null, buf: "" };
+              if (inBody) anchor = { href: u.toString(), ariaLabel: attrs["aria-label"] ?? null, buf: "", boiler: boilerDepth > 0, crumb: crumbStack.length > 0, imgAlt: null };
             } else if (boilerDepth === 0 && inBody) {
               outbound.add(u.toString());
             }
           }
         } else if (name === "img" && inBody && skipDepth === 0) {
+          if (anchor && anchor.imgAlt === null && typeof attrs.alt === "string" && attrs.alt.trim()) anchor.imgAlt = collapse(attrs.alt);
           if (imagesTotal < CAPS.imageCount) {
             imagesTotal++;
             const role = (attrs.role ?? "").toLowerCase();
@@ -387,6 +410,7 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
         if (boilerDepth === 0 && inBody && headingLevel === 0 && uiDepth === 0) pushCtx(text);
       },
       onclosetag(name) {
+        if (crumbStack.length > 0 && crumbStack[crumbStack.length - 1] === depth) crumbStack.pop();
         if (depth > 0) depth--;
         if (name === "script" && inJsonLd) {
           inJsonLd = false;
@@ -402,6 +426,15 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
           const labelled = anchor.ariaLabel !== null && anchor.ariaLabel.trim() !== "" && !isGenericAnchorText(anchor.ariaLabel);
           if (text && !labelled && isGenericAnchorText(text) && genericAnchors.length < CAPS.genericAnchors) {
             genericAnchors.push({ href: anchor.href, text: cap(text, CAPS.anchorText) });
+          }
+          if ((!anchor.boiler || anchor.crumb) && linkAnchors.length < CAPS.linkAnchors) {
+            const kind: LinkAnchor[2] = anchor.crumb ? "b" : text ? "c" : anchor.imgAlt ? "i" : "c";
+            const shown = cap(text || anchor.imgAlt || collapse(anchor.ariaLabel ?? ""), CAPS.linkAnchorText);
+            const key = `${anchor.href}\u0000${shown.toLowerCase()}`;
+            if (!linkAnchorKeys.has(key)) {
+              linkAnchorKeys.add(key);
+              linkAnchors.push([anchor.href, shown, kind]);
+            }
           }
           anchor = null;
         }
@@ -472,6 +505,7 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
     hasBreadcrumbNav,
     genericAnchors,
     linkContext,
+    linkAnchors,
     ...(tooComplex ? { tooComplex: true } : {}),
   };
 }

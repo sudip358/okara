@@ -33,6 +33,7 @@ import { toRunSummary } from "../runs/runs-service";
 import { mapDecision, mapEvent } from "./runs";
 import { anyGeoEngineConfigured } from "../geo/engines";
 import { failingSyncs } from "../imports/service";
+import { linkVerificationAttention } from "../links/report";
 
 export const ZERO_STATE_MESSAGE = "No new verified opportunities today.";
 export const IMPLEMENTED_NOTE = "Marked implemented by a reviewer. The site change is not verified by this app.";
@@ -471,6 +472,8 @@ recommendationRoutes.get("/projects/:pid/attention", async (c) => {
     agents,
     recentEvents: events.map(mapEvent),
     importSyncs: syncs.map((s) => ({ id: s.id, spreadsheetTitle: s.spreadsheetTitle, tab: s.tab, destination: s.destination, code: s.lastErrorCode, message: s.lastError, lastRunAt: s.lastRunAt })),
+    // Internal links workbench: implemented or sheet-placed links the latest crawl of their source page did not find.
+    linkVerification: await linkVerificationAttention(db, project),
   };
   return c.json({ data: feed });
 });

@@ -132,41 +132,48 @@ export interface DefiningTerm {
   weight: number;
 }
 
-/** Defining terms for every document, keyed by document id. */
+/**
+ * Defining terms for every document, keyed by document id. Two passes over the corpus (document frequencies first,
+ * then each document's own term frequencies) so memory stays proportional to one document plus the vocabulary,
+ * which matters for full-site corpora (thousands of pages); the result is the same as a single pass.
+ */
 export function computeDefiningTerms(docs: readonly TermDoc[], opts: { extraStop?: ReadonlySet<string>; top?: number } = {}): Map<string, DefiningTerm[]> {
   const top = opts.top ?? TOP_TERMS;
-  const tfs = new Map<string, Map<string, number>>();
-  const labels = new Map<string, Map<string, Map<string, number>>>();
   const df = new Map<string, number>();
-
-  for (const doc of docs) {
-    const tf = new Map<string, number>();
-    const lab = new Map<string, Map<string, number>>();
+  const forEachTerm = (doc: TermDoc, visit: (w: WordToken, weight: number) => void) => {
     const add = (text: string | null | undefined, weight: number) => {
       if (!text) return;
       for (const w of wordTokens(text)) {
         if (!isTermWord(w.lower, opts.extraStop)) continue;
-        tf.set(w.stem, (tf.get(w.stem) ?? 0) + weight);
-        const forms = lab.get(w.stem) ?? new Map<string, number>();
-        forms.set(w.lower, (forms.get(w.lower) ?? 0) + 1);
-        lab.set(w.stem, forms);
+        visit(w, weight);
       }
     };
     add(doc.title, FIELD_WEIGHTS.title);
     for (const h of doc.h1s) add(h, FIELD_WEIGHTS.h1);
     for (const h of doc.headings) add(h, FIELD_WEIGHTS.heading);
     for (const s of doc.sentences) add(s, FIELD_WEIGHTS.sentence);
-    tfs.set(doc.id, tf);
-    labels.set(doc.id, lab);
-    for (const t of tf.keys()) df.set(t, (df.get(t) ?? 0) + 1);
+  };
+
+  // Pass 1: document frequencies.
+  for (const doc of docs) {
+    const seen = new Set<string>();
+    forEachTerm(doc, (w) => seen.add(w.stem));
+    for (const t of seen) df.set(t, (df.get(t) ?? 0) + 1);
   }
 
+  // Pass 2: each document's weighted term frequencies, scores, and top terms.
   const n = docs.length;
+  const siteWide = (term: string) => n >= SITE_WIDE_MIN_DOCS && (df.get(term) ?? 0) / n > SITE_WIDE_SHARE;
   const out = new Map<string, DefiningTerm[]>();
   for (const doc of docs) {
-    const tf = tfs.get(doc.id)!;
-    const lab = labels.get(doc.id)!;
-    const siteWide = (term: string) => n >= SITE_WIDE_MIN_DOCS && (df.get(term) ?? 0) / n > SITE_WIDE_SHARE;
+    const tf = new Map<string, number>();
+    const lab = new Map<string, Map<string, number>>();
+    forEachTerm(doc, (w, weight) => {
+      tf.set(w.stem, (tf.get(w.stem) ?? 0) + weight);
+      const forms = lab.get(w.stem) ?? new Map<string, number>();
+      forms.set(w.lower, (forms.get(w.lower) ?? 0) + 1);
+      lab.set(w.stem, forms);
+    });
     const scored = [...tf.entries()]
       .filter(([term]) => !siteWide(term))
       .map(([term, f]) => ({ term, score: f * (Math.log((1 + n) / (1 + (df.get(term) ?? 0))) + 1) }));

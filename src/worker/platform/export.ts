@@ -54,6 +54,14 @@ export const EXPORT_TABLES = [
   "import_records",
   "import_changes",
   "import_syncs",
+  // Internal links workbench, migration 0017: rolling-crawl inventory and cursor, the stored link graph, cluster
+  // overrides, and link verifications.
+  "crawl_inventory",
+  "crawl_inventory_state",
+  "link_graphs",
+  "link_graph_urls",
+  "link_cluster_overrides",
+  "link_verifications",
 ] as const;
 
 /** Column names that must never appear in an export, whichever table they are in. */

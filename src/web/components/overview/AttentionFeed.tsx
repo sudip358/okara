@@ -53,6 +53,21 @@ export function AttentionFeed({ projectId, feed, onRunStarted }: { projectId: st
             />
           </li>
         ))}
+        {feed.linkVerification && feed.linkVerification.notFound > 0 && (
+          <li className="space-y-1 px-4 py-3" data-testid="attention-link-verification">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-semibold">Placed links not found</span>
+              <Badge tone="danger">{feed.linkVerification.notFound}</Badge>
+            </div>
+            <p className="text-sm text-zinc-700 dark:text-zinc-300">
+              {feed.linkVerification.notFound === 1 ? "A link you marked implemented (or your sheet lists) was" : `${feed.linkVerification.notFound} links you marked implemented (or your sheet lists) were`} not found
+              in the latest crawl of the source page{feed.linkVerification.checkedAt ? ` (${formatRelative(feed.linkVerification.checkedAt)})` : ""}.
+            </p>
+            <Link className="text-sm" to={`${projectPath(projectId, "internal-links")}?tab=placed`}>
+              Review on the Internal links page
+            </Link>
+          </li>
+        )}
         {(feed.importSyncs ?? []).map((s) => (
           <li key={s.id} className="space-y-1 px-4 py-3" data-testid="attention-import-sync">
             <div className="flex flex-wrap items-center gap-2">

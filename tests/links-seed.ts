@@ -25,6 +25,10 @@ export interface LinkPageSeed {
   excerpt?: string | null;
   firstParagraph?: string | null;
   genericAnchors?: Array<{ href: string; text: string }> | null;
+  /** Workbench: [href path, text, kind] content/breadcrumb links with anchor text (null = not recorded). */
+  anchors?: Array<[string, string, "c" | "i" | "b"]> | null;
+  /** Workbench: redirect hops of a redirecting URL. */
+  chain?: Array<{ status: number; to: string }> | null;
 }
 
 export async function seedLinkCrawl(
@@ -32,7 +36,7 @@ export async function seedLinkCrawl(
   ws: string,
   pid: string,
   pages: LinkPageSeed[],
-  opts: { startedAt?: string; status?: string } = {},
+  opts: { startedAt?: string; status?: string; fetchedAt?: string } = {},
 ): Promise<{ crawlId: string; pageIds: Record<string, string> }> {
   const startedAt = opts.startedAt ?? FIXED_NOW.toISOString();
   const crawlId = newId("crw");
@@ -79,7 +83,9 @@ export async function seedLinkCrawl(
       first_paragraph: p.firstParagraph ?? null,
       generic_anchors_json: p.genericAnchors === null ? null : JSON.stringify(p.genericAnchors ?? []),
       link_context_json: JSON.stringify(p.sentences ?? []),
-      fetched_at: new Date(new Date(startedAt).getTime() + i++ * 1000).toISOString(),
+      link_anchors_json: p.anchors === undefined || p.anchors === null ? null : JSON.stringify(p.anchors.map(([h, t, k]) => [U(h), t, k])),
+      redirect_chain_json: p.chain ? JSON.stringify(p.chain.map((c) => ({ status: c.status, to: U(c.to) }))) : null,
+      fetched_at: opts.fetchedAt ?? new Date(new Date(startedAt).getTime() + i++ * 1000).toISOString(),
     });
   }
   return { crawlId, pageIds };

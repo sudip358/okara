@@ -119,9 +119,21 @@ export interface SitemapResult {
 
 export async function collectSitemapUrls(
   fetchImpl: typeof fetch,
-  opts: { verifiedHost: string; sitemapUrls: string[]; userAgent: string; timeoutMs?: number; maxUrls?: number },
+  opts: {
+    verifiedHost: string;
+    sitemapUrls: string[];
+    userAgent: string;
+    timeoutMs?: number;
+    maxUrls?: number;
+    /**
+     * Top-level sitemaps and index children read (default SITEMAP_MAX_CHILDREN). The rolling crawl's
+     * inventory (crawl/rolling.ts) reads more so a whole storefront sitemap index is covered.
+     */
+    maxChildren?: number;
+  },
 ): Promise<SitemapResult> {
   const maxUrls = opts.maxUrls ?? SITEMAP_MAX_URLS;
+  const maxChildren = Math.max(1, Math.floor(opts.maxChildren ?? SITEMAP_MAX_CHILDREN));
   const out: SitemapResult = { urls: [], source: new Map(), entries: [], fetched: [], refused: [], notes: [] };
   const seen = new Set<string>();
   const add = (u: string, file: string, lastmod: string | null) => {
@@ -184,14 +196,14 @@ export async function collectSitemapUrls(
     }
   };
 
-  let childBudget = SITEMAP_MAX_CHILDREN;
-  for (const top of [...new Set(opts.sitemapUrls)].slice(0, SITEMAP_MAX_CHILDREN)) {
+  let childBudget = maxChildren;
+  for (const top of [...new Set(opts.sitemapUrls)].slice(0, maxChildren)) {
     if (out.urls.length >= maxUrls) break;
     const parsed = await fetchOne(top);
     if (!parsed) continue;
     if (parsed.kind === "sitemapindex") {
       const children = parsed.locs;
-      if (children.length > childBudget) out.notes.push(`Sitemap index ${top} lists ${children.length} sitemaps; read ${Math.max(childBudget, 0)} (cap ${SITEMAP_MAX_CHILDREN}).`);
+      if (children.length > childBudget) out.notes.push(`Sitemap index ${top} lists ${children.length} sitemaps; read ${Math.max(childBudget, 0)} (cap ${maxChildren}).`);
       for (const child of children) {
         if (childBudget <= 0 || out.urls.length >= maxUrls) break;
         // Validate before counting against the budget so a refused child does not consume a slot silently.

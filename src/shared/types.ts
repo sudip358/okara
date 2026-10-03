@@ -1622,6 +1622,7 @@ export type ChatStreamEvent =
   | { type: "status"; text: string }
   | { type: "done"; result: ChatTurnResult }
   | { type: "error"; code: string; message: string };
+
 // ------------------------------------------------------------------ live view: project containers (appended 2026-10-03)
 // GET /projects/:pid/live/insights?kind=<LiveInsightKind> (docs/api.md "Live view: project containers",
 // docs/live-view-design.md section 17). Read-only, bounded aggregates of stored rows for the Live view's
@@ -1904,3 +1905,290 @@ export type LiveInsight =
   | LivePromptHistoryInsight
   | LiveSheetsInsight
   | LiveBudgetInsight;
+
+// ------------------------------------------------------------------ internal links workbench (2026-10-03)
+// Owner request 2026-10-03 ("all eight improvements"): full-site link graph from a rolling crawl, hubs and clusters,
+// Search Console priority, drafted sentences, broken/redirected links, anchor audit, auto-verification, sheet export.
+// API: docs/api.md "Internal links workbench". Fields added to existing interfaces use declaration merging (optional
+// fields only) so the interfaces above stay unchanged for their current readers (Live view, Ask Okara).
+
+export type LinkVerificationStatus = "pending" | "verified" | "not_found" | "source_unavailable" | "not_checked";
+
+export interface LinkVerificationView {
+  status: LinkVerificationStatus;
+  /** fetched_at of the source snapshot that was checked; null when none yet. */
+  checkedAt: string | null;
+  matchedVia: "target" | "final_url" | "canonical" | "redirecting_url" | null;
+  /** Plain text, e.g. "Verified on 2026-10-02: the source page links to the target." */
+  detail: string | null;
+  /** Short label: "verified on 2026-10-02", "not found in crawl of 2026-10-02", "pending next crawl". */
+  label: string;
+}
+
+export interface LinkPriorityView {
+  value: number;
+  relevance: number;
+  impact: number;
+  targetFactor: number;
+  sourceFactor: number;
+  clusterFactor: number;
+  positionBand: "top_3" | "near_top" | "striking_distance" | "beyond_20" | "none";
+  target: { impressions: number | null; clicks: number | null; position: number | null; basis: "page_rows" | "query_page_rows" | null };
+  source: { inlinks: number; clicks: number | null };
+  /** "Search Console 2026-09-01 – 2026-09-28, stored sync 2026-09-30"; null without Search Console data. */
+  gscLabel: string | null;
+  /** Plain-text lines: the formula with the numbers behind this priority. */
+  explanation: string[];
+  version: string;
+}
+
+export interface LinkDraftView {
+  /** The drafted sentence (plain text); contains the anchor exactly once. */
+  text: string;
+  /** Always "Draft sentence — review before publishing". */
+  label: string;
+  /** Evidence the writer was given (source sentences, target title/H1), cited by id. */
+  evidence: Array<{ id: string; text: string }>;
+  citedEvidenceIds: string[];
+  validation: { ok: boolean; errors: string[]; warnings: string[] };
+  /** Where to insert it: after this existing sentence of the source page (plain text), when the writer named one. */
+  insertAfter: string | null;
+  writer: { provider: string; model: string } | null;
+}
+
+export interface LinkSuggestion {
+  /** Versioned priority (relevance x Search Console impact x cluster gap) with the numbers behind it. */
+  priority?: LinkPriorityView | null;
+  /** existing_sentence = "wrap existing" (link an existing sentence); draft_sentence = "insert PK sentence". */
+  placement?: "existing_sentence" | "draft_sentence";
+  draft?: LinkDraftView | null;
+  cluster?: { hubUrl: string; hubTitle: string | null; gap: "hub_to_spoke" | "spoke_to_hub" | null } | null;
+  verification?: LinkVerificationView | null;
+  /** The source snapshot used (stale when older than 30 days). */
+  sourceSnapshot?: { fetchedAt: string; stale: boolean } | null;
+}
+
+export interface LinkGraphSummary {
+  state: CapabilityState;
+  graphId: string | null;
+  builtAt: string | null;
+  trigger: "crawl" | "manual" | "run" | "demo" | null;
+  /** "N of M sitemap URLs analysed (oldest snapshot <date>)". */
+  coverageLabel: string | null;
+  coverage: {
+    sitemapUrls: number;
+    sitemapAnalysed: number;
+    pagesWithSnapshot: number;
+    oldestSnapshot: string | null;
+    newestSnapshot: string | null;
+    stalePages: number;
+    staleDays: number;
+    neverCrawledSitemap: number;
+    linkOnlyNodes: number;
+  } | null;
+  counts: {
+    urls: number;
+    edges: number;
+    contentEdges: number;
+    orphans: number;
+    noContentLinks: number;
+    redirects: number;
+    clientErrors: number;
+    serverErrors: number;
+    hubs: number;
+    spokes: number;
+    linkedSpokes: number;
+    partialSpokes: number;
+    unlinkedSpokes: number;
+    unassignedSpokes: number;
+    anchorFlagged: number;
+    verified: number;
+    notFound: number;
+    pending: number;
+    sourceUnavailable: number;
+  } | null;
+  rolling: { inventoryUrls: number; neverCrawled: number; cursorOrd: number | null; passes: number; sitemapReadAt: string | null; pagesPerRun: number } | null;
+  /** started_at of a crawl that finished after this graph was built (rebuild to include it). */
+  newerCrawl: string | null;
+  gscLabel: string | null;
+  labels: string[];
+  versions: Record<string, string>;
+}
+
+export type LinkGraphFilter = "all" | "orphans" | "no_content_links" | "issues" | "stale" | "not_crawled" | "hubs" | "sitemap" | "anchor_flags";
+export type LinkGraphSort = "url" | "links_in" | "content_links_in" | "links_out" | "impressions" | "fetched_at";
+
+export interface LinkGraphUrlRow {
+  key: string;
+  url: string;
+  title: string | null;
+  pageType: string | null;
+  inSitemap: boolean;
+  crawled: boolean;
+  statusCode: number | null;
+  finalUrl: string | null;
+  redirectHops: number | null;
+  fetchedAt: string | null;
+  stale: boolean;
+  indexable: boolean;
+  noindex: boolean;
+  canonicalUrl: string | null;
+  linksIn: number;
+  contentLinksIn: number;
+  linksOut: number;
+  contentLinksOut: number;
+  orphan: boolean;
+  issue: "redirect" | "client_error" | "server_error" | null;
+  isHub: boolean;
+  hubUrl: string | null;
+  hubMethod: string | null;
+  gsc: { impressions: number; clicks: number; position: number | null } | null;
+  anchorFlags: string[];
+}
+
+export interface LinkGraphUrlPage {
+  graphId: string | null;
+  rows: LinkGraphUrlRow[];
+  total: number;
+  offset: number;
+  limit: number;
+  filter: LinkGraphFilter;
+  sort: LinkGraphSort;
+  dir: "asc" | "desc";
+  q: string | null;
+}
+
+export interface LinkGraphUrlDetail {
+  row: LinkGraphUrlRow;
+  inbound: Array<{ url: string; title: string | null; anchor: string | null; kind: "content" | "image" | "breadcrumb" | "navigation"; via: "redirect" | "canonical" | null }>;
+  /** Sources stored for the expanded row (capped); row.linksIn is the exact count. */
+  inboundShown: number;
+  outbound: Array<{ url: string; title: string | null; statusCode: number | null; issue: LinkGraphUrlRow["issue"] }>;
+  redirectChain: Array<{ status: number; to: string }>;
+  anchors: AnchorAuditView | null;
+}
+
+export interface AnchorAuditView {
+  url: string;
+  title: string | null;
+  anchoredInlinks: number;
+  distinctAnchors: number;
+  keyword: string | null;
+  keywordBasis: "search_console_query" | "h1" | "title" | null;
+  exactMatchShare: number | null;
+  top: Array<{ text: string; sources: number }>;
+  generic: Array<{ text: string; sources: number }>;
+  emptyAnchors: number;
+  queryTerms: string[];
+  flags: Array<"exact_match_heavy" | "repeated_anchor" | "generic_anchor" | "empty_anchor" | "no_query_terms">;
+  reasons: string[];
+}
+
+export interface AnchorAuditReport {
+  state: CapabilityState;
+  graphId: string | null;
+  builtAt: string | null;
+  rows: AnchorAuditView[];
+  total: number;
+  thresholds: Record<string, number>;
+  labels: string[];
+}
+
+export interface LinkSpokeView {
+  key: string;
+  url: string;
+  title: string | null;
+  type: "article" | "product";
+  method: "owner" | "sheet" | "collection_membership" | "existing_links" | "tfidf";
+  methodLabel: string;
+  similarity: number | null;
+  hubToSpoke: boolean;
+  spokeToHub: boolean;
+}
+
+export interface LinkHubView {
+  key: string;
+  url: string;
+  title: string | null;
+  source: "collection" | "sheet" | "owner";
+  sourceLabel: string;
+  spokes: LinkSpokeView[];
+  linked: number;
+  partial: number;
+  unlinked: number;
+}
+
+export interface LinkClusterReport {
+  state: CapabilityState;
+  graphId: string | null;
+  builtAt: string | null;
+  hubs: LinkHubView[];
+  unassigned: Array<{ key: string; url: string; title: string | null; type: "article" | "product" }>;
+  counts: { hubs: number; spokes: number; linked: number; partial: number; unlinked: number; unassigned: number };
+  labels: string[];
+}
+
+export interface BrokenLinkRow {
+  sourceUrl: string;
+  sourceTitle: string | null;
+  anchor: string | null;
+  kind: "content" | "image" | "breadcrumb" | "navigation";
+  targetUrl: string;
+  statusCode: number | null;
+  issue: "redirect" | "client_error" | "server_error";
+  finalUrl: string | null;
+  finalStatus: number | null;
+  chain: Array<{ status: number; to: string }>;
+  /** "Link to <final URL>" or "Remove or replace the link". */
+  fix: string;
+  targetCheckedAt: string | null;
+  sourceCheckedAt: string | null;
+  stale: boolean;
+  /** Linked from at least this many pages (navigation/template links: fix once in the theme). */
+  linkedFrom: number;
+}
+
+export interface BrokenLinksReport {
+  state: CapabilityState;
+  graphId: string | null;
+  builtAt: string | null;
+  rows: BrokenLinkRow[];
+  targets: number;
+  totalLinks: number;
+  truncated: boolean;
+  unchecked: number;
+  labels: string[];
+}
+
+export interface PlacedLinkRow {
+  key: string;
+  sourceUrl: string;
+  targetUrl: string;
+  anchor: string | null;
+  origins: Array<"implemented" | "accepted" | "sheet">;
+  suggestionId: string | null;
+  placedOn: string | null;
+  method: string | null;
+  hub: string | null;
+  verification: LinkVerificationView;
+}
+
+export interface PlacedLinksReport {
+  state: CapabilityState;
+  rows: PlacedLinkRow[];
+  counts: { total: number; verified: number; notFound: number; pending: number; sourceUnavailable: number; notChecked: number };
+  labels: string[];
+}
+
+export interface LinkSuggestionReport {
+  /** Link graph summary (coverage, counts) for the workbench header. */
+  graph?: LinkGraphSummary | null;
+  /** Drafted sentences ("insert PK sentence") in the latest run. */
+  drafts?: { state: "ready" | "setup_required" | "partial" | "demo"; drafted: number; rejected: number; candidates: number; cap: number; label: string } | null;
+  priorityVersion?: string | null;
+}
+
+export interface AttentionFeed {
+  /** Links you marked implemented (or your sheet says are placed) that the latest crawl of the source page did not find. */
+  linkVerification?: { notFound: number; checkedAt: string | null; examples: Array<{ sourceUrl: string; targetUrl: string }> } | null;
+}

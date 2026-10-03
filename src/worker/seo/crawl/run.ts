@@ -5,6 +5,13 @@
  * Safety: every request (robots.txt, sitemaps, pages, llms.txt) goes through guardedFetch over
  * ctx.crawlFetch; robots.txt is honoured for our own product token (the same token as the fetch UA),
  * including Crawl-delay. Only compact evidence is stored, never full HTML.
+ *
+ * Rolling crawl (internal-links workbench 2026-10-03, crawl/rolling.ts): the sitemap is read into a bounded
+ * inventory (more sitemap files and URLs than the audit parse) and each run crawls the next batch within the same
+ * page cap: never-crawled URLs first, then the oldest snapshots, Search Console pages first, round-robin from a
+ * stored cursor. After the crawl: inventory bookkeeping, bounded snapshot retention, and the full-site link graph
+ * (links/graph-store.ts) are best effort and never fail the crawl. The graph's earlier statuses also let the
+ * broken-internal-link rule judge links to URLs crawled in earlier runs.
  */
 import type { PageType, SiteType } from "@shared/types";
 import type { RunContext } from "../../runs/context";
@@ -20,6 +27,21 @@ import { extractPage, LINK_CONTEXT_MIN_WORDS, type ExtractedPage, type JsonLdIss
 import { classifyPageType } from "./page-type";
 import { normalizeUrlKey, runRules, RULESET_VERSION, type RuleSnapshot } from "../rules/registry";
 import { checkLlmsTxt, evaluateAiCrawlerAccess } from "../rules/ai-crawlers";
+import type { ProjectRow } from "../../platform/access";
+import {
+  INVENTORY_MAX_CHILDREN,
+  INVENTORY_MAX_URLS,
+  pruneSnapshots,
+  recordRollingCrawl,
+  refreshInventory,
+  rollingOrder,
+  ROLLING_VERSION,
+  type InventoryRefresh,
+  type InventoryRow,
+} from "./rolling";
+import { computeGraph, knownLinkTargets, storeComputedGraph, type ComputedGraph } from "../../links/graph-store";
+import { loadGscPageData } from "../../links/gsc";
+import { parseLinkAnchors } from "../../links/graph-load";
 
 export interface CrawlSummary { crawlRunId: string | null; pagesCrawled: number; pagesSkipped: number; findings: number; status: "completed" | "partial" | "failed" | "setup_required"; note: string }
 
@@ -89,11 +111,7 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
   const now = opts.now ?? (() => Date.now());
   const deadline = now() + (opts.deadlineMs ?? CRAWL_DEADLINE_MS);
 
-  const proj = await db.first<{ id: string; workspace_id: string; site_type: SiteType; verified_host: string | null }>(
-    "SELECT id, workspace_id, site_type, verified_host FROM projects WHERE id = ? AND workspace_id = ?",
-    project.id,
-    project.workspaceId,
-  );
+  const proj = await db.first<ProjectRow & { site_type: SiteType }>("SELECT * FROM projects WHERE id = ? AND workspace_id = ?", project.id, project.workspaceId);
   if (!proj) {
     await ctx.log.event("crawl", "failed", "Project not found.");
     return { crawlRunId: null, pagesCrawled: 0, pagesSkipped: 0, findings: 0, status: "failed", note: "Project not found." };
@@ -250,10 +268,48 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
     const sitemap =
       robots.status === "unreachable"
         ? { urls: [] as string[], source: new Map<string, string>(), entries: [] as SitemapResult["entries"], fetched: [] as string[], refused: [] as SitemapResult["refused"], notes: ["Sitemaps not read because robots.txt disallows all."] }
-        : await collectSitemapUrls(ctx.crawlFetch, { verifiedHost: host, sitemapUrls: sitemapCandidates, userAgent: ua, timeoutMs: opts.pageTimeoutMs });
+        : await collectSitemapUrls(ctx.crawlFetch, {
+            verifiedHost: host,
+            sitemapUrls: sitemapCandidates,
+            userAgent: ua,
+            timeoutMs: opts.pageTimeoutMs,
+            // The rolling crawl's inventory reads the whole (bounded) sitemap, not only the audit's first 500 URLs.
+            maxUrls: INVENTORY_MAX_URLS,
+            maxChildren: INVENTORY_MAX_CHILDREN,
+          });
     notes.push(...sitemap.notes);
     if (sitemap.refused.length) notes.push(`${sitemap.refused.length} sitemap entr${sitemap.refused.length === 1 ? "y" : "ies"} refused by the SSRF/host guard.`);
     await ctx.log.event("crawl", "info", `Sitemaps: ${sitemap.fetched.length} read, ${sitemap.urls.length} URLs, ${sitemap.refused.length} refused.`);
+
+    // ---- rolling inventory: which URLs this run takes (never-crawled first, then the oldest snapshots)
+    const homeUrl = `https://${host}/`;
+    const scope = { id: project.id, workspaceId: project.workspaceId };
+    let rolling: { ordered: InventoryRow[]; refresh: InventoryRefresh } | null = null;
+    try {
+      const truncated =
+        sitemap.urls.length >= INVENTORY_MAX_URLS ||
+        sitemap.notes.some((n) => /lists \d+ sitemaps|capped|not followed|Skipped gzip/i.test(n)) ||
+        sitemap.refused.some((r) => r.kind === "sitemap");
+      const refresh = await refreshInventory(
+        db,
+        scope,
+        { urls: sitemap.urls, entries: sitemap.entries, source: sitemap.source, fetchedCount: sitemap.fetched.length, truncated },
+        homeUrl,
+        ctx.clock(),
+      );
+      const gsc = await loadGscPageData(db, proj, { topQueries: false }).catch(() => null);
+      const impressions = gsc ? new Map([...gsc.pages].map(([k, m]) => [k, m.impressions])) : null;
+      const ordered = rollingOrder(refresh.rows, { impressions, cursorOrd: refresh.state.cursorOrd, homeKey: normalizeUrlKey(homeUrl) });
+      rolling = { ordered, refresh };
+      notes.push(...refresh.notes);
+      const never = refresh.rows.filter((r) => !r.lastCrawledAt).length;
+      const inSitemap = refresh.rows.filter((r) => r.inSitemap).length;
+      notes.push(
+        `Rolling crawl (${ROLLING_VERSION}): ${refresh.rows.length} known URLs (${inSitemap} in the sitemap, ${never} never crawled); this run takes up to ${pageLimit} pages: never-crawled first, then the oldest snapshots${impressions ? ", Search Console pages first" : ""}.`,
+      );
+    } catch (e) {
+      notes.push(`Rolling crawl inventory unavailable (${(e as Error).message.slice(0, 120)}); crawling the sitemap in order.`);
+    }
 
     // ---- queue
     const seen = new Set<string>();
@@ -273,8 +329,11 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
       seen.add(key);
       (u.search ? secondary : primary).push(u.toString());
     };
-    enqueue(`https://${host}/`);
-    sitemap.urls.forEach(enqueue);
+    enqueue(homeUrl);
+    if (rolling) for (const r of rolling.ordered) enqueue(r.url);
+    else sitemap.urls.forEach(enqueue);
+    const dispatched: string[] = [];
+    const recordedUrls: string[] = [];
 
     const snapshots: RuleSnapshot[] = [];
     const skipCounts: Record<string, number> = {};
@@ -333,9 +392,11 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
         extracted?: ExtractedPage | null;
         robotsMeta?: string | null;
         fetched: boolean;
+        redirectChain?: Array<{ status: number; to: string }> | null;
       },
     ) => {
       const x = data.extracted ?? null;
+      recordedUrls.push(url);
       const cls = classifyPageType({ url, jsonLdTypes: x?.jsonLdTypes, sitemapFile: sitemap.source.get(url) ?? null });
       const fetchedAt = iso(ctx.clock());
       const pageRow = await upsertPage(url, cls, data.fetched ? fetchedAt : null);
@@ -371,6 +432,8 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
         breadcrumb_nav: x ? (x.hasBreadcrumbNav ? 1 : 0) : null,
         generic_anchors_json: x ? JSON.stringify(x.genericAnchors) : null,
         link_context_json: JSON.stringify(x?.linkContext ?? []),
+        link_anchors_json: x ? JSON.stringify(x.linkAnchors) : null,
+        redirect_chain_json: data.redirectChain && data.redirectChain.length ? JSON.stringify(data.redirectChain.slice(0, 10)) : null,
         fetched_at: fetchedAt,
       }));
       if (pendingSnapshots.length >= SNAPSHOT_BATCH) await flushSnapshots();
@@ -403,7 +466,7 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
       const row = await db.first<Record<string, unknown>>(
         `SELECT s.* FROM page_snapshots s JOIN pages p ON p.id = s.page_id
           WHERE p.project_id = ? AND p.workspace_id = ? AND s.workspace_id = ? AND p.url = ?
-            AND s.content_hash = ? AND s.skipped_reason IS NULL AND s.status_code BETWEEN 200 AND 299
+            AND s.content_hash = ? AND s.skipped_reason IS NULL AND s.status_code BETWEEN 200 AND 299 AND s.compacted_at IS NULL
           ORDER BY s.fetched_at DESC LIMIT 1`,
         project.id,
         project.workspaceId,
@@ -418,6 +481,10 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
       // to re-parse.
       const linkContext = parseJson<unknown[]>(row.link_context_json, []).filter((s): s is string => typeof s === "string");
       if (linkContext.length === 0 && Number(row.word_count ?? 0) >= LINK_CONTEXT_MIN_WORDS) return null;
+      // Snapshots taken before anchors were recorded (links-workbench 2026-10-03) are re-extracted when they have links.
+      const linkAnchors = parseLinkAnchors(row.link_anchors_json as string | null);
+      const storedLinks = parseJson<string[]>(row.internal_links_json, []);
+      if (linkAnchors === null && storedLinks.length > 0) return null;
       return {
         title: (row.title as string | null) ?? null,
         metaDescription: (row.meta_description as string | null) ?? null,
@@ -426,7 +493,7 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
         canonical: (row.canonical as string | null) ?? null,
         h1s: parseJson<string[]>(row.h1_json, []),
         headings: parseJson<Array<{ level: number; text: string }>>(row.headings_json, []),
-        internalLinks: parseJson<string[]>(row.internal_links_json, []),
+        internalLinks: storedLinks,
         jsonLdTypes: parseJson<string[]>(row.jsonld_types_json, []),
         jsonLdIssues: parseJson<JsonLdIssue[]>(row.jsonld_issues_json, []),
         hasProductOffer: false,
@@ -445,6 +512,7 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
         hasBreadcrumbNav: Number(row.breadcrumb_nav ?? 0) === 1,
         genericAnchors: parseJson<Array<{ href: string; text: string }>>(row.generic_anchors_json, []),
         linkContext,
+        linkAnchors: linkAnchors ?? [],
       };
     };
 
@@ -473,7 +541,7 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
       const redirected = res.redirects.length > 0;
       if (redirected) {
         // Record the redirect itself; analyse the target as its own URL if not already seen.
-        await record(url, { statusCode: res.redirects[0]!.status, finalUrl, skippedReason: null, fetched: true });
+        await record(url, { statusCode: res.redirects[0]!.status, finalUrl, skippedReason: null, fetched: true, redirectChain: res.redirects });
         const key = normalizeUrlKey(finalUrl);
         if (seen.has(key) && normalizeUrlKey(url) !== key) return;
         seen.add(key);
@@ -537,6 +605,7 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
         }
         const url = nextUrl();
         if (!url) break;
+        dispatched.push(url);
         if (!robotsAllows(robots, CRAWLER_UA_TOKEN, url)) {
           if (skipRecords < MAX_SKIP_RECORDS) {
             skipRecords++;
@@ -562,6 +631,66 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
     if (deadlineReached) notes.push(`Crawl time budget (${Math.round((opts.deadlineMs ?? CRAWL_DEADLINE_MS) / 1000)} s) reached; stopped before completing the queue.`);
     if (reused > 0) notes.push(`${reused} page(s) unchanged since the previous crawl (same content hash); extraction reused.`);
 
+    // ---- rolling inventory bookkeeping, snapshot retention, link graph (best effort: never fails the crawl)
+    if (rolling) {
+      try {
+        const linkTargets: string[] = [];
+        const targetSeen = new Set<string>();
+        for (const snap of snapshots) {
+          if (snap.skippedReason || snap.statusCode === null || snap.statusCode < 200 || snap.statusCode >= 300) continue;
+          for (const l of snap.internalLinks) {
+            if (linkTargets.length >= 5_000) break;
+            let u: URL;
+            try {
+              u = assertCrawlableUrl(l, host);
+            } catch {
+              continue;
+            }
+            if (NON_HTML_EXT.test(u.pathname)) continue;
+            const k = normalizeUrlKey(u.toString());
+            if (targetSeen.has(k)) continue;
+            targetSeen.add(k);
+            linkTargets.push(u.toString());
+          }
+        }
+        const r = await recordRollingCrawl(
+          db,
+          scope,
+          {
+            crawlRunId,
+            crawledAt: startedAt,
+            recordedUrls,
+            linkTargets,
+            dispatched,
+            ordered: rolling.ordered,
+            inventoryKeys: new Set(rolling.refresh.rows.map((x) => x.urlKey)),
+            state: rolling.refresh.state,
+            homeUrl,
+          },
+          ctx.clock(),
+        );
+        if (r.discovered > 0) notes.push(`Rolling crawl: ${r.discovered} new URL(s) added to the inventory (link targets and redirects not in the sitemap).`);
+      } catch (e) {
+        notes.push(`Rolling crawl bookkeeping failed: ${(e as Error).message.slice(0, 160)}`);
+      }
+    }
+    try {
+      const pruned = await pruneSnapshots(db, scope, ctx.clock());
+      if (pruned.deleted || pruned.compacted) notes.push(`Snapshot retention: ${pruned.deleted} old snapshot(s) deleted, ${pruned.compacted} compacted${pruned.more ? "; more next run" : ""}.`);
+    } catch (e) {
+      notes.push(`Snapshot retention skipped: ${(e as Error).message.slice(0, 160)}`);
+    }
+    let graph: ComputedGraph | null = null;
+    if (!cancelled && !deadlineReached) {
+      try {
+        graph = await computeGraph(db, proj, { now: ctx.clock(), includeCrawlRunId: crawlRunId });
+      } catch (e) {
+        notes.push(`Link graph not rebuilt: ${(e as Error).message.slice(0, 160)}`);
+      }
+    } else {
+      notes.push("Link graph not rebuilt after a stopped crawl; rebuild it from the Internal links page.");
+    }
+
     // ---- AI crawler access + rules
     const llms = await checkLlmsTxt(ctx.crawlFetch, host, ua);
     const aiCrawlerAccess = evaluateAiCrawlerAccess(robots, llms, `https://${host}/`);
@@ -575,6 +704,7 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
       now: ctx.clock(),
       robots,
       aiCrawlerAccess,
+      knownLinkTargets: graph ? knownLinkTargets(graph.graph, crawlRunId) : undefined,
     });
     const createdAt = iso(ctx.clock());
     const stmts = findings.map((f) =>
@@ -626,6 +756,20 @@ export async function runCrawlWith(ctx: RunContext, opts: CrawlOptions): Promise
     );
     await ctx.budget.settle(reservation, settleAmount(fetches));
     await ctx.log.event("crawl", status === "completed" ? "completed" : "partial", `${note}; ${findings.length} findings.`);
+    if (graph) {
+      try {
+        const stored = await storeComputedGraph(db, proj, graph, { trigger: "crawl", now: ctx.clock(), crawlRunId });
+        await ctx.log.event(
+          "crawl",
+          "info",
+          stored
+            ? `Link graph rebuilt: ${graph.summary.coverageLabel}; ${graph.summary.counts.orphans} orphan page(s), ${graph.summary.counts.redirects + graph.summary.counts.clientErrors + graph.summary.counts.serverErrors} linked URL(s) redirecting or failing.`
+            : "Link graph not stored: another rebuild is in progress.",
+        );
+      } catch (e) {
+        await ctx.log.event("crawl", "info", `Link graph not stored: ${(e as Error).message.slice(0, 160)}`).catch(() => undefined);
+      }
+    }
     return { crawlRunId, pagesCrawled: crawled, pagesSkipped: skipped, findings: findings.length, status, note };
   } catch (e) {
     // Best effort: cleanup may fail for the same reason the crawl did (e.g. the subrequest cap); the

@@ -1285,7 +1285,9 @@ class Builder {
           source: "crawl",
           refId: s.id,
           window: day,
-          text: `Internal link suggestion (Jev act tier): add a link from ${s.source.url} to ${s.target.url} with the anchor "${anchor}" in the sentence "${sentence}"${s.role ? ` (role: ${s.role.replace(/_/g, " ")})` : ""}.`,
+          text: `Internal link suggestion (Jev act tier): add a link from ${s.source.url} to ${s.target.url} with the anchor "${anchor}" in the sentence "${sentence}"${s.role ? ` (role: ${s.role.replace(/_/g, " ")})` : ""}.${
+            s.cluster?.gap ? ` It closes a cluster gap: ${s.cluster.gap === "hub_to_spoke" ? "the hub page does not link to this spoke yet" : "the spoke does not link back to its hub yet"} (hub ${s.cluster.hubUrl}).` : ""
+          }`,
           data: {
             linkSuggestionId: s.id,
             sourceUrl: s.source.url,
@@ -1295,6 +1297,8 @@ class Builder {
             role: s.role,
             tier: s.decision.tier,
             shouldExist: s.decision.shouldExist,
+            ...(s.cluster?.gap ? { clusterGap: s.cluster.gap, hub: s.cluster.hubUrl } : {}),
+            ...(s.priority ? { priority: s.priority.value, priorityVersion: s.priority.version } : {}),
           },
         },
       ];

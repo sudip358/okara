@@ -449,7 +449,11 @@ export async function placedLinkPairs(db: Db, p: ProjectRow): Promise<Map<string
   return out;
 }
 
-/** Links placed per the sheet, each checked against the latest crawl's internal links of its source page. */
+/**
+ * Links placed per the sheet, each checked against the internal links of the LATEST SNAPSHOT of its source page across
+ * crawls (the rolling crawl covers the site over several runs; internal-links workbench 2026-10-03), not only the
+ * latest crawl. The workbench's "Placed & verified" tab adds the date-aware verification (links/verify.ts).
+ */
 export async function importedLinksReport(db: Db, p: ProjectRow): Promise<ImportedLinksReport> {
   const recs = (await activeRecords(db, p, "implemented_links")).filter((r) => r.status === "placed" || r.status === "removed_from_sheet");
   const crawl = await db.first<{ id: string; started_at: string }>(
@@ -460,17 +464,37 @@ export async function importedLinksReport(db: Db, p: ProjectRow): Promise<Import
   );
   const linksBySource = new Map<string, Set<string>>();
   if (crawl && recs.length) {
-    const snaps = await db.all<{ url: string; final_url: string | null; internal_links_json: string }>(
-      `SELECT pg.url, s.final_url, s.internal_links_json FROM page_snapshots s JOIN pages pg ON pg.id = s.page_id AND pg.workspace_id = s.workspace_id
-        WHERE s.workspace_id = ? AND s.project_id = ? AND s.crawl_run_id = ?`,
-      p.workspace_id,
-      p.id,
-      crawl.id,
-    );
-    for (const s of snaps) {
-      const links = new Set(parseJson<unknown[]>(s.internal_links_json, []).filter((x): x is string => typeof x === "string").map((u) => normalizeUrlKey(u)));
-      linksBySource.set(normalizeUrlKey(s.url), links);
-      if (s.final_url) linksBySource.set(normalizeUrlKey(s.final_url), links);
+    // Exact page URLs of the sources, with and without a trailing slash (pages.url is the crawled URL string).
+    const variants = new Set<string>();
+    for (const r of recs.slice(0, 1000)) {
+      const src = parseJson<{ source?: string }>(r.data_json, {}).source;
+      if (!src) continue;
+      variants.add(src);
+      variants.add(src.endsWith("/") ? src.replace(/\/+$/, "") : `${src}/`);
+    }
+    const list = [...variants];
+    for (let i = 0; i < list.length; i += 90) {
+      const part = list.slice(i, i + 90);
+      const snaps = await db.all<{ url: string; final_url: string | null; internal_links_json: string; link_anchors_json: string | null }>(
+        `SELECT pg.url, s.final_url, s.internal_links_json, s.link_anchors_json FROM pages pg
+           JOIN page_snapshots s ON s.id = (
+                SELECT s2.id FROM page_snapshots s2 JOIN crawl_runs c ON c.id = s2.crawl_run_id AND c.workspace_id = s2.workspace_id
+                 WHERE s2.page_id = pg.id AND s2.workspace_id = pg.workspace_id AND c.status IN ('completed', 'partial')
+                 ORDER BY s2.fetched_at DESC, s2.rowid DESC LIMIT 1)
+          WHERE pg.workspace_id = ? AND pg.project_id = ? AND pg.url IN (${part.map(() => "?").join(", ")})`,
+        p.workspace_id,
+        p.id,
+        ...part,
+      );
+      for (const s of snaps) {
+        const hrefs = [
+          ...parseJson<unknown[]>(s.internal_links_json, []).filter((x): x is string => typeof x === "string"),
+          ...parseJson<unknown[]>(s.link_anchors_json ?? "[]", []).map((a) => (Array.isArray(a) && typeof a[0] === "string" ? a[0] : null)).filter((x): x is string => x !== null),
+        ];
+        const links = new Set(hrefs.map((u) => normalizeUrlKey(u)));
+        linksBySource.set(normalizeUrlKey(s.url), links);
+        if (s.final_url) linksBySource.set(normalizeUrlKey(s.final_url), links);
+      }
     }
   }
   const links: ImportedLinkStatus[] = recs.slice(0, 1000).map((r) => {

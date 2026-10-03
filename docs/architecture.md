@@ -18,6 +18,7 @@ Specification: `docs/build-kit.md`. API contract: `docs/api.md` + `src/shared/ty
 | SEO agent | `src/worker/seo/*` | Crawl (SSRF-guarded), rule registry, GSC sync, candidate shortlist, Jev decisions, priority, writer drafts |
 | GEO agent | `src/worker/geo/*`, `src/worker/providers/{gemini,perplexity,rates}.ts` | Grounded prompt sampling, mention/citation/sentiment analysis, displacement, search-query capture, proposals |
 | Recommendations | `src/worker/recommendations/*` | Evidence rows, dedup, 0-2/day cap, persistence shared by both agents |
+| Internal links | `src/worker/links/*`, `src/worker/seo/crawl/rolling.ts`, `src/worker/routes/links.ts`, `src/web/pages/links/*` | Rolling crawl inventory, full-site link graph, clusters, priority, drafted sentences, broken links, anchor audit, auto-verification, sheet export |
 | Ask Okara | `src/worker/chat/*`, `src/worker/routes/chat.ts`, `src/web/components/chat/*` | In-app chat agent: tool-calling writer model over internal read tools; confirmed actions only |
 | Web | `src/web/*` | SPA; renders untrusted text as plain text |
 
@@ -146,6 +147,48 @@ POST .../actions/:aid/confirm ──► lease + pending→executing (exactly onc
   marks tool data as untrusted; the UI renders answers as markdown-lite text with in-app or http(s) links only.
 - Streaming: `?stream=1` returns ndjson events through a `TransformStream`; the turn keeps running (and is
   stored) if the client disconnects (`waitUntil`).
+
+## Internal links (suggester [A25] and workbench [A30])
+
+```
+seo.crawl (runCrawl) ── refreshInventory (sitemap ≤25 files / ≤10,000 URLs) ── rollingOrder ── crawl ≤ crawl_pages URLs
+      │  snapshots: internal_links_json + link_anchors_json ([href, text, c|i|b]) + redirect_chain_json
+      ├─ recordRollingCrawl (cursor, discovered link targets ≤1,000/crawl) ── pruneSnapshots (bounded retention)
+      └─ computeGraph ─► rules (knownLinkTargets: earlier crawls' statuses) ─► storeComputedGraph (best effort)
+POST .../graph/rebuild, POST .../run ──► buildAndStoreLinkGraph
+   loadLatestSnapshots (latest snapshot per page, keyset pages of 200) + crawl_inventory + loadGscPageData (stored sync)
+   ─► buildLinkGraph (nodes, edges, redirect/canonical credit, orphans, coverage)
+   ─► buildClusters (hubs, spokes, methods, gaps) ─► auditAllAnchors ─► verifyExpectedLinks ─► link_graphs + link_graph_urls
+POST .../run ─► candidates (TF-IDF overlap + cluster gaps) ─► computePriority ─► sentences/anchors (anchor audit aware)
+   ─► Jev (4 questions per pair) ─► draftSentences (writer, ≤20/run) ─► link_suggestions
+```
+
+- **Rolling crawl** (`seo/crawl/rolling.ts`): `crawl_inventory` (one row per known URL: sitemap, discovered link
+  target, home; `ord` is first-seen order) and `crawl_inventory_state` (sitemap hash, cursor, passes). Each crawl takes
+  never-crawled URLs first (Search Console impressions, sitemap before link-discovered), then the oldest snapshots,
+  inside the existing per-run page cap, so the crawl's D1 and subrequest budget per run is unchanged. A failed or
+  truncated sitemap read never removes inventory rows. `pruneSnapshots` keeps every snapshot of the 7 latest crawls,
+  then the latest full + previous compacted snapshot per page, and deletes older ones (≤2,000 rows per crawl).
+- **Graph** (`links/graph-load.ts`, `graph.ts`, `graph-store.ts`, `graph-read.ts`): pure computation over the latest
+  snapshot of every page (completed/partial crawls), stored as one `link_graphs` row and one `link_graph_urls` row per
+  URL (json_each inserts: 4 bound parameters per statement, batches of 50). Reads (per-URL table, detail, broken
+  links, anchors, clusters, CSV) query `link_graph_urls` only, keyset- or offset-paged and bounded, so the tabs do not
+  recompute the graph. A build younger than 10 minutes blocks a concurrent build. Measured locally in tests: 2,000
+  pages and 20,000 links build and read without any statement over 100 parameters.
+- **Clusters** (`links/clusters.ts`): hubs (collections, sheet Hub column, owner marks) and spokes (articles, products)
+  with a stored assignment method; owner overrides (`link_cluster_overrides`) apply at read time and at the next build.
+- **Priority** (`links/priority.ts`) and **drafts** (`links/draft.ts`): code computes the priority from stored Search
+  Console rows and the graph; the writer only drafts one sentence per pair from stored evidence (source page text,
+  target title/H1), validated by code (`writing/validate.ts`, `draftcheck/flags.ts`, anchor exactly once, no new facts),
+  metered through the workspace writer (`provider_calls` + `writer_tokens`).
+- **Verification** (`links/verify.ts`): expected links (accepted/implemented suggestions, sheet-placed links) checked
+  on every graph build against the source's latest snapshot; results in `link_verifications`, surfaced on the
+  suggestions, the Placed & verified tab and the Overview attention feed.
+- **Tenancy and safety**: every statement filters by `workspace_id` + `project_id`; crawling stays on the verified
+  host through the SSRF guard; anchors, titles, sentences and drafts are untrusted text (plain text in the UI,
+  sanitized evidence for Jev and the writer); cluster edits accept only URLs on the verified host.
+- **UI** (`src/web/pages/links/*`): tabs Suggestions, Clusters, Link graph, Broken links, Anchors, Placed & verified
+  (`?tab=`), each with setup/empty/demo states, server-side paging for the per-URL table, and CSV exports.
 
 ## Deviations and known limitations
 

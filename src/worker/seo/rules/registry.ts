@@ -57,6 +57,12 @@ export interface RuleInput {
   sitemapRefused?: Array<{ url: string; reason: string; kind?: "page" | "sitemap" }>;
   /** Evaluation time (the crawl clock); omitted = rules that compare dates skip that comparison. */
   now?: Date;
+  /**
+   * Latest known status of URLs crawled in EARLIER crawls (internal-links workbench: the link graph built from the
+   * latest snapshot of every page), keyed by normalizeUrlKey. Lets the broken-internal-link rule judge links from this
+   * crawl's pages to URLs the rolling crawl checked before. Omitted = this crawl's snapshots only.
+   */
+  knownLinkTargets?: ReadonlyMap<string, { statusCode: number | null; skippedReason: string | null; fetchedAt: string; finalUrl: string | null }>;
 }
 
 export interface RuleContext extends RuleInput {
@@ -378,16 +384,33 @@ export const RULES: readonly Rule[] = [
     severity: "moderate",
     appliesTo: "all",
     templateable: false,
-    applicability: "Only links to URLs checked in this crawl are evaluated; links to uncrawled URLs are not claimed broken.",
+    applicability:
+      "Only links to URLs checked in this crawl, or in an earlier crawl (their latest snapshot, with its date), are evaluated; links to URLs never crawled are not claimed broken.",
     emit: (ctx) => {
       const byKey = new Map(ctx.all.map((s) => [normalizeUrlKey(s.url), s]));
       const out: Emitted[] = [];
       for (const s of ctx.pages) {
-        const broken = s.internalLinks
-          .map((l) => byKey.get(normalizeUrlKey(l)))
-          .filter((t): t is RuleSnapshot => !!t && !t.skippedReason && t.statusCode !== null && t.statusCode >= 400);
-        if (broken.length) {
-          out.push(page(s, `${broken.length} internal link(s) point to URLs that returned an error.`, { targets: broken.slice(0, 10).map((t) => ({ url: t.url, status: t.statusCode })) }));
+        const targets: Array<{ url: string; status: number | null; checkedAt?: string }> = [];
+        const seen = new Set<string>();
+        for (const l of s.internalLinks) {
+          const key = normalizeUrlKey(l);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const t = byKey.get(key);
+          if (t) {
+            if (!t.skippedReason && t.statusCode !== null && t.statusCode >= 400) targets.push({ url: t.url, status: t.statusCode });
+            continue;
+          }
+          const k = ctx.knownLinkTargets?.get(key);
+          if (k && !k.skippedReason && k.statusCode !== null && k.statusCode >= 400) targets.push({ url: l, status: k.statusCode, checkedAt: k.fetchedAt.slice(0, 10) });
+        }
+        if (targets.length) {
+          const earlier = targets.filter((t) => t.checkedAt).length;
+          out.push(
+            page(s, `${targets.length} internal link(s) point to URLs that returned an error${earlier ? ` (${earlier} checked in an earlier crawl)` : ""}.`, {
+              targets: targets.slice(0, 10).map((t) => ({ url: t.url, status: t.status, ...(t.checkedAt ? { checkedAt: t.checkedAt } : {}) })),
+            }),
+          );
         }
       }
       return out;

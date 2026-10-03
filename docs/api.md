@@ -60,7 +60,19 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | POST | /projects/:pid/seo/internal-links/run | links | user-triggered run on the latest crawl (budgeted, rate-limited) → `LinkSuggestionReport` [A25] |
 | GET | /projects/:pid/seo/internal-links | links | latest `LinkSuggestionReport` |
 | PATCH | /projects/:pid/seo/internal-links/:id | links | body `{userStatus}` → `LinkSuggestion` |
-| GET | /projects/:pid/seo/internal-links/export?format=csv\|json | links | download of current suggestions |
+| GET | /projects/:pid/seo/internal-links/export?format=csv\|json\|sheet&ids=&userStatus=&status=&placement= | links | download of current suggestions; `sheet` = the owner's tracking-sheet columns (see "Internal links workbench") |
+| POST | /projects/:pid/seo/internal-links/bulk | links | body `{ids (1–200), userStatus}` → `{updated, missing, suggestions}` |
+| GET | /projects/:pid/seo/internal-links/graph | links | `LinkGraphSummary` (coverage, counts, rolling crawl) |
+| POST | /projects/:pid/seo/internal-links/graph/rebuild | links | `LinkGraphSummary`; deterministic rebuild (no provider call), 6 per project per hour |
+| GET | /projects/:pid/seo/internal-links/graph/urls?filter=&sort=&dir=&q=&offset=&limit= | links | `LinkGraphUrlPage` (per-URL link table) |
+| GET | /projects/:pid/seo/internal-links/graph/url?url= | links | `LinkGraphUrlDetail` (inbound sources with anchors, outbound targets, redirect chain, anchor audit) |
+| GET | /projects/:pid/seo/internal-links/graph/export | links | per-URL CSV (UTF-8 with BOM) |
+| GET | /projects/:pid/seo/internal-links/clusters | links | `LinkClusterReport` |
+| PUT | /projects/:pid/seo/internal-links/clusters/hub | links | body `{url, hub: true\|false\|null}` → `LinkClusterReport` |
+| PUT | /projects/:pid/seo/internal-links/clusters/assign | links | body `{spokeUrl, hubUrl: url\|null}` or `{spokeUrl, reset: true}` → `LinkClusterReport` |
+| GET | /projects/:pid/seo/internal-links/broken[?format=csv] | links | `BrokenLinksReport` or CSV (UTF-8 with BOM) |
+| GET | /projects/:pid/seo/internal-links/anchors[?all=1] | links | `AnchorAuditReport` |
+| GET | /projects/:pid/seo/internal-links/placed | links | `PlacedLinksReport` (accepted/implemented and sheet-placed links with auto-verification) |
 | GET | /projects/:pid/seo/buyer-queries | seo-jev | `CoverageResponse<BuyerQueryRow>` (non-brand, transactional/commercial intent) from the 7-day decision cache only; never calls Jev |
 | POST | /projects/:pid/seo/buyer-queries | seo-jev | same response; asks Jev for queries without a cached answer (user-triggered; budgeted; rate-limited). Scope: all non-brand queries with impressions, by impressions, up to the `BUYER_QUERIES_MAX` cap (default 5,000); `completeness.total` is the in-scope count and `completeness.covered` the classified count. One POST classifies at most 200 queries (8 Jev calls); POST again to continue from the 7-day cache. At most 3 classify POSTs per project per day (only counted when Jev is configured), then `429 rate_limited` with `Retry-After` |
 | GET | /projects/:pid/seo/translation-opportunities | seo-jev | `CoverageResponse<TranslationOpportunityRow>` |
@@ -442,6 +454,143 @@ docs/provider-contracts.md "Google Sheets API v4".
   `title`); `GeoPromptSet.label`; the link suggester marks pairs placed per the sheet `implemented`; Ask Okara has an
   `imported_research` read tool and a `navigate` view `import`; the project export includes the four import tables.
 - **Limits:** dry run 30/min, commit and undo 10/min, Sheets reads 30/min per user and project.
+
+## Internal links workbench (amends docs/build-kit.md [A25]; [A30], 2026-10-03)
+
+Owner request 2026-10-03 ("all eight improvements"). Types: `src/shared/types.ts`, section "internal links workbench
+(2026-10-03)" (new fields on `LinkSuggestion`, `LinkSuggestionReport` and `AttentionFeed` are optional). Code:
+`src/worker/seo/crawl/rolling.ts`, `src/worker/links/{graph,graph-load,graph-store,graph-read,clusters,priority,draft,anchor-audit,verify,gsc}.ts`,
+routes `src/worker/routes/links.ts`, UI `src/web/pages/links/*`. Migration 0017. Everything is project-scoped through
+`requireProject` (404 for non-members) and every query filters by `workspace_id`; writes need the CSRF token.
+Okara never edits pages: everything is a suggestion for the owner to apply.
+
+The Internal links page has six tabs (`?tab=suggestions|clusters|graph|broken|anchors|placed`) under a coverage line
+("N of M sitemap URLs analysed (oldest snapshot <date>)"), a "Rebuild graph" button and "Run analysis".
+
+### Link graph (items 1 and 5)
+
+- **Rolling crawl** (`rolling-crawl-2026-10-03.1`). Each SEO crawl takes the next batch of known URLs within the
+  existing per-run page cap (`project_limits.crawl_pages`; no new budget): the home page, then never-crawled URLs
+  (Search Console impressions from the latest stored sync first, sitemap before link-discovered URLs, round-robin from
+  the stored cursor), then the oldest snapshots. The inventory (`crawl_inventory`) holds sitemap URLs (up to 25
+  sitemap files and 10,000 URLs per project), up to 1,000 newly discovered link targets per crawl, and the home page;
+  a sitemap that could not be read or was truncated never marks URLs as removed. Crawling stays on the verified host
+  through the SSRF guard. Retention (bounded, per crawl): every snapshot of the 7 latest crawls is kept; outside them
+  each page keeps its latest snapshot in full and its previous one compacted; older ones are deleted (at most 2,000
+  rows changed per crawl).
+- **Graph** (`links-graph-2026-10-03.1`): the union of the latest snapshot of every page (completed/partial crawls),
+  rebuilt after every crawl, on `POST .../graph/rebuild` (6 per project per hour; 409 while another build runs) and
+  inside every suggestion run. Deterministic: no provider call, no budget. Stored as one `link_graphs` row plus one
+  `link_graph_urls` row per URL (only the latest ready graph is kept). Links are counted per distinct source page;
+  `contentLinksIn` counts links in body text (content, image alt, breadcrumb); navigation, header, footer and sidebar
+  links (and snapshots taken before anchors were stored) count only in `linksIn`. A link to a URL that redirects also
+  counts for its final URL; a link to a non-canonical URL also counts for its canonical (uncrawled Shopify
+  `/collections/<c>/products/<p>` and `/products/<p>?…` URLs are assumed canonical to `/products/<p>`, labelled
+  "via canonical"). Snapshots older than 30 days are `stale`. **Orphans** are indexable sitemap pages (not the home
+  page) with 0 links in across the whole graph; without any sitemap inventory, indexable crawled pages. The coverage
+  line states how much of the sitemap was analysed, so a page that looks orphaned may still be linked from a page not
+  crawled yet.
+- `GET .../graph/urls`: `filter` = `all | orphans | no_content_links | issues | stale | not_crawled | hubs | sitemap |
+  anchor_flags`, `sort` = `url | links_in | content_links_in | links_out | impressions | fetched_at`, `dir` = `asc |
+  desc`, `q` (URL or title contains), `offset` (≤ 20,000), `limit` (1–200, default 50). Unknown filter/sort: 400.
+  `GET .../graph/url?url=` (404 when the URL is not in the graph) adds the inbound sources (at most 50 stored per URL,
+  200 for redirect/error targets; `row.linksIn` is the exact count) with anchor, kind (`content | image | breadcrumb |
+  navigation`) and `via` (`redirect | canonical`), the outbound content targets, the redirect chain and the anchor
+  audit. `GET .../graph/export`: every URL as CSV (UTF-8 BOM): URL, Title, Status, In sitemap, Indexable, Links in,
+  Content links in, Links out, Content links out, Orphan, Inbound sources (anchors), Outbound targets, Hub, Hub method,
+  Last crawled, Stale, Impressions, Clicks, Avg position.
+- **Broken and redirected links** (`GET .../broken`, CSV with `?format=csv`): one row per (source, target) for
+  targets whose latest snapshot redirected (3xx or a different final URL, every hop in `chain`, `finalUrl`,
+  `finalStatus`) or returned 4xx/5xx; `fix` is "Link to <final URL>" (or "Remove or replace the link"; a redirect to an
+  error says so). Fetch errors and timeouts are never claimed broken; linked URLs not crawled yet are counted in
+  `unchecked`. At most 2,000 rows (6,000 in the CSV), `truncated` says when sources were cut. The SEO agent's
+  broken-internal-link rule also uses earlier crawls' statuses ("N checked in an earlier crawl").
+
+### Hubs and clusters (item 2, `links-clusters-2026-10-03.1`)
+
+Hubs: collection pages (`/collections/<handle>`), collections named in the Hub column of the imported sheet, and
+pages the owner marks (`PUT .../clusters/hub {url, hub: true}`; `false` removes a detected hub; `null` clears the
+mark). Spokes (indexable articles and products) get at most one hub, with the method stored and shown: `owner`
+(`PUT .../clusters/assign`), `sheet`, `collection_membership` (listed on the collection page), `existing_links`, or
+`tfidf` (cosine of title/H1/heading TF-IDF terms ≥ 0.15); otherwise unassigned. Each spoke shows whether the hub
+links to it and whether it links back (linked / partly linked / unlinked counts). Cluster edits accept only URLs on
+the verified host (400 otherwise), 120 edits per project per hour, and apply at read time. Suggestions that add a
+missing hub → spoke or spoke → hub link are badged "Cluster gap" and get the ×1.3 priority boost.
+
+### Priority (item 3, `links-priority-2026-10-03.1`)
+
+`priority = relevance × impact × cluster` (code-owned, never asked of Jev; suggestions are sorted by it):
+
+- relevance: the candidate's term-overlap score with the orphan (×1.5) / single-inlink (×1.25) boost;
+- impact = target × source. Target = impressionFactor × positionFactor, from the target's Search Console page row
+  (latest stored sync, current window; summed query rows when no page row exists, labelled a lower bound):
+  impressionFactor = 1 + min(1, log10(1 + impressions) / 4); positionFactor = 1.5 for average position 8–20
+  (striking distance), 1.2 for 3–8, 1.05 for 1–3, 1.1 beyond 20, 1 without impressions. Source = min(2, inlinkFactor ×
+  clickFactor) with inlinkFactor = 1 + min(0.5, log10(1 + source inlinks in the graph) / 4) and clickFactor = 1 +
+  min(0.4, log10(1 + source clicks) / 5). Without Search Console data every Search Console factor is 1 (stated).
+- cluster = 1.3 when the link closes a cluster gap, else 1.
+
+`LinkSuggestion.priority` carries every factor, the impressions, clicks and position behind them, the source label
+("Search Console <window>, stored sync <date>") and plain-text explanation lines ("These are your Search Console
+impressions, not search volume."). No search volume is used or shown.
+
+### Drafted sentences, "insert PK sentence" (item 4, `links-draft-2026-10-03.1`)
+
+For the highest-priority pairs whose source page has no sentence mentioning the target (and topical pairs with no
+fitting sentence), the workspace writer drafts one sentence containing the anchor, from evidence only: the source
+page's title, H1 and stored sentences and the target's title/H1, each passed as an evidence id (untrusted text,
+sanitized; the prompt says never to follow instructions in it; no tools). Validation: one plain-text sentence of 8–40
+words (≤ 240 characters, ending with . ! or ?), the anchor exactly once (whole words), cited evidence ids that exist,
+`writing/validate.ts` (numbers, dates, certification/spec terms, promises must be in the evidence), the draft-check flag
+scan (unsupported claims, testimonials, guarantees, filler), no price/offer wording or claim words (best, leading,
+perfect, proven...) absent from the evidence, no capitalized name absent from the evidence, and at most 3 content
+words found in no evidence. Failures are stored as `rejected` with the reasons. Stored rows: `placement:
+"draft_sentence"`, `sentence: null`, `draft` with the text, the label "Draft sentence — review before publishing",
+the evidence, cited ids, validation and where to insert it. At most 20 drafts per run, 5 pairs per writer call; each
+call reserves `provider_calls` + `writer_tokens` (project limits; operator global caps on operator keys); a budget
+refusal stops drafting (`drafts.state: "partial"`, run `partial`). No writer → `drafts.state: "setup_required"` (no
+draft is simulated). Demo projects never call the writer (`"demo"`). Drafts are never `suggested`, so they never reach
+the SEO agent.
+
+### Anchor audit (item 6, `links-anchor-audit-2026-10-03.1`)
+
+`GET .../anchors` (flagged targets; `?all=1` every audited target; at most 500 rows). Content links only, one count
+per (source, anchor). Keyword = the target's top non-brand Search Console query, else its H1, else its title (basis
+returned). Flags, engineering defaults returned as `thresholds`: `exact_match_heavy` (more than 50% of anchored links
+use the exact keyword, with at least 5), `repeated_anchor` (one anchor from at least 10 sources and at least 60%),
+`generic_anchor` ("click here", "read more"...), `empty_anchor` (no text, alt or aria-label), `no_query_terms` (at
+least 3 anchored links and none contains a term of the page's top Search Console queries). New suggestions skip an
+anchor option that would keep or push a target over a repetition threshold (the reason says so).
+
+### Auto-verification (item 7, `links-verify-2026-10-03.1`)
+
+Expected links: suggestions you accepted or implemented (since = when you set the status) and links your imported
+sheet lists as placed (since = the sheet Date cell, else the import time). On every graph build each is checked
+against the latest snapshot of its source page: `verified` (a link resolves to the target, a URL redirecting to it, its
+final URL, or a canonical variant; "verified on <date>"), `not_found` ("not found in crawl of <date>"), `pending` (the
+source was not crawled since the link was placed), `source_unavailable` (the source page errored, redirected or was
+skipped). `LinkSuggestion.verification` and `GET .../placed` (`PlacedLinksReport`) show them; `GET
+/projects/:pid/attention` adds `linkVerification {notFound, checkedAt, examples}` for implemented or sheet-placed links
+not found (accepted-only links are not flagged).
+
+### Export in the owner's sheet format (item 8)
+
+`GET .../export?format=sheet` returns `text/csv; charset=utf-8` with a UTF-8 BOM and CRLF lines, headers exactly
+`Date,Source Article URL,Target URL,Anchor,Method,Hub,Status`: Date = the day the suggestion was made or its status set;
+Method `wrap existing` (existing sentence) or `insert PK sentence` (drafted sentence); Hub = the cluster's collection
+handle (else the hub's path); Status = Suggested / Review / Rejected, or Accepted / Implemented / Dismissed plus the
+verification ("Implemented · verified 2026-10-02"). Cells are RFC 4180 quoted and formula-safe (`=`, `+`, `-`, `@`
+prefixed with `'`). Filters: `ids` (comma-separated, at most 500: the selection), `userStatus`, `status`, `placement`;
+without filters the sheet export leaves out dismissed and rejected rows. `format=csv` keeps its previous columns.
+`POST .../bulk` sets one status on up to 200 suggestions (ids of other projects count as `missing`).
+
+### SEO agent
+
+Cluster gaps reach the SEO agent through the existing `internal_link` recommendation kind: the agent takes the
+highest-priority act-tier suggestions (the cluster boost ranks gaps higher) and the evidence names the gap and the hub.
+Broken links reach it through the existing technical rule SEO-LINK-BROKEN-INTERNAL, which now also uses statuses from
+earlier crawls. Redirected links are not fed to the agent (a redirect is not an error, and one template link would
+fill the 0–2/day cap); they stay on the Broken links tab.
 
 ## Sign-in errors
 
