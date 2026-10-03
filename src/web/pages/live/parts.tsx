@@ -81,6 +81,7 @@ export function Panel({
   children,
   testId,
   toolbar,
+  action,
 }: {
   num: string;
   title: string;
@@ -95,6 +96,8 @@ export function Panel({
   testId?: string;
   /** Filters and other controls between the header and the scrolling body (they never scroll away). */
   toolbar?: ReactNode;
+  /** A run button built from the panel's own data (section 17), shown next to the context action. */
+  action?: ReactNode;
 }) {
   const id = useId();
   const a = ACCENT[accent];
@@ -123,6 +126,7 @@ export function Panel({
           {subtitle && <p className="mt-1 line-clamp-2 text-xs text-zinc-600 dark:text-zinc-400">{subtitle}</p>}
         </div>
         <PanelAction panelKey={testId} />
+        {action}
         {counter && (
           <div className="ml-auto max-w-full shrink-0 text-right">
             <p className="flex items-baseline justify-end gap-1.5">

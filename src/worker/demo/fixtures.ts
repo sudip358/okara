@@ -271,7 +271,9 @@ export const DEMO_ANSWERS: DemoAnswer[][] = [
       status: "ok",
       text: `${pre}Demo Furnishings sells a solid oak side table online; marketplaces also list oak tables from many makers.`,
       citations: [{ url: "https://marketplace.example/oak-side-tables", title: "Oak side tables (demo marketplace)", brandKey: null, sourceType: "marketplace" }],
-      searchQueries: ["buy solid oak side table online"],
+      // "oak side table" is also a demo Search Console query: the Live view's "What the AI engines searched for"
+      // shows its exact-match marker.
+      searchQueries: ["buy solid oak side table online", "oak side table"],
       mentions: { self: { status: "listed_neutral", rank: null, sentiment: "neutral" } },
       displacement: null,
     },
@@ -495,5 +497,94 @@ export const DEMO_COMPETITOR_PAGES: DemoCompetitorPage[] = [
       { key: "faq", status: "missing", detail: "No FAQ markup" },
     ],
     reasons: [d("Marketplace listing grid"), d("22 numeric/spec facts (prices, sizes)")],
+  },
+];
+
+// ------------------------------------------------------------------ Live view project containers (2026-10-03)
+// Fictional DataForSEO competitor data and sheet syncs so every Live container renders in the demo. Nothing was
+// fetched from DataForSEO or Google: costs are unknown (null), the location is labelled demo, and the sheet syncs
+// are paused (the cron never runs them; "Sync now" is disabled in the demo).
+
+export const DEMO_DATAFORSEO_LOCATION = { locationCode: 2840, locationName: "United States (demo)", languageCode: "en", languageName: "English" };
+
+export interface DemoCompetitorData {
+  domain: string;
+  /** Top ranked keywords (ranked_keywords snapshot): [keyword, position, search volume, path]. */
+  keywords: Array<[string, number, number, string]>;
+  /** Keyword gap (domain_intersection, intersections false): [keyword, search volume, competitor position, path]. */
+  gap: Array<[string, number, number, string]>;
+}
+
+export const DEMO_COMPETITOR_DATA: DemoCompetitorData[] = [
+  {
+    domain: "sofa-sample.example",
+    keywords: [
+      ["slipcover sofa", 2, 2400, "/slipcover-sofas"],
+      ["washable slipcover sofa", 3, 1300, "/slipcover-sofas"],
+      ["linen sofa", 7, 1900, "/linen-sofas"],
+    ],
+    gap: [
+      ["washable slipcover sofa", 1300, 3, "/slipcover-sofas"],
+      ["pet proof sofa fabric", 880, 9, "/fabrics/pet-proof"],
+      ["sofa with removable covers", 720, 12, "/sofas/removable-covers"],
+      ["slipcover sofa washing instructions", 590, 5, "/care/washing-slipcovers"],
+      ["kid friendly sofa", 480, 15, "/guides/kid-friendly-sofas"],
+    ],
+  },
+  {
+    domain: "lamp-house.example",
+    keywords: [
+      ["swing arm lamp", 1, 1600, "/swing-arm"],
+      ["reading lamp", 6, 3600, "/reading-lamps"],
+    ],
+    gap: [
+      ["swing arm reading lamp", 1000, 2, "/swing-arm"],
+      ["warm light reading lamp", 480, 6, "/reading-lamps/warm-light"],
+      ["brass reading lamp", 390, 11, "/reading-lamps/brass"],
+    ],
+  },
+];
+
+export const DEMO_SHEET = { spreadsheetId: "demo-sheet-0001", title: `Demo campaign sheet (${DEMO_LABEL})` };
+
+export interface DemoSheetSync {
+  tab: string;
+  sheetTabId: number;
+  destination: "competitors" | "geo_prompts";
+  frequencyHours: 6 | 12 | 24;
+  /** Minutes ago of the last sync run. */
+  lastRunMinutesAgo: number;
+  lastStatus: "ok" | "error";
+  errorCode: string | null;
+  error: string | null;
+  /** competitors: tracked domains; geo_prompts: DEMO_PROMPTS indexes in the set, plus archived question texts. */
+  domains?: string[];
+  promptIndexes?: number[];
+  archived?: string[];
+}
+
+export const DEMO_SHEET_SYNCS: DemoSheetSync[] = [
+  {
+    tab: "Competitors",
+    sheetTabId: 11,
+    destination: "competitors",
+    frequencyHours: 24,
+    lastRunMinutesAgo: 30,
+    lastStatus: "ok",
+    errorCode: null,
+    error: null,
+    domains: ["sofa-sample.example", "lamp-house.example"],
+  },
+  {
+    tab: "AI questions",
+    sheetTabId: 12,
+    destination: "geo_prompts",
+    frequencyHours: 12,
+    lastRunMinutesAgo: 20,
+    lastStatus: "error",
+    errorCode: "header_changed",
+    error: d('The header row of tab "AI questions" changed: column "Question" not found. Re-import the tab with a new mapping.'),
+    promptIndexes: [0, 3],
+    archived: ["Are slipcover sofas easy to clean? (demo question removed from the sheet)"],
   },
 ];

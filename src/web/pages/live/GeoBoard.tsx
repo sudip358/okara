@@ -35,6 +35,11 @@ import { CitedInsteadPanel, HeatmapPanel, LatestAnswerPanel } from "./geo/GeoPan
 import { LaneColumn } from "./geo/LaneColumn";
 import { EngineBadge } from "./parts";
 import { urlPath, type LiveMode } from "./text";
+import { LazyMount } from "./more/common";
+import { useLiveMore } from "./more/data";
+import { GEO_CONTAINERS } from "./more/registry";
+import { BrandsContainer, CitedDomainsContainer, EngineQueriesContainer, PromptHistoryContainer } from "./more/GeoContainers";
+import { BudgetContainer, SheetsContainer } from "./more/SharedContainers";
 
 export interface GeoBoardProps {
   projectId: string;
@@ -71,8 +76,9 @@ function asFeedItem(a: LiveGeoAnswerRow): EngineFeedItem {
 
 export const GeoBoard = memo(function GeoBoard(p: GeoBoardProps) {
   const wide = useMinWidth(768);
+  const more = useLiveMore();
   const [laneTab, setLaneTab] = useState<string | null>(null);
-  const [extraTab, setExtraTab] = useState(0);
+  const [extraTab, setExtraTab] = useState<string | null>(null);
   const [obs, setObs] = useState<{ id: string; title: string } | null>(null);
   const liveActive = p.mode === "live" && p.activity.active;
   const board = p.data.board.data;
@@ -231,15 +237,17 @@ export const GeoBoard = memo(function GeoBoard(p: GeoBoardProps) {
     />
   ));
 
-  const extras: Array<{ label: string; cls: string; el: ReactElement }> = [
-    { label: "01 Prompts", cls: "xl:col-span-6 xl:min-h-[280px] xl:max-h-[420px]", el: <HeatmapPanel prompts={planned} lanes={laneLabels} cell={cell} reduced={p.reduced} fresh={p.fresh} onOpen={open} captions={[]} /> },
+  const allExtras: Array<{ key: string; label: string; cls: string; el: ReactElement }> = [
+    { key: "heatmap", label: "01 Prompts", cls: "xl:col-span-6 xl:min-h-[280px] xl:max-h-[420px]", el: <HeatmapPanel prompts={planned} lanes={laneLabels} cell={cell} reduced={p.reduced} fresh={p.fresh} onOpen={open} captions={[]} /> },
     {
+      key: "latest-answer",
       label: "02 Latest answer",
       cls: "xl:col-span-6 xl:min-h-[280px] xl:max-h-[420px]",
       el: <LatestAnswerPanel answer={newestShown} detail={shownDetail} error={detail.error} reduced={p.reduced} ownHost={p.ownHost} />,
     },
-    { label: "03 Cited instead", cls: "xl:col-span-4 xl:max-h-[420px]", el: <CitedInsteadPanel bars={d.bars} reduced={p.reduced} /> },
+    { key: "cited-instead", label: "03 Cited instead", cls: "xl:col-span-4 xl:max-h-[420px]", el: <CitedInsteadPanel bars={d.bars} reduced={p.reduced} /> },
     {
+      key: "coverage",
       label: "04 Coverage",
       cls: "xl:col-span-8 xl:max-h-[420px]",
       el: (
@@ -257,6 +265,7 @@ export const GeoBoard = memo(function GeoBoard(p: GeoBoardProps) {
       ),
     },
     {
+      key: "recs",
       label: "05 Proposals",
       cls: "xl:col-span-12 xl:max-h-[360px]",
       el: (
@@ -273,7 +282,17 @@ export const GeoBoard = memo(function GeoBoard(p: GeoBoardProps) {
         />
       ),
     },
+    // Section 17: project-level containers, each fetching its own stored aggregate (lazily below the fold).
+    { key: "engine-queries", label: "06 Engine searches", cls: "xl:col-span-6 xl:h-[420px]", el: <EngineQueriesContainer projectId={p.projectId} reduced={p.reduced} /> },
+    { key: "brands", label: "07 Brands", cls: "xl:col-span-6 xl:h-[420px]", el: <BrandsContainer projectId={p.projectId} reduced={p.reduced} /> },
+    { key: "cited-domains", label: "08 Cited domains", cls: "xl:col-span-6 xl:h-[420px]", el: <CitedDomainsContainer projectId={p.projectId} reduced={p.reduced} /> },
+    { key: "prompt-history", label: "09 History", cls: "xl:col-span-6 xl:h-[420px]", el: <PromptHistoryContainer projectId={p.projectId} reduced={p.reduced} /> },
+    { key: "sheet-prompts", label: "10 Sheet questions", cls: "xl:col-span-6 xl:h-[400px]", el: <SheetsContainer projectId={p.projectId} reduced={p.reduced} mode="geo" /> },
+    { key: "budget", label: "11 Budget", cls: "xl:col-span-6 xl:h-[400px]", el: <BudgetContainer projectId={p.projectId} reduced={p.reduced} mode="geo" /> },
   ];
+  const extras = allExtras.filter((x) => !more.hidden.has(x.key));
+  const lazyDef = (key: string) => GEO_CONTAINERS.find((c) => c.key === key && c.more) ?? null;
+  const showLanes = !more.hidden.has("lanes");
 
   const feedBanner =
     !p.geo && p.feedError ? (
@@ -282,13 +301,31 @@ export const GeoBoard = memo(function GeoBoard(p: GeoBoardProps) {
 
   const drawer = <ObservationDrawer observationId={obs?.id ?? null} title={obs?.title ?? ""} onClose={() => setObs(null)} />;
 
+  const noLanes =
+    lanes.length === 0 ? (
+      <EmptyState title="Connect an AI engine" action={<Link to={projectPath(p.projectId, "integrations")}>Open Integrations</Link>}>
+        This run has no engine lane. Configure an API-sampled engine to ask your approved prompts.
+      </EmptyState>
+    ) : null;
+
   if (lanes.length === 0) {
+    // The project containers (section 17) still show stored state without a lane in this run.
+    const more17 = extras.filter((x) => lazyDef(x.key));
     return (
-      <div className="space-y-4">
+      <div className="min-w-0 space-y-4">
         {feedBanner}
-        <EmptyState title="Connect an AI engine" action={<Link to={projectPath(p.projectId, "integrations")}>Open Integrations</Link>}>
-          This run has no engine lane. Configure an API-sampled engine to ask your approved prompts.
-        </EmptyState>
+        {noLanes}
+        {more17.length > 0 && (
+          <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-12">
+            {more17.map((x) => (
+              <div key={x.key} className={cx("flex min-h-0 min-w-0 flex-col max-xl:max-h-[70vh] [&>section]:flex-1", x.cls)}>
+                <LazyMount def={lazyDef(x.key)!} reduced={p.reduced}>
+                  {x.el}
+                </LazyMount>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     );
   }
@@ -296,10 +333,13 @@ export const GeoBoard = memo(function GeoBoard(p: GeoBoardProps) {
   if (!wide) {
     const sel = laneInfo.find((l) => l.lane.provider === laneTab) ?? laneInfo[0]!;
     const idx = laneInfo.indexOf(sel);
+    const extraSel = extras.find((x) => x.key === extraTab) ?? extras[0] ?? null;
     return (
       <div className="min-w-0 space-y-3">
         {feedBanner}
-        <div role="tablist" aria-label="Engines" className="lv-strip flex gap-1 overflow-x-auto pb-1" tabIndex={0}>
+        {showLanes && (
+        <>
+        <div role="tablist" aria-label="Engines" className="lv-strip relative flex gap-1 overflow-x-auto pb-1" tabIndex={0}>
           {laneInfo.map((l) => (
             <button
               key={l.lane.provider}
@@ -319,23 +359,30 @@ export const GeoBoard = memo(function GeoBoard(p: GeoBoardProps) {
         <div role="tabpanel" className="min-w-0">
           {columns[idx]}
         </div>
-        <div role="tablist" aria-label="Panels" className="lv-strip flex gap-1 overflow-x-auto pb-1" tabIndex={0}>
-          {extras.map((x, i) => (
-            <button
-              key={x.label}
-              type="button"
-              role="tab"
-              aria-selected={extraTab === i}
-              onClick={() => setExtraTab(i)}
-              className={cx("shrink-0 rounded-md px-2.5 py-1 text-xs font-medium", extraTab === i ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900" : "bg-white text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300")}
-            >
-              {x.label}
-            </button>
-          ))}
-        </div>
-        <div role="tabpanel" className="flex max-h-[70vh] min-w-0 flex-col [&>section]:flex-1">
-          {extras[extraTab]?.el}
-        </div>
+        </>
+        )}
+        {extras.length > 0 && (
+          <div role="tablist" aria-label="Panels" className="lv-strip relative flex gap-1 overflow-x-auto pb-1" tabIndex={0}>
+            {extras.map((x) => (
+              <button
+                key={x.key}
+                type="button"
+                role="tab"
+                aria-selected={extraSel?.key === x.key}
+                onClick={() => setExtraTab(x.key)}
+                className={cx("shrink-0 rounded-md px-2.5 py-1 text-xs font-medium", extraSel?.key === x.key ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900" : "bg-white text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300")}
+              >
+                {x.label}
+              </button>
+            ))}
+          </div>
+        )}
+        {extraSel && (
+          <div role="tabpanel" aria-label={extraSel.label} className="flex max-h-[70vh] min-w-0 flex-col [&>section]:flex-1">
+            {extraSel.el}
+          </div>
+        )}
+        {!showLanes && extras.length === 0 && <p className="py-6 text-center text-xs text-zinc-600 dark:text-zinc-400">Every container is hidden. Use “Containers” in the header to show them again.</p>}
         {drawer}
       </div>
     );
@@ -344,13 +391,23 @@ export const GeoBoard = memo(function GeoBoard(p: GeoBoardProps) {
   return (
     <div className="min-w-0 space-y-4">
       {feedBanner}
-      <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-[repeat(auto-fit,minmax(380px,1fr))] xl:gap-y-3">{columns}</div>
+      {!showLanes && extras.length === 0 && <p className="py-6 text-center text-xs text-zinc-600 dark:text-zinc-400">Every container is hidden. Use “Containers” in the header to show them again.</p>}
+      {showLanes && <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-[repeat(auto-fit,minmax(380px,1fr))] xl:gap-y-3">{columns}</div>}
       <div className="grid min-w-0 grid-cols-1 gap-4 xl:grid-cols-12">
-        {extras.map((x) => (
-          <div key={x.label} className={cx("flex min-h-0 min-w-0 flex-col max-xl:max-h-[70vh] [&>section]:flex-1", x.cls)}>
-            {x.el}
-          </div>
-        ))}
+        {extras.map((x) => {
+          const def = lazyDef(x.key);
+          return (
+            <div key={x.key} className={cx("flex min-h-0 min-w-0 flex-col max-xl:max-h-[70vh] [&>section]:flex-1", x.cls)}>
+              {def ? (
+                <LazyMount def={def} reduced={p.reduced}>
+                  {x.el}
+                </LazyMount>
+              ) : (
+                x.el
+              )}
+            </div>
+          );
+        })}
       </div>
       {drawer}
     </div>

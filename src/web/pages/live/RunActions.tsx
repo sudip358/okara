@@ -16,7 +16,7 @@ import { Link } from "react-router";
 import type { RunSummary } from "@shared/types";
 import { api, errorMessage, isRateLimited, isSetupRequired } from "@web/lib/api";
 import { Button, cx } from "@web/components/ui";
-import type { SectionAction } from "./run-actions";
+import type { ReloadKey, SectionAction } from "./run-actions";
 
 export const PanelActionsContext = createContext<Record<string, SectionAction> | null>(null);
 
@@ -27,6 +27,13 @@ interface Runner {
 const RunnerContext = createContext<Runner | null>(null);
 
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** POST /import/syncs/:id/run answers 200 with {outcome: {status, message}}: a non-ok outcome is the error shown. */
+export function syncFailure(res: unknown): string | null {
+  const o = (res as { outcome?: { status?: string; message?: string | null } } | null)?.outcome;
+  if (!o || o.status === "ok") return null;
+  return o.status === "busy" ? (o.message ?? "A sync of this tab is already running.") : `Sync failed: ${o.message ?? "the sheet could not be read."}`;
+}
 
 /** Body of POST /projects/:pid/runs for one run spec. */
 export function runBody(spec: { agent: string; steps: string[] | null; engines?: string[] }): Record<string, unknown> {
@@ -42,7 +49,7 @@ export function RunActionsProvider({
   projectId: string;
   /** First run started (the view switches to it); all runs started. */
   onStarted: (run: RunSummary, all: RunSummary[]) => void;
-  onReload: (what: "buyer" | "links") => void;
+  onReload: (what: ReloadKey) => void;
   children: ReactNode;
 }) {
   const [pending, setPending] = useState<{ action: Exclude<SectionAction, { kind: "link" }>; opener: HTMLElement | null } | null>(null);
@@ -64,7 +71,7 @@ export function RunActionsProvider({
     setError(null);
   }, []);
 
-  const confirm = async () => {
+  const confirm = async (choice?: string | null) => {
     if (!pending) return;
     const { action } = pending;
     setBusy(action.key);
@@ -87,9 +94,13 @@ export function RunActionsProvider({
         }
         if (failure && started.length === 0) throw failure;
       } else {
-        await api<unknown>(action.path, { method: "POST" });
-        setStatus(`${action.label}: done.`);
+        const body = action.choice ? { ...(action.body ?? {}), [action.choice.field]: choice ?? null } : action.body;
+        const res = await api<unknown>(action.path, body === undefined ? { method: "POST" } : { method: "POST", body });
         onReload(action.reload);
+        const failure = action.expect === "sync_outcome" ? syncFailure(res) : null;
+        // The call returned but did not do the work (a sync recorded an error, or another sync of the tab runs).
+        if (failure) throw new Error(failure);
+        setStatus(`${action.label}: ${action.doneText ?? "done"}.`);
       }
       setPending(null);
     } catch (e) {
@@ -122,11 +133,14 @@ export function ConfirmDialog({
   busy: boolean;
   error: unknown;
   onCancel: () => void;
-  onConfirm: () => void;
+  onConfirm: (choice?: string | null) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const descId = useId();
+  const choiceName = useId();
+  const choice = action.kind === "call" ? action.choice : undefined;
+  const [picked, setPicked] = useState<string | null>(() => choice?.options.find((o) => !o.disabled)?.value ?? null);
   const cancelRef = useRef(onCancel);
   cancelRef.current = onCancel;
   useEffect(() => {
@@ -176,6 +190,35 @@ export function ConfirmDialog({
             <p key={l}>{l}</p>
           ))}
         </div>
+        {choice && (
+          <fieldset className="mt-3 min-w-0 space-y-1" data-testid="run-choice">
+            <legend className="text-xs font-semibold text-zinc-800 dark:text-zinc-200">{choice.legend}</legend>
+            {choice.options.map((o) => (
+              <label
+                key={o.value}
+                title={o.disabled ?? undefined}
+                className={cx(
+                  "flex min-w-0 items-start gap-2 rounded-md border px-2 py-1.5 text-sm",
+                  o.disabled ? "cursor-not-allowed border-zinc-200 text-zinc-500 dark:border-zinc-800 dark:text-zinc-500" : "border-zinc-300 dark:border-zinc-700",
+                )}
+              >
+                <input
+                  type="radio"
+                  name={choiceName}
+                  value={o.value}
+                  checked={picked === o.value}
+                  disabled={!!o.disabled || busy}
+                  onChange={() => setPicked(o.value)}
+                  className="mt-1"
+                />
+                <span className="min-w-0">
+                  <span className="block font-mono text-xs break-all">{o.label}</span>
+                  {(o.disabled || o.note) && <span className="block text-xs text-zinc-500 dark:text-zinc-400">{o.disabled ?? o.note}</span>}
+                </span>
+              </label>
+            ))}
+          </fieldset>
+        )}
         {error !== null && (
           <p role="alert" className={cx("mt-3 text-sm", isRateLimited(error) || isSetupRequired(error) ? "text-amber-800 dark:text-amber-300" : "text-red-700 dark:text-red-400")}>
             {isRateLimited(error) ? "Limit reached: " : isSetupRequired(error) ? "Setup required: " : ""}
@@ -186,7 +229,7 @@ export function ConfirmDialog({
           <Button data-cancel="" onClick={onCancel} disabled={busy}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={onConfirm} loading={busy}>
+          <Button variant="primary" onClick={() => onConfirm(picked)} loading={busy} disabled={!!choice && picked === null}>
             {action.kind === "run" ? (action.runs.length > 1 ? "Start both runs" : "Start run") : "Start"}
           </Button>
         </div>

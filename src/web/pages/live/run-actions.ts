@@ -5,12 +5,15 @@
  * Kinds:
  * - run:  a manual agent run, all steps or a partial run (POST /projects/:pid/runs {agent, steps?, engines?}).
  *         "Run both" is one action with two runs.
- * - call: an existing standalone tool endpoint (buyer-query classification, internal-link analysis).
+ * - call: an existing standalone tool endpoint (buyer-query classification, internal-link analysis; section 17:
+ *         a sheet's "Sync now" and the paid DataForSEO refresh, whose domain is picked in the confirm dialog).
  * - link: navigation to the flow that needs the user's per-item approval (competitor pages); never auto-fetches.
  * A panel with no runnable action has no entry (no fake buttons).
  */
-import type { AgentKind } from "@shared/types";
+import type { CompetitorDataPanel } from "@shared/competitor-data";
+import type { AgentKind, LiveSheetSyncRow } from "@shared/types";
 import { MANUAL_RUNS_PER_DAY, STEP_LABEL, type SectionStep } from "@shared/run-scope";
+import { refreshCostNote, refreshState } from "@web/pages/geo/competitor-data-lib";
 
 export interface RunSpec {
   agent: AgentKind;
@@ -35,9 +38,31 @@ export interface ConfirmText {
   lines: string[];
 }
 
+/** What a finished tool call reloads: an existing panel's data or a section 17 container. */
+export type ReloadKey = "buyer" | "links" | "sheets" | "competitor-gap";
+
+/** A pick the confirm dialog asks for before calling (sent as `body[field]`), e.g. which competitor domain. */
+export interface ActionChoice {
+  field: string;
+  legend: string;
+  options: Array<{ value: string; label: string; note?: string | null; disabled?: string | null }>;
+}
+
 export type SectionAction =
   | (ActionBase & { kind: "run"; runs: RunSpec[]; confirm: ConfirmText })
-  | (ActionBase & { kind: "call"; path: string; reload: "buyer" | "links"; confirm: ConfirmText })
+  | (ActionBase & {
+      kind: "call";
+      path: string;
+      reload: ReloadKey;
+      confirm: ConfirmText;
+      /** JSON body (the choice, when any, is added as body[choice.field]). */
+      body?: Record<string, unknown>;
+      choice?: ActionChoice;
+      /** "sync_outcome": a 200 response whose outcome.status is not "ok" is shown as an error (POST /import/syncs/:id/run). */
+      expect?: "sync_outcome";
+      /** Announced when the call returned (default "done"). */
+      doneText?: string;
+    })
   | (ActionBase & { kind: "link"; to: string });
 
 export interface EngineInfo {
@@ -256,4 +281,113 @@ export function manualRunsToday(runs: Array<{ trigger: string; createdAt: string
   if (!runs) return null;
   const day = now.toISOString().slice(0, 10);
   return runs.filter((r) => r.trigger === "manual" && r.createdAt.slice(0, 10) === day).length;
+}
+
+// ------------------------------------------------------------------ section 17: project containers
+
+/** SEO 10 and 11 run the Search Console sync, 12 the crawl (partial SEO runs, the same actions as panels 02 and 01). */
+export function moreSeoActions(env: ActionEnv): Record<string, SectionAction> {
+  const m = seoPanelActions(env);
+  return {
+    striking: { ...m.gsc!, key: "gsc_sync-striking" },
+    movers: { ...m.gsc!, key: "gsc_sync-movers" },
+    technical: { ...m.pages!, key: "crawl-technical" },
+  };
+}
+
+/** GEO 06-09 ask every configured engine (partial GEO run ["batch"]); 10 has per-row "Sync now"; 11 has none. */
+export function moreGeoActions(env: ActionEnv): Record<string, SectionAction> {
+  const all = run(env, "geo-batch", "Ask AI engines", { agent: "geo", steps: ["batch"] }, batchConfirm(env), enginesBlock(env));
+  return {
+    "engine-queries": { ...all, key: "geo-batch-queries" },
+    brands: { ...all, key: "geo-batch-brands" },
+    "cited-domains": { ...all, key: "geo-batch-domains" },
+    "prompt-history": { ...all, key: "geo-batch-history" },
+  };
+}
+
+export const OWNER_REASON_DFS = "Only the workspace owner can refresh competitor data.";
+export const OWNER_REASON_SYNC = "Only the workspace owner can sync a sheet.";
+
+/**
+ * SEO 13 "Refresh competitor data": POST /competitors/dataforseo/refresh {domain} (paid), with the domain picked
+ * in the confirm dialog. Cost, caps and account come from the panel the server built from the existing code
+ * constants (published-price ceiling, per-domain and per-project daily caps). null until the panel loaded.
+ */
+export function competitorRefreshAction(ctx: { projectId: string; demo: boolean }, panel: CompetitorDataPanel | null): SectionAction | null {
+  if (!panel) return null;
+  const options = panel.domains.map((d) => {
+    const rs = refreshState(panel, d);
+    return {
+      value: d.domain,
+      label: d.domain,
+      note: `${d.competitorName} · ${d.refreshesToday} of ${panel.caps.refreshesPerDomainPerDay} refreshes today`,
+      disabled: rs.disabled ? (rs.reason ?? "Not available now.") : null,
+    };
+  });
+  let disabled: string | null = null;
+  if (ctx.demo) disabled = DEMO_REASON;
+  else if (!panel.canManage) disabled = OWNER_REASON_DFS;
+  else if (panel.state !== "ready") disabled = panel.message ?? "DataForSEO is not set up: add credentials on the Integrations page.";
+  else if (options.length === 0) disabled = "No competitor domain is tracked: add competitors in Settings.";
+  else if (options.every((o) => o.disabled)) disabled = options[0]!.disabled;
+  return {
+    kind: "call",
+    key: "competitor-refresh",
+    label: "Refresh competitor data",
+    path: `/projects/${encodeURIComponent(ctx.projectId)}/competitors/dataforseo/refresh`,
+    reload: "competitor-gap",
+    disabled,
+    choice: { field: "domain", legend: "Competitor domain to refresh", options },
+    doneText: "refresh queued; the data appears when it completes",
+    confirm: {
+      title: "Refresh competitor data from DataForSEO?",
+      lines: [
+        `Paid call: DataForSEO Labs ranked keywords, keyword gap against ${panel.ownDomain || "your domain"} and top pages for the domain you pick.`,
+        refreshCostNote(panel),
+        `Limits: ${panel.caps.refreshesPerDomainPerDay} refreshes per domain and ${panel.caps.fetchesPerProjectPerDay} per project per UTC day (${panel.caps.fetchesToday} used today); the price ceiling is reserved from the project's daily spend cap and settled to the cost DataForSEO reports.`,
+        panel.credentialSource === "operator_key"
+          ? "Uses the operator's DataForSEO account, so it also counts against the operator's global daily allowance."
+          : "Uses your workspace's DataForSEO account.",
+        "Not an agent run: no manual run is used.",
+      ],
+    },
+  };
+}
+
+const SYNC_EFFECT: Record<LiveSheetSyncRow["destination"], string> = {
+  competitors:
+    "New domains become tracked competitors (at most 5); with automatic pull on, each queues a paid DataForSEO refresh within its daily caps. Domains removed from the sheet stop being tracked.",
+  geo_prompts: "New questions are added to the prompt set pending your approval; questions removed from the sheet are archived (earlier answers are kept).",
+  implemented_links: "New rows are recorded as placed links (append-only).",
+};
+
+/** SEO 14 / GEO 10 per-row "Sync now": POST /import/syncs/:syncId/run (owner; rate-limited per tab). */
+export function sheetSyncAction(
+  ctx: { projectId: string; demo: boolean },
+  sync: LiveSheetSyncRow,
+  opts: { canManage: boolean; sheets: string; perHour: number },
+): SectionAction {
+  let disabled: string | null = null;
+  if (ctx.demo) disabled = DEMO_REASON;
+  else if (!opts.canManage) disabled = OWNER_REASON_SYNC;
+  else if (opts.sheets === "error") disabled = "Reconnect Google Sheets on the Import page: the authorization expired or was revoked.";
+  else if (opts.sheets !== "ready") disabled = "Connect Google Sheets on the Import page first.";
+  return {
+    kind: "call",
+    key: `sync:${sync.id}`,
+    label: "Sync now",
+    path: `/projects/${encodeURIComponent(ctx.projectId)}/import/syncs/${encodeURIComponent(sync.id)}/run`,
+    reload: "sheets",
+    expect: "sync_outcome",
+    disabled,
+    confirm: {
+      title: `Sync tab "${sync.tab}" now?`,
+      lines: [
+        `Reads tab "${sync.tab}" of "${sync.spreadsheetTitle}" with the project's Google Sheets connection (read only) and applies its rows.`,
+        SYNC_EFFECT[sync.destination],
+        `Google Sheets reads are free; at most ${opts.perHour} per tab per hour. Not an agent run: no manual run is used.`,
+      ],
+    },
+  };
 }

@@ -225,7 +225,8 @@ function Strip({
       onPointerDown={mark}
       onKeyDown={mark}
       onTouchStart={mark}
-      className="lv-strip flex min-w-0 snap-x gap-2 overflow-x-auto pb-1 focus-visible:outline-2 focus-visible:outline-sky-600"
+      // relative: screen-reader-only text inside the cards is positioned within the scroller, so it never widens the page.
+      className="lv-strip relative flex min-w-0 snap-x gap-2 overflow-x-auto pb-1 focus-visible:outline-2 focus-visible:outline-sky-600"
     >
       {ordered.map((a) => (
         <AnswerCard key={a.id} a={a} fresh={fresh.has(a.id)} onOpen={onOpen} runActive={runActive} style={staggerStyle(fresh, a.id)} />

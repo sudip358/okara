@@ -1622,3 +1622,285 @@ export type ChatStreamEvent =
   | { type: "status"; text: string }
   | { type: "done"; result: ChatTurnResult }
   | { type: "error"; code: string; message: string };
+// ------------------------------------------------------------------ live view: project containers (appended 2026-10-03)
+// GET /projects/:pid/live/insights?kind=<LiveInsightKind> (docs/api.md "Live view: project containers",
+// docs/live-view-design.md section 17). Read-only, bounded aggregates of stored rows for the Live view's
+// project-level containers (SEO 10-15, GEO 06-11). No provider call, no Jev, no budget; untrusted text
+// (queries, URLs, titles, sheet names, errors) is clipped plain text.
+
+export type LiveInsightKind =
+  | "striking"
+  | "movers"
+  | "technical"
+  | "engine_queries"
+  | "brands"
+  | "cited_domains"
+  | "prompt_history"
+  | "sheets"
+  | "budget";
+
+/** The Search Console sync an insight was read from: the latest usable sync (completed or partial). */
+export interface LiveInsightSync {
+  syncId: string;
+  /** agent_runs id of the run that stored the sync (null for a CSV import). */
+  runId: string | null;
+  source: "api" | "csv_import" | "demo";
+  syncedAt: string;
+  current: DateWindow;
+  previous: DateWindow;
+  /** The sync hit its row cap: rows may be missing. */
+  truncated: boolean;
+}
+
+/** A time window of stored rows (ISO instants; `to` is the request time). */
+export interface LiveInsightWindow {
+  from: string;
+  to: string;
+  days: number;
+}
+
+interface LiveInsightCommon {
+  /** "demo" for demo projects (rows are the labelled demo seed); "setup_required" with `message` when the source is not set up. */
+  state: CapabilityState;
+  message: string | null;
+  generatedAt: string;
+  /** Data notes (demo label, basis, caps), plain text. */
+  labels: string[];
+  /** A read cap was hit: counts are lower bounds. */
+  truncated: boolean;
+}
+
+/** One query+page row of the current window in striking distance. */
+export interface LiveStrikingRow {
+  query: string;
+  page: string;
+  clicks: number;
+  impressions: number;
+  /** clicks / impressions of this row; null without impressions. */
+  ctr: number | null;
+  /** Search Console's average position of the query+page row. */
+  position: number;
+  /** The same query+page in the previous window, when stored. */
+  previous: { clicks: number; impressions: number; position: number } | null;
+}
+
+export interface LiveStrikingInsight extends LiveInsightCommon {
+  kind: "striking";
+  sync: LiveInsightSync | null;
+  /** src/worker/live/insights-lib.ts STRIKING_DISTANCE. */
+  thresholds: { minPosition: number; maxPosition: number; minImpressions: number; maxRows: number };
+  rows: LiveStrikingRow[];
+  /** Query+page rows in range (all of them; `rows` lists the first maxRows by impressions). */
+  total: number;
+}
+
+export interface LivePageWindowMetrics {
+  clicks: number;
+  impressions: number;
+  /** Impression-weighted position of the stored rows (an approximation); null without impressions. */
+  position: number | null;
+}
+
+export interface LivePageMover {
+  page: string;
+  current: LivePageWindowMetrics;
+  previous: LivePageWindowMetrics;
+  /** current.clicks - previous.clicks: a measured difference, not a trend. */
+  clickDelta: number;
+}
+
+export interface LiveMoversInsight extends LiveInsightCommon {
+  kind: "movers";
+  sync: LiveInsightSync | null;
+  /** page_rows = page-dimension rows; query_page_rows = sums of query+page rows (a lower bound); null without data. */
+  basis: "page_rows" | "query_page_rows" | null;
+  gainers: LivePageMover[];
+  losers: LivePageMover[];
+  /** Pages in both windows (and how many of them have no click difference), only in the current window, only in the previous one. */
+  counts: { both: number; unchanged: number; newPages: number; lostPages: number };
+  /** Gainers and losers listed at most. */
+  top: number;
+}
+
+export interface LiveTechnicalGroup {
+  severity: Severity;
+  ruleId: string;
+  ruleName: string;
+  area: string;
+  class: "fact" | "heuristic";
+  count: number;
+  /** First findings of the group (URL order), plain text. */
+  examples: Array<{ url: string | null; template: string | null; detail: string }>;
+}
+
+export interface LiveTechnicalInsight extends LiveInsightCommon {
+  kind: "technical";
+  /** The latest completed or partial crawl (null when none). */
+  crawl: {
+    id: string;
+    runId: string | null;
+    status: "completed" | "partial";
+    startedAt: string;
+    finishedAt: string | null;
+    pagesCrawled: number;
+    pagesSkipped: number;
+    pagesLimit: number;
+  } | null;
+  /** A newer crawl that is running or failed: its findings are not shown. */
+  newer: { status: string; startedAt: string } | null;
+  bySeverity: Record<Severity, number>;
+  total: number;
+  groups: LiveTechnicalGroup[];
+}
+
+export interface LiveEngineQueryRow {
+  /** Normalized engine search query (plain text). */
+  query: string;
+  engines: string[];
+  /** Distinct stored answers whose engine ran this search. */
+  answers: number;
+  lastSeen: string;
+  /** Exact match of the normalized query in the latest usable Search Console sync (current window); null = no exact match. */
+  gsc: LiveGscMetrics | null;
+}
+
+export interface LiveEngineQueriesInsight extends LiveInsightCommon {
+  kind: "engine_queries";
+  window: LiveInsightWindow;
+  rows: LiveEngineQueryRow[];
+  /** Distinct normalized queries in the window. */
+  total: number;
+  /** The sync the exact match was looked up in; null without a usable sync (no match attempted). */
+  gscSync: { syncedAt: string; window: DateWindow } | null;
+  limit: number;
+}
+
+export interface LiveBrandCounts {
+  /** Analysed answers that checked this brand (the denominator m of "n of m answers"). */
+  answers: number;
+  mentioned: number;
+  cited: number;
+  recommended: number;
+  negative: number;
+}
+
+export interface LiveBrandRow {
+  brandKey: string;
+  name: string;
+  isSelf: boolean;
+  engines: Array<{ provider: string } & LiveBrandCounts>;
+  total: LiveBrandCounts;
+}
+
+export interface LiveBrandsInsight extends LiveInsightCommon {
+  kind: "brands";
+  window: LiveInsightWindow;
+  engines: string[];
+  brands: LiveBrandRow[];
+}
+
+export interface LiveCitedDomainRow {
+  /** Resolved citation host (no "www."). */
+  host: string;
+  /** Distinct stored answers citing the host. */
+  answers: number;
+  citations: number;
+  engines: string[];
+  /** Source types of its citations, most frequent first. */
+  sourceTypes: SourceType[];
+  /** key "self" = your site; a tracked competitor's name when the host is one of its domains; null otherwise. */
+  brand: { key: string; isSelf: boolean } | null;
+  /** 1-based position by answers (then citations, then host). */
+  rank: number;
+}
+
+export interface LiveCitedDomainsInsight extends LiveInsightCommon {
+  kind: "cited_domains";
+  window: LiveInsightWindow;
+  rows: LiveCitedDomainRow[];
+  /** Your site's row when it is cited but not among `rows`. */
+  own: LiveCitedDomainRow | null;
+  /** Stored answers with at least one citation (denominator of `answers`). */
+  answersWithCitations: number;
+  totalHosts: number;
+  /** Provider redirect links whose destination is unknown (not counted as a domain). */
+  unresolved: number;
+  limit: number;
+}
+
+/** cited / named (mentioned, site not cited) / missing (absent) / failed call / stored but not analysed / no stored answer. */
+export type LiveHistoryCell = "cited" | "named" | "missing" | "failed" | "not_analysed" | "none";
+
+export interface LivePromptHistoryInsight extends LiveInsightCommon {
+  kind: "prompt_history";
+  promptSet: { version: number; label: string | null } | null;
+  /** Per engine: the runs shown, oldest first (at most maxRuns runs in which that engine stored answers). */
+  engines: Array<{ provider: string; runs: Array<{ runId: string; at: string }> }>;
+  /** Approved prompts of the active set; cells[provider][i] belongs to engines[provider].runs[i]. */
+  rows: Array<{ promptId: string; text: string; cells: Record<string, LiveHistoryCell[]> }>;
+  maxRuns: number;
+}
+
+export interface LiveSheetSyncRow {
+  id: string;
+  spreadsheetTitle: string;
+  tab: string;
+  destination: "geo_prompts" | "competitors" | "implemented_links";
+  enabled: boolean;
+  frequencyHours: number;
+  lastRunAt: string | null;
+  lastStatus: "never" | "ok" | "error";
+  lastErrorCode: string | null;
+  lastError: string | null;
+  lastWarning: string | null;
+  nextRunAt: string;
+  /** Changes this sync applied in the last `days` days (import_changes of its imports). */
+  recent: { days: number; imports: number; added: number; updated: number; removed: number };
+  /** geo_prompts syncs: what the tab feeds (import_records of this tab and the active prompt set). */
+  prompts: { inSet: number; setFull: number; archived: number; approved: number; lastAskedAt: string | null } | null;
+}
+
+export interface LiveSheetsInsight extends LiveInsightCommon {
+  kind: "sheets";
+  /** The viewer is the workspace owner (Sync now). */
+  canManage: boolean;
+  /** Google Sheets connection state (SheetsConnectionStatus.state). */
+  sheets: "ready" | "setup_required" | "disabled" | "error" | "demo";
+  activePromptSet: { version: number; label: string | null; approved: number; prompts: number } | null;
+  syncs: LiveSheetSyncRow[];
+  /** "Sync now" presses allowed per sync per hour (src/worker/imports/sync.ts). */
+  syncNowPerHour: number;
+}
+
+export interface LiveBudgetLine {
+  resource: "usd_micros" | "provider_calls" | "jev_calls" | "writer_tokens" | "crawl_pages" | "gsc_rows" | "geo_prompts";
+  label: string;
+  used: number;
+  limit: number;
+  /** False when no counter row exists today (nothing reserved yet; the limit is today's setting). */
+  counted: boolean;
+}
+
+export interface LiveBudgetInsight extends LiveInsightCommon {
+  kind: "budget";
+  /** UTC day (YYYY-MM-DD). */
+  day: string;
+  project: LiveBudgetLine[];
+  /** The operator's global allowance, only for resources whose cap applies to this workspace's keys; empty when none does. */
+  global: LiveBudgetLine[];
+  manualRuns: { used: number; limit: number };
+  /** Which key each provider uses for this workspace (no key values): workspace_key, operator_key, or null (not set up). */
+  keys: Array<{ provider: string; label: string; source: "workspace_key" | "operator_key" | null }>;
+  notes: string[];
+}
+
+export type LiveInsight =
+  | LiveStrikingInsight
+  | LiveMoversInsight
+  | LiveTechnicalInsight
+  | LiveEngineQueriesInsight
+  | LiveBrandsInsight
+  | LiveCitedDomainsInsight
+  | LivePromptHistoryInsight
+  | LiveSheetsInsight
+  | LiveBudgetInsight;

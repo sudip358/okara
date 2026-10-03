@@ -81,6 +81,7 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | GET | /projects/:pid/activity/current | runtime | `{runs: [{id, agent, status}]}` |
 | GET | /projects/:pid/live/seo?runId=&after=&limit= | runtime | `LiveSeoBoardResponse` (Live view SEO feed; see "Live view") |
 | GET | /projects/:pid/live/geo?runId=&after=&limit= | runtime | `LiveGeoBoardResponse` (Live view GEO feed; see "Live view") |
+| GET | /projects/:pid/live/insights?kind= | live-containers | `LiveInsight` (one read-only project aggregate per Live view container; see "Live view: project containers") |
 | GET | /projects/:pid/geo/prompts | geo-analysis | `GeoPromptSet` (active) |
 | PUT | /projects/:pid/geo/prompts | geo-analysis | body `{prompts:[{text,promptType,stage,approved}]}`; new version |
 | POST | /projects/:pid/geo/prompts/generate | geo-analysis | writer-generated brand-blind suggestions (unapproved) |
@@ -913,6 +914,46 @@ Builder `src/worker/live/geo-board.ts`. Sources and cursor keys `{o, r, p?}`:
   custom lane answered; the lower-bound note when truncated.
 - **Not shown:** a per-run citation rate. The UI derives it from the lane counts and always shows the
   numerator and denominator. There is no score, projection, or prompts-per-second rate.
+
+## Live view: project containers (amends docs/build-kit.md [A31], 2026-10-03; UI docs/live-view-design.md section 17; types in `src/shared/types.ts`, section "live view: project containers")
+
+### GET /projects/:pid/live/insights?kind=<kind> → `{data: LiveInsight}`
+
+One read-only aggregate of the project's latest STORED data per container, for aggregates no existing endpoint
+returns. No provider call, no Jev, no budget reservation, no write. The project is resolved with
+`requireProject()` (404 for another tenant's project, as for every project route); every statement on tenant
+rows filters `workspace_id` and `project_id`, has a `LIMIT`, and binds fewer than 100 values (D1's limit; IN
+lists are chunked). `usage_counters` has no workspace column: the budget reads it by the resolved project's
+scope key and the operator's `global` key (aggregate used/limit only, returned only for resources this
+workspace spends on an operator key, i.e. where that global cap can refuse its calls).
+`kind` missing or unknown → 400 `{field: "kind"}`. Builders: `src/worker/live/insights.ts` (dispatcher, sheets,
+budget), `insights-seo.ts`, `insights-geo.ts`; pure grouping and the thresholds in `insights-lib.ts`.
+
+Every response has `kind`, `state` (`ready` | `demo` | `setup_required`), `message` (plain text, set with
+`setup_required`), `generatedAt`, `labels` (data notes; "Demo data - simulated run" first for demo projects)
+and `truncated` (a cap was hit; counts are lower bounds and a label says so).
+
+| kind | Container | Source (stored rows only) | Main fields |
+|---|---|---|---|
+| `striking` | SEO 10 | latest usable `gsc_syncs` (completed or partial, newest `synced_at`); its `gsc_metrics` current-window query+page rows (device rows excluded) with `position` in [8, 20] and `impressions` ≥ 1, ordered by impressions desc, query, page, top 50; the same query+page (exact strings) of the previous window, looked up in chunks of 45 pairs | `sync` (id, runId, source, syncedAt, current/previous windows, truncated), `thresholds`, `rows[{query, page, clicks, impressions, ctr, position, previous}]`, `total` (rows in range). No sync → `setup_required`. A CSV-import sync has no query+page rows (label) |
+| `movers` | SEO 11 | the same sync; per page and window: SUM of clicks/impressions, impression-weighted position, grouped in SQL (page rows when the sync stored any, else query+page rows, `basis` says which; the latter is a lower bound), at most 5,000 pages by clicks | `basis`, `gainers` / `losers` (top 8 by measured click difference, pages present in BOTH windows only; `current`, `previous`, `clickDelta`), `counts{both, unchanged, newPages, lostPages}`, `top` |
+| `technical` | SEO 12 | latest `crawl_runs` with status completed/partial; its `audit_findings` grouped by (severity, rule_id) (at most 500 groups) with the first 5 examples per group (`ROW_NUMBER`), rule name/area/class from the rule registry; a newer running/failed crawl | `crawl` (id, runId, status, startedAt, finishedAt, pagesCrawled, pagesSkipped, pagesLimit), `newer`, `bySeverity`, `total`, `groups[{severity, ruleId, ruleName, area, class, count, examples[{url, template, detail}]}]`. Unverified non-demo project → `setup_required` (the crawler only reads verified hosts) |
+| `engine_queries` | GEO 06 | `geo_search_queries` joined to API `geo_observations` stored in the last 30 days, grouped by stored `normalized` (COUNT DISTINCT answers, MAX time, providers), top 50, merged again with `normalizeQuery`; each query looked up EXACTLY (`normalizeDemandQuery`) in the latest usable sync's current window (`live/lookups.ts` `loadGscMetrics`, the Live feed's lookup) | `window{from, to, days}`, `rows[{query, engines, answers, lastSeen, gsc}]` (`gsc`: `{clicks, impressions, position, basis}` or null), `total` (distinct stored queries), `gscSync{syncedAt, window}` or null, `limit` |
+| `brands` | GEO 07 | `geo_brand_observations` of analysed (`ok`) API answers to discovery prompts in the last 30 days; one brand row per answer (MAX per answer, then SUM per provider and brand; at most 500 groups) | `window`, `engines`, `brands[{brandKey, name, isSelf, engines[{provider, answers, mentioned, cited, recommended, negative}], total}]` (your brand first); all counts are "n of m answers that checked the brand" |
+| `cited_domains` | GEO 08 | `geo_citations` of `ok` API answers in the last 30 days (newest answers first, at most 20,000 rows), host resolved as the Live feed does (wrapped redirect links by their bare-domain title, `www.` folded; unresolved counted), tagged with `projectBrands` (self / tracked competitor by configured domains) | `window`, `rows[{host, answers, engines, sourceType, tag}]` (top 25 by answers), `own` (your host's row even when outside the top 25, else null), `answersWithCitations`, `totalHosts`, `unresolved`, `limit` |
+| `prompt_history` | GEO 09 | active `geo_prompt_sets` and its approved `geo_prompts` (≤ 100); the project's newest 40 GEO `agent_runs`; their API `geo_observations` (≤ 6,000, newest first) with the self brand row; outcome per answer as the AI engine board defines it (cited / named / missing / failed / not analysed) | `promptSet{version, label}`, `engines[{provider, runs[{runId, at}]}]` (each engine's last ≤ 8 runs with stored answers, oldest first), `rows[{promptId, text, cells[engine][run]}]` (`cited` \| `named` \| `missing` \| `failed` \| `not_analysed` \| `none`), `maxRuns`. No prompt set → `setup_required` |
+| `sheets` | SEO 14, GEO 10 | `import_syncs` of the project (≤ 50); per sync, completed sync imports and their `import_changes` by action in the last 7 days; for GEO-prompt tabs, `import_records` by status (by the tab's source key) and the active set's prompts they put in it, with the newest stored API answer to the same prompt text | `canManage` (workspace owner), `sheets` (Google Sheets connection state), `activePromptSet`, `syncNowPerHour`, `syncs[{id, spreadsheetTitle, tab, destination, enabled, frequencyHours, lastRunAt, lastStatus, lastErrorCode, lastError, lastWarning, nextRunAt, recent{days, imports, added, updated, removed}, prompts}]`. Migration 0015 missing → `setup_required` |
+| `budget` | SEO 15, GEO 11 | `project_limits`, today's (UTC) `usage_counters` for the project scope key and the global scope key, today's manual `agent_runs`, `credentialSources` + `dataForSeoSource` (which key each provider uses) | `day`, `project[{resource, label, used, limit, counted}]` (priced spend in micro-USD, provider calls, Jev calls, writer tokens, crawl pages, Search Console rows, GEO prompt answers; `limit` from the counter row, else the project limit), `global` (only resources this workspace spends on an operator key, as `runs/budget.ts` charges them; DataForSEO on the operator's credentials adds spend and provider calls), `manualRuns{used, limit: 3}`, `keys[{provider, label, source}]`, `notes` |
+
+Thresholds and caps are exported constants in `src/worker/live/insights-lib.ts` (`STRIKING_DISTANCE`, `MOVERS`,
+`TECHNICAL`, `INSIGHT_WINDOW_DAYS`, `ENGINE_QUERIES_LIMIT`, `CITED_DOMAINS`, `PROMPT_HISTORY`, `SHEETS`).
+Untrusted strings (queries, URLs, sheet titles, tabs and error text, brand keys) are clipped and returned as
+plain data; the UI renders them as text. SEO 13 (competitor keyword gap) needs no new endpoint: it reads
+`GET /projects/:pid/competitors/dataforseo` and `GET /projects/:pid/competitors/dataforseo/domains/:domain`
+and its button calls `POST /projects/:pid/competitors/dataforseo/refresh {domain}`; the sheet buttons call
+`POST /projects/:pid/import/syncs/:syncId/run` (both unchanged; see "Competitor data (DataForSEO)" and "Import").
+Tests: `tests/live-insights-worker.test.ts` (tenancy, thresholds, demo, bounded statements on ≥ 2,000 Search
+Console rows and ≥ 500 answers), `tests/live-insights-lib.test.ts`.
 
 ## Ask Okara (chat) (amends docs/build-kit.md, 2026-10-02; types in `src/shared/types.ts`, section "Ask Okara")
 

@@ -17,7 +17,9 @@ import { contextInsertStatement, createProject } from "../platform/projects";
 import {
   DEMO_ANSWERS,
   DEMO_BRAND,
+  DEMO_COMPETITOR_DATA,
   DEMO_COMPETITOR_PAGES,
+  DEMO_DATAFORSEO_LOCATION,
   DEMO_FINDINGS,
   DEMO_GSC_ROWS,
   DEMO_LABEL,
@@ -29,7 +31,11 @@ import {
   DEMO_PROMPTS,
   DEMO_QUERY_RELEVANCE,
   DEMO_SEO_JUDGMENTS,
+  DEMO_SHEET,
+  DEMO_SHEET_SYNCS,
 } from "./fixtures";
+import { promptKey } from "@shared/import";
+import { sheetSourceKey } from "../imports/source";
 import { tierFor } from "../runs/policy";
 import { normalizeDemandQuery } from "../seo/gsc/demand";
 
@@ -481,6 +487,73 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
       }),
       checks_json: JSON.stringify(checks), reasons_json: JSON.stringify(c.reasons), verdict: c.verdict, verdict_version: "demo-fixture",
       jev_provider: DEMO_MODEL, jev_model: DEMO_MODEL, created_at: at(57), updated_at: at(56.8),
+    });
+  }
+
+  // ------------------------------------------------------------ Live view project containers (fictional, labelled demo)
+  // DataForSEO competitor data for the demo competitors: one completed refresh each (ranked keywords + keyword gap),
+  // cost unknown (nothing was fetched; demo projects never call DataForSEO).
+  for (const c of DEMO_COMPETITOR_DATA) {
+    const fetchId = newId("cfetch");
+    const loc = DEMO_DATAFORSEO_LOCATION;
+    const page = (path: string) => `https://${c.domain}${path}`;
+    ins("competitor_fetches", {
+      id: fetchId, ...base, domain: c.domain, trigger: "competitor_added", status: "completed", requested_by: userId,
+      location_code: loc.locationCode, language_code: loc.languageCode, cost_usd: null, error: null, created_at: at(70), started_at: at(70), finished_at: at(69.8),
+    });
+    const snap = (endpoint: "ranked_keywords" | "domain_intersection", count: number, data: Record<string, unknown>) =>
+      ins("competitor_snapshots", {
+        id: newId("csnap"), ...base, fetch_id: fetchId, domain: c.domain, endpoint, location_code: loc.locationCode, language_code: loc.languageCode,
+        status: "ok", cost_usd: null, total_count: count, item_count: count, data_json: JSON.stringify({ location: loc, ...data }), error: null, fetched_at: at(69.8),
+      });
+    snap("ranked_keywords", c.keywords.length, {
+      overview: null,
+      keywords: c.keywords.map(([keyword, position, searchVolume, path]) => ({ keyword, position, searchVolume, url: page(path), etv: null })),
+    });
+    snap("domain_intersection", c.gap.length, {
+      rows: c.gap.map(([keyword, searchVolume, competitorPosition, path]) => ({ keyword, searchVolume, competitorPosition, competitorUrl: page(path), etv: null, keywordDifficulty: null, cpc: null })),
+    });
+  }
+  // Sheet syncs of a fictional campaign sheet, paused (enabled 0: the cron never runs them), each with the sync
+  // import that applied its rows (change provenance without project-level effects: ref_id NULL).
+  for (const sy of DEMO_SHEET_SYNCS) {
+    const syncId = newId("isync");
+    const importId = newId("imp");
+    const sourceKey = sheetSourceKey(DEMO_SHEET.spreadsheetId, sy.sheetTabId, sy.tab);
+    const ranAt = at(sy.lastRunMinutesAgo);
+    const records: Array<{ key: string; label: string; status: string; action: "added" | "removed" }> =
+      sy.destination === "competitors"
+        ? (sy.domains ?? []).map((d) => ({ key: d, label: d, status: "tracked", action: "added" as const }))
+        : [
+            ...(sy.promptIndexes ?? []).map((i) => ({ key: promptKey(DEMO_PROMPTS[i]!.text), label: DEMO_PROMPTS[i]!.text, status: "in_set", action: "added" as const })),
+            ...(sy.archived ?? []).map((t) => ({ key: promptKey(t), label: t, status: "archived", action: "removed" as const })),
+          ];
+    const added = records.filter((r) => r.action === "added").length;
+    const removed = records.length - added;
+    ins("imports", {
+      id: importId, ...base, source: "sheets", source_name: DEMO_SHEET.title, spreadsheet_id: DEMO_SHEET.spreadsheetId, tab: sy.tab, sheet_tab_id: sy.sheetTabId,
+      destination: sy.destination, trigger: "sync", sync_id: syncId, mapping_json: "{}", options_json: "{}",
+      counts_json: JSON.stringify({ added, removed }), changes_json: JSON.stringify(records.map((r) => `${r.action === "added" ? "+" : "−"} ${r.label}`)),
+      rows_read: records.length + 1, status: "completed", created_by: userId, created_at: at(sy.lastRunMinutesAgo + 60),
+    });
+    for (const r of records) {
+      ins("import_records", {
+        id: newId("irec"), ...base, destination: sy.destination, record_key: r.key, label: r.label, status: r.status,
+        data_json: JSON.stringify({ demo: true, label: DEMO_LABEL }), source_key: sourceKey, first_import_id: importId, last_import_id: importId,
+        created_at: at(sy.lastRunMinutesAgo + 60), updated_at: at(sy.lastRunMinutesAgo + 60), removed_at: r.status === "archived" ? at(sy.lastRunMinutesAgo + 60) : null,
+      });
+      ins("import_changes", {
+        id: newId("ichg"), ...base, import_id: importId, destination: sy.destination, record_key: r.key, action: r.action, prev_json: null, ref_id: null,
+        created_at: at(sy.lastRunMinutesAgo + 60),
+      });
+    }
+    ins("import_syncs", {
+      id: syncId, ...base, spreadsheet_id: DEMO_SHEET.spreadsheetId, spreadsheet_title: DEMO_SHEET.title, tab: sy.tab, sheet_tab_id: sy.sheetTabId,
+      destination: sy.destination, mapping_json: JSON.stringify(sy.destination === "competitors" ? { domain: "Competing Domains" } : { question: "Question" }),
+      options_json: "{}", frequency_hours: sy.frequencyHours, enabled: 0, next_run_at: iso(new Date(now.getTime() + sy.frequencyHours * 3_600_000)),
+      running_until: null, last_run_at: ranAt, last_status: sy.lastStatus, last_error_code: sy.errorCode, last_error: sy.error,
+      last_warning: `${DEMO_LABEL}: syncing is paused in the demo; nothing is read from Google.`, last_import_id: importId, created_by: userId,
+      created_at: at(sy.lastRunMinutesAgo + 60), updated_at: ranAt,
     });
   }
 

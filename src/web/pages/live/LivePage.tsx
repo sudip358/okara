@@ -49,13 +49,16 @@ import {
   type TimelineEvent,
 } from "./engine";
 import { useCurrentRuns } from "./current-store";
-import { useGeoProjectData, useLiveRun, useRunList, useSeoProjectData } from "./data";
+import { useGeoProjectData, useLiveRun, useRunList, useSeoProjectData, useThrottled } from "./data";
+import { ContainersMenu } from "./more/ContainersMenu";
+import { LiveMoreContext, type LiveMoreValue } from "./more/data";
+import { containersOf, readHidden, toggleHidden, writeHidden, type LiveModeKey } from "./more/registry";
 import { GeoBoard } from "./GeoBoard";
 import { LiveHeader, LivePill } from "./LiveHeader";
 import { LIVE_CSS, useReducedMotion } from "./motion";
 import { ReplayControls } from "./ReplayControls";
 import { PanelActionsContext, RunActionsProvider, RunAllMenu } from "./RunActions";
-import { geoPanelActions, manualRunsToday, runAllActions, seoPanelActions, type ActionEnv } from "./run-actions";
+import { geoPanelActions, manualRunsToday, moreGeoActions, moreSeoActions, runAllActions, seoPanelActions, type ActionEnv, type ReloadKey } from "./run-actions";
 import { RunRail } from "./RunRail";
 import { SeoBoard } from "./SeoBoard";
 import { DEMO_LABEL, LIVE_TEXT, fmtInt, pillText, spendPhrase, spendSoFarText, urlHost, type LiveMode } from "./text";
@@ -64,6 +67,15 @@ const SPEED_KEY = "okara.live.speed";
 const ANNOUNCE_EVERY_MS = 5_000;
 const NO_EVENTS: TimelineEvent[] = [];
 const NO_IDS: ReadonlySet<string> = new Set();
+
+/** Per-viewer storage for conveniences (speed, hidden containers); null when unavailable (private window, blocked). */
+function viewerStorage(): Storage | null {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
 
 function readSpeed(): Speed {
   try {
@@ -271,7 +283,10 @@ export function LivePage() {
   // Stable identity while the inputs are unchanged (the replay clock re-renders this page every 100 ms).
   const envKey = JSON.stringify({ ...actionEnv, path: null, agent, laneIds });
   const panelActions = useMemo(
-    () => (agent === "seo" ? seoPanelActions(actionEnv) : geoPanelActions(actionEnv, laneIds ? laneIds.split("\n") : [])),
+    () =>
+      agent === "seo"
+        ? { ...seoPanelActions(actionEnv), ...moreSeoActions(actionEnv) }
+        : { ...geoPanelActions(actionEnv, laneIds ? laneIds.split("\n") : []), ...moreGeoActions(actionEnv) },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [envKey],
   );
@@ -280,13 +295,52 @@ export function LivePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [envKey],
   );
+  // ------------------------------------------------------------------ project containers (docs/live-view-design.md section 17)
+  // Reload counters bumped by the run controls (a sheet "Sync now", a DataForSEO refresh, any start): the
+  // containers refetch on them; there is no polling of their own.
+  const [reloads, setReloads] = useState({ sheets: 0, gap: 0, budget: 0 });
+  /** Bumps one reload counter; every bump also refetches the budget (spend or quota may have changed). */
+  const bump = (k: keyof typeof reloads) => setReloads((r) => (k === "budget" ? { ...r, budget: r.budget + 1 } : { ...r, [k]: r[k] + 1, budget: r.budget + 1 }));
   const onRunStarted = (run: RunSummary) => {
     current.reload();
     runsForQuota.reload();
+    bump("budget");
     // Switch to the started run: the view shows it LIVE while it is pending/running.
     setParams({ run: run.id });
   };
-  const onToolDone = (what: "buyer" | "links") => (what === "buyer" ? seoData.buyer.reload() : seoData.links.reload());
+  const onToolDone = (what: ReloadKey) => {
+    if (what === "buyer") seoData.buyer.reload();
+    else if (what === "links") seoData.links.reload();
+    else bump(what === "sheets" ? "sheets" : "gap");
+  };
+  const mode17: LiveModeKey = agent;
+  const [hiddenByMode, setHiddenByMode] = useState<Record<LiveModeKey, Set<string>>>(() => ({ seo: readHidden(viewerStorage(), "seo"), geo: readHidden(viewerStorage(), "geo") }));
+  const hidden = hiddenByMode[mode17];
+  const setHidden = (next: Set<string>) => {
+    setHiddenByMode((h) => ({ ...h, [mode17]: next }));
+    writeHidden(viewerStorage(), mode17, next);
+  };
+  // Budget: refetched when a step of the shown run ends (throttled to 1 per 10 s) or after a start / tool call.
+  const terminalSteps = live.items.reduce((n, i) => {
+    const s = parseStep(i);
+    return s && s.status !== "started" && s.status !== "info" ? n + 1 : n;
+  }, 0);
+  const budgetSteps = useThrottled(String(terminalSteps), 10_000);
+  const gscKey = terminal("seo.gsc_sync");
+  const crawlKey = terminal("seo.crawl");
+  const batchKey = terminal("geo.batch");
+  const budgetKey = `${budgetSteps}|${reloads.budget}`;
+  const moreValue: LiveMoreValue = useMemo(
+    () => ({
+      runId: activity?.run.id ?? null,
+      demo: project.isDemo,
+      replaying,
+      keys: { gsc: gscKey, crawl: crawlKey, batch: batchKey, budget: budgetKey },
+      reloads: { sheets: reloads.sheets, gap: reloads.gap },
+      hidden,
+    }),
+    [activity?.run.id, project.isDemo, replaying, gscKey, crawlKey, batchKey, budgetKey, reloads.sheets, reloads.gap, hidden],
+  );
 
   // ------------------------------------------------------------------ full screen / focus mode
   const rootRef = useRef<HTMLDivElement>(null);
@@ -488,6 +542,7 @@ export function LivePage() {
               controls={replayControls}
             />
             <PanelActionsContext.Provider value={panelActions}>
+            <LiveMoreContext.Provider value={moreValue}>
             {agent === "seo" ? (
               <SeoBoard
                 projectId={projectId}
@@ -524,6 +579,7 @@ export function LivePage() {
                 data={geoData}
               />
             )}
+            </LiveMoreContext.Provider>
             </PanelActionsContext.Provider>
           </>
         )}
@@ -555,6 +611,7 @@ export function LivePage() {
         labels={labels}
         replaying={replaying}
         runAll={<RunAllMenu actions={allActions} />}
+        containers={activity ? <ContainersMenu defs={containersOf(mode17)} hidden={hidden} onToggle={(k) => setHidden(toggleHidden(hidden, k))} onShowAll={() => setHidden(new Set())} /> : null}
         extra={
           <>
             {activity?.run.scope && (

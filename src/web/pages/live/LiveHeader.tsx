@@ -47,6 +47,7 @@ export function LiveHeader({
   replaying,
   extra,
   runAll,
+  containers,
 }: {
   agent: "seo" | "geo";
   domain: string;
@@ -60,6 +61,8 @@ export function LiveHeader({
   extra?: ReactNode;
   /** "Run all" menu (docs/live-view-design.md section 16). */
   runAll?: ReactNode;
+  /** "Containers" show/hide menu (docs/live-view-design.md section 17). */
+  containers?: ReactNode;
 }) {
   const [notesOpen, setNotesOpen] = useState(false);
   const chips = dedupeLabels([...labels, agent === "geo" && !labels.some((l) => /api-sampled/i.test(l)) ? LIVE_TEXT.apiSampled : null]);
@@ -108,6 +111,7 @@ export function LiveHeader({
           </div>
         </div>
         <div className="flex shrink-0 items-start gap-2">
+          {containers}
           {runAll}
           <button
             type="button"

@@ -20,6 +20,7 @@ Spec: `docs/build-kit.md`. API contract: `docs/api.md` + `src/shared/types.ts`. 
 | import | src/shared/import.ts, src/worker/imports/**, src/worker/routes/imports.ts, migrations/0015_sheet_imports.sql, src/web/pages/import/**, tests/import-*.test.ts, tests/fixtures/sheets.ts | /projects/:pid/import/* (Google Sheets / CSV import, live sync, [A28]) |
 | ask-okara | src/worker/chat/**, src/worker/routes/chat.ts, src/web/components/chat/**, migrations/0013_chat.sql, tests/chat-*.test.ts | /projects/:pid/chat/* |
 | section-runs | src/shared/run-scope.ts, src/worker/runs/scope.ts, migrations/0016_run_scope.sql, src/web/pages/live/{run-actions.ts,RunActions.tsx}, tests/run-scope-worker.test.ts, tests/live-run-actions.test.ts | POST /projects/:pid/runs `{steps?, engines?}` (partial runs, [A29]); Live view section "▶ Run" buttons and "Run all" |
+| live-containers | src/worker/live/insights{,-seo,-geo,-lib}.ts, GET /live/insights in src/worker/routes/live.ts, src/web/pages/live/more/**, demo rows in src/worker/demo/{fixtures,seed}.ts, tests/live-insights-{worker,lib}.test.ts, tests/live-more-web.test.ts | GET /projects/:pid/live/insights?kind= (Live view project containers SEO 10-15 / GEO 06-11, "Containers" menu, [A31]; docs/live-view-design.md section 17) |
 
 ## Milestones
 - [x] M0 Foundation: scaffold, schema, contracts, test harness

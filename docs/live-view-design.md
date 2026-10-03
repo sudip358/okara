@@ -960,3 +960,100 @@ Layout: the button sits in the panel header (wraps under the title at phone widt
 `min(18rem, 100vw - 2rem)` wide; colours use the zinc/sky tokens with `dark:` variants like the rest of the
 view. Keyboard: the menu button opens with Enter/Space/ArrowDown; arrows/Home/End move; Escape or Tab closes
 and returns focus; the view's shortcuts (F, Space, arrows) are ignored inside the dialog and menu.
+
+## 17. Project containers (amendment 2026-10-03, docs/build-kit.md [A31])
+
+Owner request on `/projects/:pid/live`: "can you add more containers here", each with its own run button where a
+real action exists. Six SEO containers (10-15) and six GEO containers (06-11) show the project's latest STORED
+state next to the run on screen. They never claim to be part of that run: every caption says where the data
+comes from and when. Server: `GET /projects/:pid/live/insights?kind=` (`docs/api.md` "Live view: project
+containers"), builders `src/worker/live/insights{,-seo,-geo,-lib}.ts`. Web: `src/web/pages/live/more/**`
+(registry, data hooks, formatters, containers, "Containers" menu) and the run mapping in `run-actions.ts`.
+
+**Containers** (accent in brackets; "▶" = a §16 section button with the same disabled/confirm rules):
+
+| Mode | # | Container | Data (stored rows only) | Button |
+|---|---|---|---|---|
+| SEO | 10 | Striking-distance queries [sky] | `insights?kind=striking`: current-window query+page rows of the latest usable Search Console sync with position 8-20 (inclusive) and ≥ 1 impression, by impressions, top 50; clicks, CTR, position and the same query+page of the previous window ("prev 2,050 · −4 vs prev"). Counter: rows in range. | ▶ Run Search Console sync (partial SEO run `["gsc_sync"]`) |
+| SEO | 11 | Pages gaining and losing clicks [sky] | `insights?kind=movers`: page sums per window (page rows; else query+page rows, labelled a lower bound). Only pages in BOTH windows are ranked (top 8 each way, measured click difference, both values shown); pages only in one window are counted as new / lost, never ranked. | ▶ Run Search Console sync |
+| SEO | 12 | Technical issues from the latest crawl [rose] | `insights?kind=technical`: `audit_findings` of the latest completed/partial crawl grouped by severity and rule (count, rule name, fact/heuristic, up to 5 example URLs behind an "Examples" disclosure), crawl date and pages read; a newer running/failed crawl is named. Unverified site: setup state. | ▶ Run crawl (partial SEO run `["crawl"]`) |
+| SEO | 13 | Competitor keyword gap (DataForSEO) [amber] | Existing endpoints `GET /competitors/dataforseo` + `/domains/:domain`: per tracked domain (tabs), the stored `domain_intersection` rows (keywords they rank for where DataForSEO found no ranking for your domain), volume, their position and page, labelled "DataForSEO estimate, fetched <date> · <location> · <language> · <cost>". Not configured: setup state linking to Integrations. | ▶ Refresh competitor data (`POST /competitors/dataforseo/refresh {domain}`; the domain is picked in the confirm dialog) |
+| SEO | 14 | Master sheet sync [zinc] | `insights?kind=sheets`: each sheet tab kept in sync (`import_syncs`), status, last/next run, error or warning text, and the changes its sync imports applied in the last 7 days (`+added · ~updated · −removed`). None: link to the Import page. | ▶ Sync now per row (`POST /import/syncs/:syncId/run`) |
+| SEO | 15 | Budget and quotas today [zinc] | `insights?kind=budget`: today's (UTC) `usage_counters` of the project vs each cap, the operator's global counters only for resources this workspace spends on an operator key, manual runs used of 3, which key each provider uses (never the key). | none (nothing to run) |
+| GEO | 06 | What the AI engines searched for [sky] | `insights?kind=engine_queries`: `geo_search_queries` of API answers stored in the last 30 days, grouped by normalized query: engines, distinct answers, last seen, and an EXACT normalized match in the latest sync's current window ("pos 12.3 · 340 impr."; "≈" when summed over query+page rows, i.e. impression-weighted). | ▶ Ask AI engines (partial GEO run `["batch"]`) |
+| GEO | 07 | Brands in AI answers [emerald] | `insights?kind=brands`: per brand (yours first, then tracked competitors) and engine, over analysed API answers to discovery prompts in the last 30 days: named / cited / recommended / mentioned negatively, each "n of m answers". No share, no rate. | ▶ Ask AI engines |
+| GEO | 08 | Most-cited domains, last 30 days [amber] | `insights?kind=cited_domains`: citation hosts (redirect links resolved by their bare-domain title, `www.` folded) by answers citing them, engines, source type; your site highlighted (and shown after "…" when outside the top 25), tracked competitors tagged. | ▶ Ask AI engines |
+| GEO | 09 | Prompt history [sky] | `insights?kind=prompt_history`: approved prompts of the active set × engine × the engine's last up to 8 GEO runs with stored answers (oldest first): cited / mentioned / absent / no answer (failed) / not analysed / nothing stored. Letters plus colour plus an accessible name per engine ("Gemini, last 3 runs: 29 Sep cited, …"). | ▶ Ask AI engines |
+| GEO | 10 | AI questions from your sheet [zinc] | `insights?kind=sheets` (GEO-prompt tabs): as SEO 14, plus what each tab feeds: questions in the set / not added (set full) / archived, how many are approved in the active set, when one was last asked. | ▶ Sync now per row |
+| GEO | 11 | Budget and quotas today [zinc] | as SEO 15 | none |
+
+**Thresholds** (one exported constant each, `src/worker/live/insights-lib.ts`, asserted by tests):
+`STRIKING_DISTANCE = {minPosition: 8, maxPosition: 20, minImpressions: 1, maxRows: 50}` (Search Console's
+average position, inclusive), `MOVERS = {top: 8, groupCap: 5,000}`, `TECHNICAL = {examples: 5, groupCap: 500}`,
+`INSIGHT_WINDOW_DAYS = 30`, `ENGINE_QUERIES_LIMIT = 50`, `CITED_DOMAINS = {limit: 25, rowCap: 20,000}`,
+`PROMPT_HISTORY = {runsPerEngine: 8, runScan: 40, observationCap: 6,000, prompts: 100}`,
+`SHEETS = {syncs: 50, recentDays: 7}`. A hit cap is reported (`truncated` + a "lower bound" label).
+
+**Captions** (first line of every container, `more/format.ts`): the demo label first for demo projects; then
+"From this run's Search Console sync (3 Oct) · 3-30 Sep vs 6 Aug-2 Sep" when the run on screen produced the
+data, else "From your latest Search Console sync (29 Sep), not part of this run" (crawl, DataForSEO refresh
+likewise); GEO 06-08 "From your stored answers, 3 Sep-3 Oct (30 days), not only this run"; GEO 09 "From your
+stored runs (latest 3 Oct), not only this run · prompt set v4"; sheets/budget "From your … , not part of this
+run". During a replay a "Current state, not replayed" chip is added: these containers always show the current
+stored state, never a reconstruction of the replayed moment. Untrusted strings (queries, URLs, sheet titles,
+tabs and error text, DataForSEO keywords and pages, brand keys) are React text only.
+
+**Data plan** (no polling loop of their own; the §3 budget of one heartbeat + one feed per 2 s holds): each
+container fetches once when it mounts. It refetches only when (a) the step that changes it reaches a terminal
+status in the heartbeat the page already polls (`seo.gsc_sync` → 10/11, `seo.crawl` → 12, `geo.batch` → GEO
+06-09; budget after any terminal step, throttled to one refetch per 10 s), or (b) a run control of the view
+finished (a sheet "Sync now" → 14 / GEO 10, a DataForSEO refresh → 13, any start → budget). The scheduled
+sheet sync and an asynchronous DataForSEO refresh show on the next mount or reload ("Check again" nudge in 13).
+
+**Run buttons:** `moreSeoActions` / `moreGeoActions` reuse the §16 actions of panels 02, 01 and the GEO batch
+(same keys prefix, labels, disabled reasons, confirm text: manual-run quota, budget). New `call` actions:
+- *Refresh competitor data* (paid): disabled in demo, for non-owners ("Only the workspace owner can refresh
+  competitor data."), when DataForSEO is not ready (the panel's message, else "add credentials on the
+  Integrations page"), with no tracked competitor, or when every domain is at its cap. The dialog lists the
+  domains as radio buttons (a capped domain is disabled with its reason) and says: "Paid call: DataForSEO Labs
+  ranked keywords, keyword gap against <domain> and top pages for the domain you pick.", the existing
+  `refreshCostNote` (published-price ceiling, from the server's constants), the per-domain and per-project
+  daily caps with today's count, whose account it uses (operator vs workspace) and "Not an agent run: no manual
+  run is used."
+- *Sync now* (free): disabled in demo, for non-owners, and while Google Sheets is not connected or its
+  authorization expired. The dialog names the tab and sheet, what syncing does for that destination
+  (competitors queue paid refreshes within their caps; questions are added pending approval / archived; links
+  are append-only), and "Google Sheets reads are free; at most 6 per tab per hour." (`SYNC_NOW_PER_HOUR`, the
+  route's rate limit). A 200 whose sync outcome is not ok is shown in the dialog as an error.
+
+**Containers menu** (header, before "Run all"): "▦ Containers ▾" (label hidden below `sm`, "N hidden" when
+any), a `menu` of `menuitemcheckbox` items (number + title) and "Show all". Default: everything shown. Choice
+per viewer and mode in `localStorage` `okara.live.hidden.<mode>` (a JSON array of keys; read and written in
+try/catch, unknown keys dropped, so a private window simply shows everything). Keyboard: Enter/Space/ArrowDown
+open, arrows/Home/End move, Space/Enter toggle (menu stays open), Escape/Tab close and return focus. Hiding
+every container shows "Every container is hidden. Use “Containers” in the header to show them again."
+
+**Layout:** desktop grid cells `xl:col-span-6`, fixed heights (420 px; sheets/budget 400 px) with internal
+scroll; below `xl` they stack. New containers mount lazily (`IntersectionObserver`, 400 px root margin; a
+"Loads when it scrolls into view." placeholder of the same accent). Phone width: one tab per container in the
+existing tab strip; tables are `table-fixed` with columns dropped below the container's `@lg` width; no
+horizontal page scroll at 390 px (verified light and dark). The scrollers of the tab strips are `relative`
+so their screen-reader-only text cannot widen the page.
+
+**States:** loading shimmer; `setup_required` (no Search Console sync stored, site not verified, no prompt set,
+DataForSEO not configured, migration missing) with the step that fixes it; empty (e.g. "No query+page row at
+positions 8–20 with impressions in the latest sync."); error ("Could not load …", fetched again on the next
+refetch key or a page reload); demo (simulated, labelled).
+
+**Demo:** the demo seed adds labelled fictional rows so every container renders: two DataForSEO snapshots per
+tracked competitor (ranked keywords + keyword gap, cost unknown, "United States (demo)"), a demo sheet with a
+paused "Competitors" sync (OK) and a paused "AI questions" sync whose last run failed (header changed), with
+their imports and changes; the exact Search Console match in GEO 06 is "oak side table". Budget counters are
+not seeded (the demo shows the real, zero counters) and the demo has one GEO run, so GEO 09 shows one cell per
+engine.
+
+**Not shown / dropped:** SEO 13's "(or rank worse)": the stored keyword gap is DataForSEO's
+`intersections: false` set (keywords where your domain has no ranking), and the positions of shared keywords
+are not stored, so "ranks worse" cannot be computed without another paid call. No share of voice, visibility
+score, traffic or forecast anywhere; differences are measured between two stored windows and always show both
+values.

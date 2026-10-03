@@ -34,6 +34,11 @@ import { ElementsPanel } from "./seo/ElementsPanel";
 import { LinksPanel } from "./seo/LinksPanel";
 import { GscPanel, PagesPanel, QueriesPanel } from "./seo/RunPanels";
 import type { LiveMode } from "./text";
+import { LazyMount } from "./more/common";
+import { useLiveMore } from "./more/data";
+import { SEO_CONTAINERS, type ContainerDef } from "./more/registry";
+import { CompetitorGapContainer, MoversContainer, StrikingContainer, TechnicalContainer } from "./more/SeoContainers";
+import { BudgetContainer, SheetsContainer } from "./more/SharedContainers";
 
 export interface SeoBoardProps {
   projectId: string;
@@ -61,13 +66,34 @@ const PENDING_QUERIES = Math.min(5, MAX_PENDING);
 /** Panel 07 loads measured page attributes (skip factors) for this many pages only. */
 export const SKIP_FACTOR_PAGES = 8;
 
-const TABS = ["Crawl", "GSC", "Queries", "Elements", "Competitors", "Coverage", "AI answers", "Links", "Recs"] as const;
+/**
+ * Grid cell per container (design section 4; section 17 for 10-15): fixed heights at >= 1280, so arriving rows
+ * never shift the page; the project-level containers 10-15 sit in pairs under 08 / 09.
+ */
+const CELL: Record<string, string> = {
+  pages: "xl:col-span-3 xl:h-[340px]",
+  gsc: "xl:col-span-4 xl:h-[340px]",
+  queries: "md:col-span-2 xl:col-span-5 xl:h-[340px]",
+  elements: "md:col-span-2 xl:col-span-6 xl:h-[480px]",
+  competitors: "md:col-span-2 xl:col-span-6 xl:h-[480px]",
+  coverage: "xl:col-span-6 xl:max-h-[460px]",
+  "ai-answers": "xl:col-span-6 xl:max-h-[460px]",
+  links: "xl:col-span-6 xl:h-[400px]",
+  recs: "xl:col-span-6 xl:h-[400px]",
+  striking: "xl:col-span-6 xl:h-[420px]",
+  movers: "xl:col-span-6 xl:h-[420px]",
+  technical: "xl:col-span-6 xl:h-[420px]",
+  "competitor-gap": "xl:col-span-6 xl:h-[420px]",
+  sheets: "xl:col-span-6 xl:h-[400px]",
+  budget: "xl:col-span-6 xl:h-[400px]",
+};
 
 export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
   const wide = useMinWidth(768);
+  const more = useLiveMore();
   // Phone width: until the viewer picks a panel, the tab follows the step that is running (crawl, Search
   // Console sync, judging), so the panel on screen is the one where stored rows are arriving.
-  const [picked, setTab] = useState<(typeof TABS)[number] | null>(null);
+  const [picked, setTab] = useState<string | null>(null);
   const d = useMemo(() => {
     const items = itemsOf(p.revealed);
     const recs = recsOf(p.revealed);
@@ -131,8 +157,8 @@ export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
   // Exact page-level key; pages beyond the first SKIP_FACTOR_PAGES are never fetched ("not_loaded", no shimmer).
   const skipFor = (pageId: string) => (requested.has(pageId) ? skip.get(livePaths.skip(p.projectId, pageId, null, null)) : ("not_loaded" as const));
 
-  const panels: Record<(typeof TABS)[number], ReactElement> = {
-    Crawl: (
+  const panels: Record<string, ReactElement> = {
+    pages: (
       <PagesPanel
         reads={d.reads}
         pagesRead={pagesRead}
@@ -148,7 +174,7 @@ export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
         verified={p.verified}
       />
     ),
-    GSC: (
+    gsc: (
       <GscPanel
         overview={p.data.overview.data}
         overviewError={p.data.overview.error}
@@ -160,7 +186,7 @@ export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
         replaying={p.replaying}
       />
     ),
-    Queries: (
+    queries: (
       <QueriesPanel
         groups={d.groups}
         relevant={qRelevant}
@@ -172,7 +198,7 @@ export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
         pendingLabel={d.pendingLabel}
       />
     ),
-    Elements: (
+    elements: (
       <ElementsPanel
         rows={d.rows}
         change={counts.change}
@@ -187,11 +213,11 @@ export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
         pendingLabel={d.pendingLabel}
       />
     ),
-    Competitors: <CompetitorsPanel state={p.data.competitors} reduced={p.reduced} projectId={p.projectId} captions={projCaptions} />,
-    Coverage: <CoveragePanel state={p.data.coverage} reduced={p.reduced} projectId={p.projectId} ownHost={p.ownHost} captions={projCaptions} />,
-    "AI answers": <AiAnswersPanel evidence={p.data.evidence} coverage={coverageRows} skipFor={skipFor} factorPages={SKIP_FACTOR_PAGES} reduced={p.reduced} captions={projCaptions} />,
-    Links: <LinksPanel report={p.data.links} runRows={d.links} reduced={p.reduced} projectId={p.projectId} replaying={p.replaying} />,
-    Recs: (
+    competitors: <CompetitorsPanel state={p.data.competitors} reduced={p.reduced} projectId={p.projectId} captions={projCaptions} />,
+    coverage: <CoveragePanel state={p.data.coverage} reduced={p.reduced} projectId={p.projectId} ownHost={p.ownHost} captions={projCaptions} />,
+    "ai-answers": <AiAnswersPanel evidence={p.data.evidence} coverage={coverageRows} skipFor={skipFor} factorPages={SKIP_FACTOR_PAGES} reduced={p.reduced} captions={projCaptions} />,
+    links: <LinksPanel report={p.data.links} runRows={d.links} reduced={p.reduced} projectId={p.projectId} replaying={p.replaying} />,
+    recs: (
       <RecsPanel
         num="09"
         title="Recommendations drafted and checked"
@@ -204,40 +230,56 @@ export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
         finished={finished}
       />
     ),
+    // Section 17: project-level containers, each fetching its own stored aggregate (lazily below the fold).
+    striking: <StrikingContainer projectId={p.projectId} reduced={p.reduced} />,
+    movers: <MoversContainer projectId={p.projectId} reduced={p.reduced} />,
+    technical: <TechnicalContainer projectId={p.projectId} reduced={p.reduced} />,
+    "competitor-gap": <CompetitorGapContainer projectId={p.projectId} reduced={p.reduced} />,
+    sheets: <SheetsContainer projectId={p.projectId} reduced={p.reduced} mode="seo" />,
+    budget: <BudgetContainer projectId={p.projectId} reduced={p.reduced} mode="seo" />,
   };
 
-  const following: (typeof TABS)[number] = d.crawl === "running" ? "Crawl" : d.gsc === "running" ? "GSC" : "Elements";
-  const tab = picked ?? following;
+  const shown: ContainerDef[] = SEO_CONTAINERS.filter((c) => !more.hidden.has(c.key));
+  const following = d.crawl === "running" ? "pages" : d.gsc === "running" ? "gsc" : "elements";
+  const tab = [picked, following].find((k) => !!k && shown.some((c) => c.key === k)) ?? shown[0]?.key ?? null;
+  const tabDef = shown.find((c) => c.key === tab) ?? null;
 
   const feedBanner =
     !p.seo && p.feedError ? (
       <StateBanner state="error" title="The live SEO feed could not be loaded" message="Panels 03, 04 and 09 wait for it; the other panels show the stored rows they have." />
     ) : null;
 
+  const allHidden = shown.length === 0 ? <p className="py-6 text-center text-xs text-zinc-600 dark:text-zinc-400">Every container is hidden. Use “Containers” in the header to show them again.</p> : null;
+
   if (!wide) {
     return (
       <div className="min-w-0 space-y-3">
         {feedBanner}
-        <div role="tablist" aria-label="Panels" className="lv-strip flex gap-1 overflow-x-auto pb-1" tabIndex={0}>
-          {TABS.map((t) => (
-            <button
-              key={t}
-              type="button"
-              role="tab"
-              aria-selected={tab === t}
-              onClick={() => setTab(t)}
-              className={cx(
-                "shrink-0 rounded-md px-2.5 py-1 text-xs font-medium focus-visible:outline-2 focus-visible:outline-sky-600",
-                tab === t ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900" : "bg-white text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300",
-              )}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
-        <div role="tabpanel" aria-label={tab} className="min-w-0 [&>section]:max-h-[70vh]">
-          {panels[tab]}
-        </div>
+        {allHidden}
+        {shown.length > 0 && (
+          <div role="tablist" aria-label="Panels" className="lv-strip relative flex gap-1 overflow-x-auto pb-1" tabIndex={0}>
+            {shown.map((c) => (
+              <button
+                key={c.key}
+                type="button"
+                role="tab"
+                aria-selected={tab === c.key}
+                onClick={() => setTab(c.key)}
+                className={cx(
+                  "shrink-0 rounded-md px-2.5 py-1 text-xs font-medium focus-visible:outline-2 focus-visible:outline-sky-600",
+                  tab === c.key ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900" : "bg-white text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300",
+                )}
+              >
+                {c.tab}
+              </button>
+            ))}
+          </div>
+        )}
+        {tabDef && (
+          <div role="tabpanel" aria-label={tabDef.tab} className="min-w-0 [&>section]:max-h-[70vh]">
+            {panels[tabDef.key]}
+          </div>
+        )}
       </div>
     );
   }
@@ -245,18 +287,22 @@ export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
   return (
     <div className="min-w-0 space-y-4">
       {feedBanner}
-      {/* Rows (design section 4): 01 02 03 | 04 05 | 06 07 | 08 09. Panels fed by rows of this run keep a fixed
-          height so arriving rows never shift the page; the project-level rows size to their content (capped). */}
+      {allHidden}
+      {/* Rows (design section 4): 01 02 03 | 04 05 | 06 07 | 08 09, then section 17: 10 11 | 12 13 | 14 15. Panels
+          fed by rows of this run keep a fixed height so arriving rows never shift the page; the project-level rows
+          size to their content (capped); containers 10-15 mount when they come near the viewport. */}
       <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-12">
-        <Cell cls="xl:col-span-3 xl:h-[340px]">{panels.Crawl}</Cell>
-        <Cell cls="xl:col-span-4 xl:h-[340px]">{panels.GSC}</Cell>
-        <Cell cls="md:col-span-2 xl:col-span-5 xl:h-[340px]">{panels.Queries}</Cell>
-        <Cell cls="md:col-span-2 xl:col-span-6 xl:h-[480px]">{panels.Elements}</Cell>
-        <Cell cls="md:col-span-2 xl:col-span-6 xl:h-[480px]">{panels.Competitors}</Cell>
-        <Cell cls="xl:col-span-6 xl:max-h-[460px]">{panels.Coverage}</Cell>
-        <Cell cls="xl:col-span-6 xl:max-h-[460px]">{panels["AI answers"]}</Cell>
-        <Cell cls="xl:col-span-6 xl:h-[400px]">{panels.Links}</Cell>
-        <Cell cls="xl:col-span-6 xl:h-[400px]">{panels.Recs}</Cell>
+        {shown.map((c) => (
+          <Cell key={c.key} cls={CELL[c.key] ?? "xl:col-span-6"}>
+            {c.more ? (
+              <LazyMount def={c} reduced={p.reduced}>
+                {panels[c.key]!}
+              </LazyMount>
+            ) : (
+              panels[c.key]!
+            )}
+          </Cell>
+        ))}
       </div>
     </div>
   );

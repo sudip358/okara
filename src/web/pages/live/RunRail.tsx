@@ -119,7 +119,7 @@ export function RunRail({
     <section aria-label="Run rail" className="min-w-0 space-y-1.5 rounded-xl border border-zinc-200 bg-white px-4 py-2 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       {controls}
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-1">
-        <ol className="lv-strip flex min-w-0 items-center gap-1 text-[11px] max-md:w-full max-md:overflow-x-auto md:flex-wrap" aria-label="Steps">
+        <ol className="lv-strip relative flex min-w-0 items-center gap-1 text-[11px] max-md:w-full max-md:overflow-x-auto md:flex-wrap" aria-label="Steps">
           {steps.map((s, i) => {
             const status = railStatus(s.status, runOver);
             return (
