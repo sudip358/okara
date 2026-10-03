@@ -134,12 +134,23 @@ export interface GscQueryRequest {
   rowLimit: number;
   startRow: number;
   dataState?: "final" | "all";
-  type?: "web";
+  /** Search type (API default "web"); the agent sync always uses "web". */
+  type?: "web" | "image" | "video" | "news";
+  /** Optional filters (documented searchanalytics.query dimensionFilterGroups; groupType "and"). Sent only when present. */
+  dimensionFilterGroups?: GscDimensionFilterGroup[];
+}
+
+export type GscFilterDimension = "query" | "page" | "country" | "device";
+export type GscFilterOperator = "equals" | "notEquals" | "contains" | "notContains" | "includingRegex" | "excludingRegex";
+export interface GscDimensionFilterGroup {
+  groupType: "and";
+  filters: Array<{ dimension: GscFilterDimension; operator: GscFilterOperator; expression: string }>;
 }
 
 export interface GscProvider {
   listProperties(): Promise<Array<{ siteUrl: string; permissionLevel: string }>>;
-  query(req: GscQueryRequest): Promise<{ rows: GscRow[]; responseAggregationType?: string }>;
+  /** `metadata.first_incomplete_date` is set by Google when fresh (dataState "all") data is incomplete. */
+  query(req: GscQueryRequest): Promise<{ rows: GscRow[]; responseAggregationType?: string; metadata?: { first_incomplete_date?: string; first_incomplete_hour?: string } }>;
 }
 
 // ------------------------------------------------------------------ source classification helper type

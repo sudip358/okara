@@ -4,8 +4,11 @@
  * Contract (verified against developers.google.com/webmaster-tools/v1):
  *   GET  https://www.googleapis.com/webmasters/v3/sites -> { siteEntry: [{ siteUrl, permissionLevel }] }
  *   POST https://www.googleapis.com/webmasters/v3/sites/{siteUrl}/searchAnalytics/query
- *        body { startDate, endDate, dimensions, type, rowLimit (1..25000), startRow, dataState }
+ *        body { startDate, endDate, dimensions, type, rowLimit (1..25000), startRow, dataState,
+ *               dimensionFilterGroups?: [{ groupType: "and", filters: [{ dimension, operator, expression }] }] }
  *        -> { rows: [{ keys, clicks, impressions, ctr, position }], responseAggregationType, metadata? }
+ *   (filters re-verified 2026-10-03: dimension country|device|page|query|searchAppearance; operator equals|
+ *    notEquals|contains|notContains|includingRegex|excludingRegex; used only by Ask Okara's live query.)
  */
 import type { Env } from "../env";
 import type { Db } from "../lib/db";
@@ -132,13 +135,23 @@ export async function createGscProvider(
         rowLimit: Math.max(1, Math.min(GSC_MAX_ROW_LIMIT, Math.floor(req.rowLimit))),
         startRow: Math.max(0, Math.floor(req.startRow)),
         dataState: req.dataState ?? "final",
+        ...(req.dimensionFilterGroups?.length ? { dimensionFilterGroups: req.dimensionFilterGroups } : {}),
       };
       const url = `${GSC_API_BASE}/sites/${encodeURIComponent(req.property)}/searchAnalytics/query`;
       const json = (await call(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })) as {
         rows?: GscRow[];
         responseAggregationType?: string;
+        metadata?: { first_incomplete_date?: unknown; first_incomplete_hour?: unknown };
       } | null;
-      return { rows: json?.rows ?? [], responseAggregationType: json?.responseAggregationType };
+      const meta = json?.metadata;
+      const metadata =
+        meta && (typeof meta.first_incomplete_date === "string" || typeof meta.first_incomplete_hour === "string")
+          ? {
+              ...(typeof meta.first_incomplete_date === "string" ? { first_incomplete_date: meta.first_incomplete_date.slice(0, 40) } : {}),
+              ...(typeof meta.first_incomplete_hour === "string" ? { first_incomplete_hour: meta.first_incomplete_hour.slice(0, 40) } : {}),
+            }
+          : undefined;
+      return { rows: json?.rows ?? [], responseAggregationType: json?.responseAggregationType, ...(metadata ? { metadata } : {}) };
     },
   };
 }

@@ -249,6 +249,24 @@ Implemented in `src/worker/platform/gsc-client.ts` and `gsc-oauth.ts` (platform-
 Pagination does not guarantee complete query data; property totals come from a separate aggregate
 request and are never computed by summing slices.
 
+**Ask Okara live query (`search_console_live_query`, 2026-10-03; re-read the query reference and the limits
+page on 2026-10-03).** Same endpoint and OAuth token as the sync, for the project's stored `gsc_property` only.
+Request fields used: `startDate`/`endDate` (YYYY-MM-DD, Pacific time days), `dimensions` (up to 3 of `query`,
+`page`, `country`, `device`, `date`; `hour` and `searchAppearance` not offered), `type` (`web` default, `image`,
+`video`, `news`), `dimensionFilterGroups: [{groupType: "and", filters: [{dimension, operator, expression}]}]`
+(dimension `query` | `page` | `country` | `device`; operator `equals` (default) | `notEquals` | `contains` |
+`notContains` | `includingRegex` | `excludingRegex` (RE2); sent only when filters exist), `rowLimit` (API 1..25,000,
+default 1,000; Okara caps at 1,000, default 100), `startRow: 0`, `dataState` (`final` default or `all`;
+`hourly_all` not offered). Response fields used: `rows[].{keys, clicks, impressions, ctr, position}`,
+`metadata.first_incomplete_date` (present with fresh data). "The API ... does not guarantee to return all data
+rows but rather top ones"; rows are sorted by clicks (by date when grouped by date). Data is kept 16 months, so
+`startDate` must be on or after today minus 16 months. Quotas (limits page): searchanalytics.query 1,200 QPM per
+site and per user, 40,000 QPM / 30,000,000 QPD per project; load quota in 10-minute and 1-day chunks (on a
+short-term load error wait 15 minutes); queries grouped or filtered by page or query and long ranges are the
+expensive ones. Okara's own caps sit far below: 10 live queries per user per 10 minutes and 100 per project per
+UTC day; a 429 is reported (no retry). The API is not billed: each call is recorded in `provider_calls` with
+provider `google_search_console`, cost 0 actual (`rate_version gsc-api-no-charge-2026-10-03`).
+
 ## Google Sheets API v4 — Import (`google_sheets`, implemented)
 
 Implemented in `src/worker/imports/sheets.ts` (client + separate OAuth consent), used by `src/worker/imports/*` and
@@ -426,6 +444,24 @@ on **2026-10-02**. Implemented in `src/worker/providers/dataforseo.ts` (client +
   25 s timeout per paid call, 10 s for free calls.
 - **Labels:** every number is a "DataForSEO estimate" (ETV = CTR × search volume, modelled), never Search
   Console data; the panel shows location, fetch date and the cost DataForSEO returned.
+
+### DataForSEO Labs Keyword Overview — Ask Okara keyword lookup (`dataforseo_keyword_lookup`, implemented 2026-10-03)
+
+Contract read on **2026-10-03** (https://docs.dataforseo.com/v3/dataforseo_labs/google/keyword_overview/live/,
+price https://dataforseo.com/pricing/dataforseo-labs/dataforseo-google-api). Code `src/worker/chat/tools-dataforseo.ts`
+(same client `dataForSeoRequest`, credentials, allowlist and envelope handling as above).
+
+| Item | Contract |
+|---|---|
+| Endpoint | `POST /v3/dataforseo_labs/google/keyword_overview/live` (one task per Live call) |
+| Request fields used | `keywords` (API: up to 700, 80 characters and 10 words each; Okara: 1-100, lowercased, deduplicated), `location_code`, `language_code` (the project's competitor-data location). Not sent: `include_serp_info`, `include_clickstream_data` (doubles the price) |
+| Response fields used | `tasks[0].result[0].items[]`: `keyword`; `keyword_info.{search_volume, cpc, competition, competition_level, monthly_searches[].{year, month, search_volume}, last_updated_time}`; `keyword_properties.keyword_difficulty` (0-100); `search_intent_info.main_intent` |
+| Price | Labs Google "All other endpoints" (Keyword Overview is not listed separately), Live: $0.012 per task + $0.00012 per returned item → ceiling `$0.012 + $0.00012 × keywords` ($0.024 at 100 keywords), shown on the confirmation card and reserved as `usd_micros` (+1 `provider_calls`) via `budgetForKeySource` before the call. The recorded cost is the response `cost` (`cost_is_estimate = 0`, model `labs/google/keyword_overview`, purpose `chat_keyword_lookup`); unknown outcome keeps the ceiling counted and stores NULL |
+| Limits | API: up to 2,000 calls per minute, 30 simultaneous. Okara: 10 lookups per user per 10 minutes, workspace owner only, after the user confirms |
+| Labels | "DataForSEO Labs (third-party estimate, not measured)"; search volume is a market estimate, not Search Console impressions |
+
+The competitor refresh from chat (`dataforseo_refresh_competitor`) uses the three endpoints above through the
+existing queue (no new endpoint).
 
 ## Disabled / not implemented
 

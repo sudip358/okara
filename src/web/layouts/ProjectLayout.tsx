@@ -76,7 +76,7 @@ export function ProjectLayout() {
             </div>
             <div className="mt-2">
               <ActivityLauncher projectId={projectId} isDemo={project.isDemo} topAnchor={activityTop} />
-              <ChatLauncher projectId={projectId} className="ml-2" />
+              <ChatLauncher projectId={projectId} className="ml-2" competitorDomain={project.competitors.flatMap((c) => c.domains)[0] ?? null} />
             </div>
           </div>
           <nav aria-label="Project">

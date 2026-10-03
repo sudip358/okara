@@ -13,17 +13,12 @@
  * data inside the JSON and is never treated as instructions (see prompt.ts).
  */
 import { z } from "zod";
-import type { AgentKind, ChatStepKind, Recommendation, RecommendationStatus } from "@shared/types";
-import type { Env } from "../env";
-import type { Db } from "../lib/db";
+import type { AgentKind, Recommendation, RecommendationStatus } from "@shared/types";
 import { parseJson } from "../lib/db";
 import { HttpError } from "../lib/errors";
-import type { ProjectRow } from "../platform/access";
 import { hitRateLimit } from "../platform/rate-limit";
-import type { DecisionProvider } from "../providers/types";
 import { buildDecisionsForWorkspace } from "../redirects/decisions";
 import { createBudget } from "../runs/budget";
-import type { Budget } from "../runs/context";
 import type { RunRow } from "../runs/runtime";
 import { toRunSummary } from "../runs/runs-service";
 import { latestUsableSync } from "../seo/gsc/overview";
@@ -35,83 +30,25 @@ import { getLinkReport } from "../links/report";
 import { runDraftCheck } from "../draftcheck/service";
 import { getRule } from "../seo/rules/registry";
 import { RECOMMENDATION_TRANSITIONS, recommendationDetail, setRecommendationStatus, withProviders, type RecRow } from "../routes/recommendations";
-import { requestManualRun, type RunRouteDeps } from "../routes/runs";
+import { requestManualRun } from "../routes/runs";
 import { checkScopeReady, parseRunScope } from "../runs/scope";
 import { scopeLabel, type RunScope } from "@shared/run-scope";
 import type { ToolSpec } from "./types";
+import { ToolError, clip, pct, projectRoute, ratioValue, round1, scoped, type ActionTool, type ChatTool, type ReadTool, type ToolContext } from "./tool-base";
+import { GSC_CHAT_TOOLS, storedSyncLabel } from "./tools-gsc";
+import { DATAFORSEO_CHAT_TOOLS } from "./tools-dataforseo";
 
 // ------------------------------------------------------------------ limits
 /** Max characters of one tool result handed to the model. */
 export const TOOL_RESULT_MAX_CHARS = 12_000;
-/** Max characters of any single untrusted string (titles, answers, evidence) inside a result. */
-export const TOOL_TEXT_MAX = 300;
 /** Max rows of a CSV export prepared for the UI. */
 export const EXPORT_MAX_ROWS = 500;
 /** Max characters of draft text the chat sends to the draft check (the Draft check page takes more). */
 export const CHAT_DRAFT_MAX_CHARS = 20_000;
 
-// ------------------------------------------------------------------ context
-export interface ChatToolHooks {
-  /** Manual-run start (tests). */
-  runDeps?: RunRouteDeps;
-  /** Competitor approval dependencies (tests). */
-  competitorFetch?: typeof fetch;
-  competitorDecisions?: (env: Env, db: Db, workspaceId: string, projectId: string) => Promise<DecisionProvider | null>;
-  competitorBudget?: (env: Env, db: Db, workspaceId: string, projectId: string) => Budget;
-}
-
-export interface ToolContext {
-  env: Env;
-  db: Db;
-  project: ProjectRow;
-  userId: string;
-  now: Date;
-  waitUntil?: (p: Promise<unknown>) => void;
-  hooks?: ChatToolHooks;
-}
-
-/** A tool failure the model (and the user) may see; never contains secrets. */
-export class ToolError extends Error {}
-
-export interface ToolOutput {
-  /** JSON handed to the model (capped). */
-  data: unknown;
-  /** One-line plain-text summary for the step list. */
-  summary: string;
-  navigate?: { path: string; label: string } | null;
-  download?: { filename: string; columns: string[]; rows: Array<Array<string | number | null>>; truncated: boolean } | null;
-}
-
-interface ToolBase<S extends z.ZodType> {
-  name: string;
-  description: string;
-  kind: ChatStepKind;
-  schema: S;
-}
-export interface ReadTool<S extends z.ZodType = z.ZodType> extends ToolBase<S> {
-  kind: "read" | "output";
-  run(ctx: ToolContext, input: z.infer<S>): Promise<ToolOutput>;
-}
-export interface ActionTool<S extends z.ZodType = z.ZodType> extends ToolBase<S> {
-  kind: "action";
-  /** Validate and describe; throws ToolError when the action cannot be proposed. Never changes state. */
-  prepare(ctx: ToolContext, input: z.infer<S>): Promise<{ title: string; detail: string }>;
-  /** Runs only after the user confirmed (service.ts). */
-  execute(ctx: ToolContext, input: z.infer<S>): Promise<ToolOutput>;
-}
-export type ChatTool = ReadTool | ActionTool;
-
-// ------------------------------------------------------------------ helpers
-export const clip = (v: unknown, max = TOOL_TEXT_MAX): string | null => {
-  if (typeof v !== "string") return null;
-  const s = v.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim();
-  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
-};
-const ratioValue = (r: { numerator: number; denominator: number; value: number | null } | null | undefined) =>
-  r ? { value: r.value === null ? null : Math.round(r.value * 1000) / 1000, of: `${r.numerator}/${r.denominator}` } : null;
-const pct = (cur: number, prev: number) => (prev > 0 ? Math.round(((cur - prev) / prev) * 1000) / 10 : null);
-const round1 = (n: number | null | undefined) => (typeof n === "number" && Number.isFinite(n) ? Math.round(n * 10) / 10 : null);
-export const projectRoute = (projectId: string, sub = "") => `/projects/${encodeURIComponent(projectId)}${sub ? `/${sub}` : ""}`;
+// ------------------------------------------------------------------ shared tool types and helpers (tool-base.ts)
+export { ToolError, clip, projectRoute, TOOL_TEXT_MAX } from "./tool-base";
+export type { ActionTool, ChatTool, ChatToolHooks, ReadTool, ToolContext, ToolOutput } from "./tool-base";
 
 /**
  * Shrink a result until its JSON fits `maxChars`: arrays are cut (50, 25, 12, 6, 3, 1 items), then long strings.
@@ -154,10 +91,6 @@ export function summarizeArgs(input: unknown): string {
     })
     .join(", ")
     .slice(0, 200);
-}
-
-function scoped(ctx: ToolContext): [string, string] {
-  return [ctx.project.workspace_id, ctx.project.id];
 }
 
 // ------------------------------------------------------------------ Search Console
@@ -235,6 +168,7 @@ export async function gscRows(ctx: ToolContext, input: GscInput, maxRows: number
   );
   return {
     state: "ready" as const,
+    dataSource: storedSyncLabel(sync),
     source: sync.source,
     syncedAt: sync.synced_at,
     currentWindow: `${sync.window_start}..${sync.window_end}`,
@@ -262,15 +196,30 @@ const searchConsoleQueries: ReadTool<typeof gscSchema> = {
   name: "search_console_queries",
   kind: "read",
   description:
-    "Google Search Console rows from the latest stored sync: top, declining or rising queries or pages, current 28-day window versus the previous one. Returns the exact windows and the data basis. Positions are impression-weighted approximations.",
+    "Google Search Console (first-party, measured) rows from the latest STORED sync: top, declining or rising queries (or pages with dimension=page), current 28-day window versus the previous one. Returns the exact windows, the sync date and the data basis. Positions are impression-weighted approximations. For other date ranges or filters use search_console_live_query.",
   schema: gscSchema,
   async run(ctx, input) {
     const r = await gscRows(ctx, input, 50);
     if (r.state !== "ready") return { data: r, summary: "No Search Console data stored" };
     return {
       data: r,
-      summary: `${r.rows.length} ${r.dimension === "query" ? "queries" : "pages"} · ${r.currentWindow} vs ${r.previousWindow}`,
+      summary: `${r.rows.length} ${r.dimension === "query" ? "queries" : "pages"} · ${r.currentWindow} vs ${r.previousWindow} · stored sync of ${r.syncedAt.slice(0, 10)}`,
     };
+  },
+};
+
+const gscPagesSchema = gscSchema.omit({ dimension: true });
+
+const searchConsolePages: ReadTool<typeof gscPagesSchema> = {
+  name: "search_console_pages",
+  kind: "read",
+  description:
+    "Google Search Console (first-party, measured) PAGE rows from the latest stored sync: top, declining or rising landing pages, current 28-day window versus the previous one (page rows include anonymized-query traffic when the page slice is stored). Returns windows, sync date and basis.",
+  schema: gscPagesSchema,
+  async run(ctx, input) {
+    const r = await gscRows(ctx, { ...input, dimension: "page" }, 50);
+    if (r.state !== "ready") return { data: r, summary: "No Search Console data stored" };
+    return { data: r, summary: `${r.rows.length} pages · ${r.currentWindow} vs ${r.previousWindow} · stored sync of ${r.syncedAt.slice(0, 10)}` };
   },
 };
 
@@ -663,7 +612,7 @@ const listCompetitors: ReadTool<typeof emptySchema> = {
   name: "list_competitors",
   kind: "read",
   description:
-    "Competitors: the ones configured on the project, the entities AI engines cited instead of this site, and competitor pages the user approved for assessment (verdict, state, short observable reasons). Keyword/ranking competitor data (DataForSEO) is not read here; it is on the Competitors page.",
+    "Competitors: the ones configured on the project, the entities AI engines cited instead of this site, and competitor pages the user approved for assessment (verdict, state, short observable reasons). Keyword/ranking competitor data (DataForSEO) is read with dataforseo_competitor_data, not here.",
   schema: emptySchema,
   async run(ctx) {
     const configured = parseJson<unknown[]>(ctx.project.competitors_json, [])
@@ -684,7 +633,7 @@ const listCompetitors: ReadTool<typeof emptySchema> = {
         citedIn: p.citedIn.length,
         fetchedAt: p.fetchedAt,
       })),
-      notAvailable: ["Keyword and ranking competitor data (DataForSEO) is shown on the Competitors page; Ask Okara does not read it yet."],
+      seeAlso: "Keyword and ranking competitor data (DataForSEO, third-party estimates) is read with dataforseo_competitor_data.",
       path: projectRoute(ctx.project.id, "competitors"),
     };
     return { data, summary: `${configured.length} configured · ${disp.length} cited-instead entit${disp.length === 1 ? "y" : "ies"} · ${pages.length} assessed page(s)` };
@@ -1173,6 +1122,9 @@ const exportCsv: ReadTool<typeof exportSchema> = {
 export const CHAT_TOOLS: ChatTool[] = [
   getOverview,
   searchConsoleQueries,
+  searchConsolePages,
+  ...GSC_CHAT_TOOLS,
+  ...DATAFORSEO_CHAT_TOOLS,
   listPages,
   pageDetails,
   listRecommendations,

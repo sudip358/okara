@@ -12,7 +12,7 @@ import { api, apiStream, errorMessage, isRateLimited } from "@web/lib/api";
 import { formatRelative } from "@web/lib/format";
 import { projectPath } from "@web/lib/project-context";
 import { Badge, Spinner, buttonClass, cx } from "@web/components/ui";
-import { groupSteps, mergeActions, mergeMessages, parseMarkdownLite, progressText, safeFilename, STARTER_PROMPTS, STEP_STATUS_LABEL, toCsv, upsertStep, type Block, type Inline } from "./lib";
+import { groupSteps, mergeActions, mergeMessages, parseMarkdownLite, progressText, safeFilename, starterPrompts, STEP_STATUS_LABEL, toCsv, upsertStep, type Block, type Inline } from "./lib";
 
 const store = {
   get(key: string): string | null {
@@ -470,7 +470,18 @@ function HeaderButton({ children, label, onClick, pressed }: { children: ReactNo
   );
 }
 
-export function ChatPanel({ projectId, onClose, onMinimize }: { projectId: string; onClose: () => void; onMinimize: () => void }) {
+export function ChatPanel({
+  projectId,
+  onClose,
+  onMinimize,
+  competitorDomain = null,
+}: {
+  projectId: string;
+  onClose: () => void;
+  onMinimize: () => void;
+  /** First tracked competitor domain, for the keyword-gap starter prompt. */
+  competitorDomain?: string | null;
+}) {
   const titleId = useId();
   const inputId = useId();
   const chat = useChat(projectId, true);
@@ -624,10 +635,10 @@ export function ChatPanel({ projectId, onClose, onMinimize }: { projectId: strin
           ) : chat.state.messages.length === 0 ? (
             <div className="space-y-3">
               <p className="text-sm text-zinc-700 dark:text-zinc-300">
-                Ask about this project's SEO and GEO data. Answers use stored Search Console, crawl, AI-answer and run data, and say when data is missing. Actions such as running an agent always ask you to confirm first.
+                Ask about this project's SEO and GEO data. Answers use stored Search Console, crawl, AI-answer and run data (plus live Search Console queries when needed), and say when data is missing. DataForSEO numbers are third-party estimates. Actions such as running an agent or a paid DataForSEO lookup always ask you to confirm first.
               </p>
               <div className="flex flex-col gap-2">
-                {STARTER_PROMPTS.map((p) => (
+                {starterPrompts(competitorDomain).map((p) => (
                   <button
                     key={p}
                     type="button"
@@ -709,7 +720,7 @@ function ChatBubbleIcon() {
 }
 
 /** Sidebar toggle + floating bottom-right bubble + panel (portal), mounted once per project page. */
-export function ChatLauncher({ projectId, className }: { projectId: string; className?: string }) {
+export function ChatLauncher({ projectId, className, competitorDomain = null }: { projectId: string; className?: string; competitorDomain?: string | null }) {
   const [mode, setMode] = useState<"closed" | "open" | "minimized">(() => (store.get(openKey) === "1" ? "open" : "closed"));
   const buttonRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -721,7 +732,7 @@ export function ChatLauncher({ projectId, className }: { projectId: string; clas
   };
   const panel =
     mode === "open" ? (
-      <ChatPanel projectId={projectId} onClose={close} onMinimize={() => setMode("minimized")} />
+      <ChatPanel projectId={projectId} competitorDomain={competitorDomain} onClose={close} onMinimize={() => setMode("minimized")} />
     ) : (
       // Closed or minimised: a floating chat bubble at the bottom right of every project page.
       <button

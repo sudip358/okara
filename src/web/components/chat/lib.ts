@@ -200,8 +200,28 @@ export function safeFilename(name: string): string {
 
 // ------------------------------------------------------------------ starters
 export const STARTER_PROMPTS = [
+  "Which queries lost clicks vs last month?",
   "Which pages lost clicks in the last 28 days?",
   "Why isn't Gemini citing us?",
   "What should I fix first?",
   "Run the GEO agent now",
 ] as const;
+
+/** Example keyword for the search-volume starter (a paid DataForSEO lookup; the chat asks to confirm first). */
+export const STARTER_KEYWORD_EXAMPLE = "alabaster sconces";
+
+/**
+ * Starter prompts for a project: the fixed ones plus DataForSEO examples. The keyword-gap prompt names the
+ * project's first tracked competitor domain (never an invented one) and is left out when there is none.
+ */
+export function starterPrompts(competitorDomain?: string | null): string[] {
+  const domain = (competitorDomain ?? "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "");
+  const valid = /^[a-z0-9.-]{1,253}$/.test(domain) && domain.includes(".");
+  return [
+    STARTER_PROMPTS[0],
+    STARTER_PROMPTS[1],
+    ...(valid ? [`Show competitor keyword gap for ${domain}`] : []),
+    `What's the search volume for '${STARTER_KEYWORD_EXAMPLE}'?`,
+    ...STARTER_PROMPTS.slice(2),
+  ];
+}

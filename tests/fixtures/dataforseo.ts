@@ -284,3 +284,51 @@ export const taskError = (path: string[], status_code: number, status_message: s
   tasks_error: 1,
   tasks: [{ id: "err-task", status_code, status_message, time: "0 sec.", cost: 0, result_count: 0, path, data: {}, result: null }],
 });
+
+/**
+ * POST google/keyword_overview/live, shaped like the documented example (docs.dataforseo.com/v3/dataforseo_labs/
+ * google/keyword_overview/live, read 2026-10-03): result[0].items[] with keyword, keyword_info (search_volume, cpc,
+ * competition, competition_level, monthly_searches), keyword_properties.keyword_difficulty, search_intent_info.
+ * `extraText` lets a test put untrusted text in a returned keyword. Values are illustrative.
+ */
+export const keywordOverview = (keywords: string[], cost = 0.01236, extraText: string | null = null) =>
+  envelope(
+    ["v3", "dataforseo_labs", "google", "keyword_overview", "live"],
+    { api: "dataforseo_labs", function: "keyword_overview", se_type: "google", keywords, location_code: 2840, language_code: "en" },
+    [
+      {
+        se_type: "google",
+        location_code: 2840,
+        language_code: "en",
+        items_count: keywords.length,
+        items: keywords.map((k, i) => ({
+          se_type: "google",
+          keyword: i === 0 && extraText ? `${k} ${extraText}` : k,
+          location_code: 2840,
+          language_code: "en",
+          search_partners: false,
+          keyword_info: {
+            se_type: "google",
+            last_updated_time: "2026-09-28 05:12:41 +00:00",
+            competition: 0.81,
+            competition_level: "HIGH",
+            cpc: 1.27,
+            search_volume: 880 - i * 100,
+            low_top_of_page_bid: 0.46,
+            high_top_of_page_bid: 1.9,
+            categories: [10021, 10178],
+            monthly_searches: [
+              { year: 2026, month: 8, search_volume: 880 },
+              { year: 2026, month: 7, search_volume: 720 },
+            ],
+            search_volume_trend: { monthly: 22, quarterly: 0, yearly: 22 },
+          },
+          keyword_properties: { se_type: "google", core_keyword: null, synonym_clustering_algorithm: "text_processing", keyword_difficulty: 23 + i, detected_language: "en", is_another_language: false },
+          serp_info: null,
+          avg_backlinks_info: { se_type: "google", backlinks: 31.4, dofollow: 18.2, referring_pages: 25.1, referring_domains: 7.3, referring_main_domains: 6.6, rank: 112.9, main_domain_rank: 381.5, last_updated_time: "2026-09-28 05:12:41 +00:00" },
+          search_intent_info: { se_type: "google", main_intent: "commercial", foreign_intent: ["transactional"], last_updated_time: "2026-09-20 11:02:03 +00:00" },
+        })),
+      },
+    ],
+    cost,
+  );
