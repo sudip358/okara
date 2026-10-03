@@ -1,6 +1,6 @@
 /** Ask Okara over OpenAI-compatible servers that deviate from the reference response shape. Synthetic bodies. */
 import { describe, expect, it } from "vitest";
-import { contentText, createOpenAiChatModel, describeEmptyResponse, extractTextToolCalls, parseOpenAiChatResponse } from "@worker/chat/model-openai";
+import { buildOpenAiChatMessages, contentText, createOpenAiChatModel, describeEmptyResponse, extractTextToolCalls, parseOpenAiChatResponse } from "@worker/chat/model-openai";
 import { ChatModelError } from "@worker/chat/types";
 
 describe("parseOpenAiChatResponse tolerates compatible-server variants", () => {
@@ -58,6 +58,65 @@ describe("empty answers are explained instead of 'I could not produce an answer'
     expect(err).toBeInstanceOf(ChatModelError);
     expect((err as ChatModelError).reason).toBe("invalid_response");
     expect((err as Error).message).toContain("demo-model answered with neither text nor a tool call (finish_reason stop; message fields: content, reasoning_content)");
+    expect((err as Error).message).toContain("Integrations → Writer → Change model");
     expect((err as Error).message).not.toContain("x\"");
+  });
+});
+
+describe("text-tools fallback for endpoints that ignore native tools", () => {
+  const tool = { name: "search_console_compare", description: "Compare windows.", parameters: { type: "object", properties: { dimension: { type: "string" } } } };
+  const reply = (message: Record<string, unknown>) =>
+    new Response(JSON.stringify({ choices: [{ message: { role: "assistant", ...message }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 5 } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+  it("retries once with the tools described in the prompt, then stays in text mode", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const replies = [
+      reply({ content: "", reasoning_content: "thinking" }),
+      reply({ content: '<tool_call>{"name": "search_console_compare", "arguments": {"dimension": "query"}}</tool_call>' }),
+      reply({ content: "Three queries lost clicks." }),
+    ];
+    const fetchImpl = (async (_u: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return replies.shift()!;
+    }) as typeof fetch;
+    const model = createOpenAiChatModel({ apiKey: "k", model: "m", baseUrl: "https://llm.example.com/v1", fetchImpl, maxRetries: 0 });
+    const r1 = await model.round({ system: "S", history: [], turn: [{ role: "user", text: "q" }], tools: [tool], timeoutMs: 10_000 });
+    expect(bodies[0]!.tools).toBeDefined();
+    expect(bodies[1]!.tools).toBeUndefined();
+    expect(String((bodies[1]!.messages as Array<{ content: string }>)[0]!.content)).toContain("search_console_compare");
+    expect(r1.toolCalls).toEqual([{ id: "call_okara_0", name: "search_console_compare", input: { dimension: "query" } }]);
+
+    const r2 = await model.round({
+      system: "S",
+      history: [],
+      turn: [
+        { role: "user", text: "q" },
+        { role: "assistant", provider: "openai_compatible", raw: r1.raw },
+        { role: "tool_results", results: [{ id: "call_okara_0", content: "rows" }] },
+      ] as never,
+      tools: [tool],
+      timeoutMs: 10_000,
+    });
+    expect(r2.text).toBe("Three queries lost clicks.");
+    expect(bodies).toHaveLength(3); // no native-tools attempt on the second round
+    const msgs = bodies[2]!.messages as Array<{ role: string; content: string }>;
+    expect(msgs.some((m) => m.role === "tool")).toBe(false);
+    expect(msgs.at(-1)).toEqual({ role: "user", content: '<tool_result id="call_okara_0">\nrows\n</tool_result>' });
+    expect(msgs.at(-2)!.content).toContain('<tool_call>{"name":"search_console_compare","arguments":{"dimension":"query"}}</tool_call>');
+  });
+
+  it("says so when the model is empty in both modes", async () => {
+    const fetchImpl = (async () => reply({ content: "", reasoning_content: "x" })) as typeof fetch;
+    const model = createOpenAiChatModel({ apiKey: "k", model: "m2", baseUrl: "https://llm.example.com/v1", fetchImpl, maxRetries: 0 });
+    const err = await model.round({ system: "S", history: [], turn: [{ role: "user", text: "q" }], tools: [tool], timeoutMs: 10_000 }).catch((e) => e);
+    expect((err as Error).message).toContain("also when the tools were described in the prompt");
+  });
+
+  it("native mode messages are unchanged", () => {
+    const m = buildOpenAiChatMessages({ system: "S", history: [], turn: [{ role: "tool_results", results: [{ id: "a", content: "c" }] }] as never });
+    expect(m.at(-1)).toEqual({ role: "tool", tool_call_id: "a", content: "c" });
   });
 });

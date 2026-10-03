@@ -82,18 +82,61 @@ export function extractTextToolCalls(text: string): { text: string; calls: Array
   return { text: calls.length ? rest.trim() : text, calls };
 }
 
-export function buildOpenAiChatMessages(req: Pick<RoundRequest, "system" | "history" | "turn">): Array<Record<string, unknown>> {
+/**
+ * Text-tools mode, for endpoints that ignore the `tools` parameter (the model answers with neither text nor a
+ * tool call): the tool catalog goes into the system prompt and the model asks for a tool with a
+ * <tool_call>{"name": ..., "arguments": {...}}</tool_call> block in its text. Replayed assistant tool calls are
+ * written back as those blocks and tool results go back as a user message, so no tools/tool-role fields are sent.
+ * Every requested call is still validated and confirmation-gated server-side exactly like native tool calls.
+ */
+export function textToolsSystem(system: string, tools: RoundRequest["tools"]): string {
+  const catalog = tools.map((t) => `- ${t.name}: ${t.description}\n  arguments (JSON Schema): ${JSON.stringify(t.parameters)}`).join("\n");
+  return `${system}
+
+## Calling tools (this endpoint has no native tool calling)
+To use a tool, reply with one or more blocks exactly like:
+<tool_call>{"name": "<tool name>", "arguments": {<arguments as JSON>}}</tool_call>
+and nothing else in that reply. You will then receive the results in <tool_result> blocks. When you have what you need, reply with the final answer as plain text without any <tool_call> block.
+
+Available tools:
+${catalog}`;
+}
+
+export function buildOpenAiChatMessages(req: Pick<RoundRequest, "system" | "history" | "turn">, textTools = false): Array<Record<string, unknown>> {
   const messages: Array<Record<string, unknown>> = [{ role: "system", content: req.system }];
   for (const h of req.history) messages.push({ role: h.role, content: h.text });
   for (const t of req.turn) {
     if (t.role === "user") messages.push({ role: "user", content: t.text });
-    else if (t.role === "assistant") messages.push(t.raw && typeof t.raw === "object" ? (t.raw as Record<string, unknown>) : { role: "assistant", content: "" });
-    else for (const r of t.results) messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
+    else if (t.role === "assistant") {
+      const raw = t.raw && typeof t.raw === "object" ? (t.raw as Record<string, unknown>) : { role: "assistant", content: "" };
+      if (!textTools) messages.push(raw);
+      else {
+        const calls = Array.isArray(raw.tool_calls) ? (raw.tool_calls as Array<{ function?: { name?: string; arguments?: string } }>) : [];
+        const blocks = calls.map((c) => {
+          let args: unknown = {};
+          try {
+            args = c.function?.arguments ? JSON.parse(c.function.arguments) : {};
+          } catch {
+            args = {};
+          }
+          return `<tool_call>${JSON.stringify({ name: c.function?.name ?? "", arguments: args })}</tool_call>`;
+        });
+        messages.push({ role: "assistant", content: [typeof raw.content === "string" ? raw.content : "", ...blocks].filter(Boolean).join("\n") });
+      }
+    } else if (!textTools) for (const r of t.results) messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
+    else messages.push({ role: "user", content: t.results.map((r) => `<tool_result id="${r.id}">\n${r.content}\n</tool_result>`).join("\n") });
   }
   return messages;
 }
 
-export function buildOpenAiChatRequest(model: string, req: RoundRequest): Record<string, unknown> {
+export function buildOpenAiChatRequest(model: string, req: RoundRequest, textTools = false): Record<string, unknown> {
+  if (textTools) {
+    return {
+      model,
+      messages: buildOpenAiChatMessages({ ...req, system: textToolsSystem(req.system, req.tools) }, true),
+      max_completion_tokens: CHAT_MAX_OUTPUT_TOKENS,
+    };
+  }
   return {
     model,
     messages: buildOpenAiChatMessages(req),
@@ -157,11 +200,20 @@ export function describeEmptyResponse(body: ChatCompletion): string {
 export function createOpenAiChatModel(cfg: OpenAiChatConfig): ChatModel {
   const base = normalizeBaseUrl(cfg.baseUrl);
   const maxRetries = cfg.maxRetries ?? CHAT_MAX_RETRIES;
+  let textTools = false;
   return {
     provider: "openai_compatible",
     model: cfg.model,
     async round(req: RoundRequest): Promise<RoundResult> {
-      const body = buildOpenAiChatRequest(cfg.model, req);
+      if (!textTools) {
+        const first = await this.attempt(req, false);
+        if (first.ok || !req.tools.length) return finish(first);
+        textTools = true; // this endpoint ignored native tools: use text tools for the rest of the session's model
+      }
+      return finish(await this.attempt(req, true));
+    },
+    async attempt(req: RoundRequest, text: boolean): Promise<Attempt> {
+      const body = buildOpenAiChatRequest(cfg.model, req, text);
       let parsed: RoundResult | null = null;
       let empty: string | null = null;
       try {
@@ -197,15 +249,24 @@ export function createOpenAiChatModel(cfg: OpenAiChatConfig): ChatModel {
         throw e;
       }
       if (!parsed) throw new ChatModelError("The model returned no response.", "invalid_response");
-      if (empty) {
-        throw new ChatModelError(
-          `${cfg.model} answered with neither text nor a tool call (${empty}). It may not support tool calling through this endpoint; pick another model under Integrations → Custom writer.`,
-          "invalid_response",
-        );
-      }
-      return parsed;
+      return { ok: !empty, result: parsed, empty, text };
     },
-  };
+  } as ChatModel & { attempt(req: RoundRequest, text: boolean): Promise<Attempt> };
+
+  function finish(a: Attempt): RoundResult {
+    if (a.ok) return a.result;
+    throw new ChatModelError(
+      `${cfg.model} answered with neither text nor a tool call (${a.empty})${a.text ? ", also when the tools were described in the prompt" : ""}. Pick another model under Integrations → Writer → Change model.`,
+      "invalid_response",
+    );
+  }
+}
+
+interface Attempt {
+  ok: boolean;
+  result: RoundResult;
+  empty: string | null;
+  text: boolean;
 }
 
 function num(v: unknown): number {
