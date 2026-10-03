@@ -473,7 +473,9 @@ The Internal links page has six tabs (`?tab=suggestions|clusters|graph|broken|an
   existing per-run page cap (`project_limits.crawl_pages`; no new budget): the home page, then never-crawled URLs
   (Search Console impressions from the latest stored sync first, sitemap before link-discovered URLs, round-robin from
   the stored cursor), then the oldest snapshots. The inventory (`crawl_inventory`) holds sitemap URLs (up to 25
-  sitemap files and 10,000 URLs per project), up to 1,000 newly discovered link targets per crawl, and the home page;
+  sitemap files and 10,000 URLs per project; language-version sitemaps such as `/da/sitemap_products_1.xml` are left out
+  when the same sitemap is listed without the language folder, and the crawl notes say so), up to 1,000 newly discovered
+  link targets per crawl, and the home page;
   a sitemap that could not be read or was truncated never marks URLs as removed. Crawling stays on the verified host
   through the SSRF guard. Retention (bounded, per crawl): every snapshot of the 7 latest crawls is kept; outside them
   each page keeps its latest snapshot in full and its previous one compacted; older ones are deleted (at most 2,000

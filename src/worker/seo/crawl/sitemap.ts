@@ -1,6 +1,7 @@
 /**
  * Bounded sitemap parsing ([A20]): urlset and sitemapindex (one level), max 3 child sitemaps, 2 MB per
- * file, max 500 URLs total. Every sitemap URL, index child, and listed page URL must be on the verified
+ * file, max 500 URLs total (the rolling crawl inventory passes higher caps). Index children that are language
+ * versions of another listed child (Shopify Markets "/da/sitemap_products_1.xml") are left out and noted. Every sitemap URL, index child, and listed page URL must be on the verified
  * host and pass the SSRF guard; anything else is refused and reported. gzip sitemaps are not read
  * (reported). Uses htmlparser2 in xmlMode (streaming tokenizer; see extract.ts for why not HTMLRewriter).
  * Each listed URL keeps its <lastmod> text (raw, capped at LASTMOD_MAX_CHARS; null when absent) for the
@@ -97,6 +98,43 @@ export function parseSitemapWithLastmod(body: string, maxLocs = SITEMAP_MAX_URLS
   parser.write(body);
   parser.end();
   return { kind, locs, lastmod, truncated };
+}
+
+/** A leading language folder in a sitemap path: "da", "fr", "en-ca", "pt-br" (Shopify Markets subfolders). */
+const LANGUAGE_FOLDER = /^[a-z]{2}(?:-[a-z0-9]{2,4})?$/i;
+
+/**
+ * Split sitemap-index children into primary sitemaps and language versions of them. A child is a language
+ * version when its path starts with a language folder and the same sitemap (path without the folder, same
+ * query) is listed too, e.g. "/da/sitemap_products_1.xml?from=1&to=9" next to "/sitemap_products_1.xml?from=1&to=9"
+ * on a Shopify Markets store. Its pages are translations of pages the primary sitemap already lists, so the crawl
+ * reads the primary one only. A language folder with no unprefixed twin is kept.
+ */
+export function splitLanguageAlternates(children: string[]): { primary: string[]; alternates: string[]; folders: string[] } {
+  const parse = (u: string): { key: string; folder: string | null } | null => {
+    try {
+      const url = new URL(u);
+      const segs = url.pathname.split("/");
+      if (segs.length > 2 && LANGUAGE_FOLDER.test(segs[1] ?? "")) {
+        return { key: `${url.host}/${segs.slice(2).join("/")}${url.search}`, folder: (segs[1] ?? "").toLowerCase() };
+      }
+      return { key: `${url.host}${url.pathname}${url.search}`, folder: null };
+    } catch {
+      return null;
+    }
+  };
+  const parsed = children.map((u) => ({ u, p: parse(u) }));
+  const unprefixed = new Set(parsed.filter((c) => c.p && c.p.folder === null).map((c) => c.p!.key));
+  const primary: string[] = [];
+  const alternates: string[] = [];
+  const folders = new Set<string>();
+  for (const { u, p } of parsed) {
+    if (p?.folder && unprefixed.has(p.key)) {
+      alternates.push(u);
+      folders.add(p.folder);
+    } else primary.push(u);
+  }
+  return { primary, alternates, folders: [...folders] };
 }
 
 export interface SitemapRefusal {
@@ -202,7 +240,12 @@ export async function collectSitemapUrls(
     const parsed = await fetchOne(top);
     if (!parsed) continue;
     if (parsed.kind === "sitemapindex") {
-      const children = parsed.locs;
+      const { primary: children, alternates, folders } = splitLanguageAlternates(parsed.locs);
+      if (alternates.length) {
+        out.notes.push(
+          `Sitemap index ${top}: left out ${alternates.length} language-version sitemap${alternates.length === 1 ? "" : "s"} (${folders.map((f) => `/${f}/`).join(", ")}); each repeats a sitemap listed without a language folder, so its pages are translations of pages already listed.`,
+        );
+      }
       if (children.length > childBudget) out.notes.push(`Sitemap index ${top} lists ${children.length} sitemaps; read ${Math.max(childBudget, 0)} (cap ${maxChildren}).`);
       for (const child of children) {
         if (childBudget <= 0 || out.urls.length >= maxUrls) break;

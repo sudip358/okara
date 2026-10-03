@@ -166,7 +166,10 @@ POST .../run ─► candidates (TF-IDF overlap + cluster gaps) ─► computePri
 - **Rolling crawl** (`seo/crawl/rolling.ts`): `crawl_inventory` (one row per known URL: sitemap, discovered link
   target, home; `ord` is first-seen order) and `crawl_inventory_state` (sitemap hash, cursor, passes). Each crawl takes
   never-crawled URLs first (Search Console impressions, sitemap before link-discovered), then the oldest snapshots,
-  inside the existing per-run page cap, so the crawl's D1 and subrequest budget per run is unchanged. A failed or
+  inside the existing per-run page cap. Reading the inventory adds up to 25 sitemap-file requests per crawl on top of
+  the pages (Workers Free allows 50 external subrequests per invocation, redirect hops included). Sitemap-index children
+  that are language versions of another listed child (Shopify Markets `/da/sitemap_products_1.xml` next to
+  `/sitemap_products_1.xml`) are left out and noted, so translations cost no requests and do not dilute the graph. A failed or
   truncated sitemap read never removes inventory rows. `pruneSnapshots` keeps every snapshot of the 7 latest crawls,
   then the latest full + previous compacted snapshot per page, and deletes older ones (≤2,000 rows per crawl).
 - **Graph** (`links/graph-load.ts`, `graph.ts`, `graph-store.ts`, `graph-read.ts`): pure computation over the latest
