@@ -15,6 +15,7 @@
  *   which the crawler wraps in its SSRF guard (src/worker/seo/ssrf.ts).
  */
 import type { AgentKind, GeoEngineProviderId, ModelSelectableProviderId } from "@shared/types";
+import { parseScope } from "@shared/run-scope";
 import type { Env } from "../env";
 import { Db } from "../lib/db";
 import { newId } from "../lib/ids";
@@ -122,6 +123,8 @@ export interface RunRow {
   policy_version: string | null;
   error: string | null;
   summary_json: string;
+  /** Partial-run scope (migration 0016; src/shared/run-scope.ts). NULL/absent = every step. */
+  scope_json?: string | null;
   created_by: string | null;
   created_at: string;
   started_at: string | null;
@@ -281,6 +284,14 @@ export async function buildRunContext(env: Env, runId: string, opts: RuntimeOpti
         fetchImpl: createApiFetch(env, opts.fetchImpl ?? fetch, [p.host]),
       }),
     );
+  }
+
+  // Partial run with an engine filter (src/worker/runs/scope.ts): only those lanes are asked.
+  const scopeEngines = parseScope(run.scope_json)?.engines ?? null;
+  if (scopeEngines) {
+    const keep = new Set(scopeEngines);
+    for (let i = geoProviders.length - 1; i >= 0; i--) if (!keep.has(geoProviders[i]!.id)) geoProviders.splice(i, 1);
+    if (geoProviders.length === 0) await log.event("runtime", "info", `None of the engines this run was limited to (${scopeEngines.join(", ")}) is configured now.`);
   }
 
   let gsc: RunContext["gsc"] = null;

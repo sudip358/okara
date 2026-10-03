@@ -4,6 +4,7 @@
  * Metrics always carry their numerator, denominator, window, and source so the UI never shows a
  * bare percentage.
  */
+import type { RunScope } from "./run-scope";
 
 // ------------------------------------------------------------------ enums
 export type SiteType = "ecommerce" | "saas" | "publisher" | "local" | "other";
@@ -577,6 +578,8 @@ export interface RunSummary {
   finishedAt: string | null;
   error: string | null;
   summary: Record<string, unknown>;
+  /** Partial ("section") run: the work steps it ran (src/shared/run-scope.ts); null = every step. */
+  scope?: RunScope | null;
 }
 
 export interface RunEvent {
@@ -1152,6 +1155,8 @@ export interface RunActivity {
     startedAt: string | null;
     finishedAt: string | null;
     elapsedMs: number | null;
+    /** Partial ("section") run scope; null = every step. */
+    scope?: RunScope | null;
   };
   /** status pending|running */
   active: boolean;

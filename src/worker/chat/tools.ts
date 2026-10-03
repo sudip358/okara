@@ -36,6 +36,8 @@ import { runDraftCheck } from "../draftcheck/service";
 import { getRule } from "../seo/rules/registry";
 import { RECOMMENDATION_TRANSITIONS, recommendationDetail, setRecommendationStatus, withProviders, type RecRow } from "../routes/recommendations";
 import { requestManualRun, type RunRouteDeps } from "../routes/runs";
+import { checkScopeReady, parseRunScope } from "../runs/scope";
+import { scopeLabel, type RunScope } from "@shared/run-scope";
 import type { ToolSpec } from "./types";
 
 // ------------------------------------------------------------------ limits
@@ -904,14 +906,30 @@ const draftCheck: ReadTool<typeof draftSchema> = {
 };
 
 // ------------------------------------------------------------------ actions (confirmation required)
-const runAgentSchema = z.object({ agent: z.enum(["seo", "geo"]).describe("Which agent to run now.") });
+const runAgentSchema = z.object({
+  agent: z.enum(["seo", "geo"]).describe("Which agent to run now."),
+  steps: z
+    .array(z.string().max(40))
+    .max(5)
+    .optional()
+    .describe('Optional partial run: only these steps (SEO: "crawl", "gsc_sync", "recommend"; GEO: "batch", "proposals"). Omit to run every step.'),
+});
+
+/** Parsed scope of a run_agent_now input; request errors become tool errors the model can explain. */
+function runAgentScope(input: z.infer<typeof runAgentSchema>): RunScope | null {
+  try {
+    return parseRunScope(input.agent, input.steps, undefined);
+  } catch (e) {
+    throw new ToolError(e instanceof Error ? e.message : "Invalid steps.");
+  }
+}
 const AGENT_LABEL: Record<AgentKind, string> = { seo: "SEO", geo: "GEO" };
 
 const runAgentNow: ActionTool<typeof runAgentSchema> = {
   name: "run_agent_now",
   kind: "action",
   description:
-    "Propose starting a manual SEO or GEO agent run now. Requires the user's confirmation in the UI; nothing starts until they confirm. Limited to 3 manual runs per project per UTC day; uses the project's provider budget.",
+    "Propose starting a manual SEO or GEO agent run now, optionally only some of its steps (a partial run). Requires the user's confirmation in the UI; nothing starts until they confirm. Limited to 3 manual runs per project per UTC day (a partial run counts as one); uses the project's provider budget.",
   schema: runAgentSchema,
   async prepare(ctx, input) {
     if (ctx.project.is_demo === 1) throw new ToolError("Demo projects use fixture data; agent runs are disabled.");
@@ -922,13 +940,21 @@ const runAgentNow: ActionTool<typeof runAgentSchema> = {
       input.agent,
     );
     if (active) throw new ToolError(`A ${AGENT_LABEL[input.agent]} run is already pending or running (${active.id}).`);
+    const scope = runAgentScope(input);
+    try {
+      await checkScopeReady(ctx.env, ctx.db, ctx.project, input.agent, scope, ctx.now);
+    } catch (e) {
+      throw new ToolError(e instanceof Error ? e.message : "This partial run cannot start.");
+    }
+    const partial = scopeLabel(scope);
     return {
-      title: `Run the ${AGENT_LABEL[input.agent]} agent now?`,
-      detail: "Starts a manual run (at most 3 per project per UTC day). It uses this project's provider budget; scheduled runs continue daily.",
+      title: partial ? `Run the ${AGENT_LABEL[input.agent]} agent now (${partial.replace(/^Partial run: /, "")})?` : `Run the ${AGENT_LABEL[input.agent]} agent now?`,
+      detail: `Starts a manual ${partial ? "partial " : ""}run (at most 3 per project per UTC day${partial ? "; a partial run counts as one" : ""}). It uses this project's provider budget; scheduled runs continue daily.`,
     };
   },
   async execute(ctx, input) {
-    const { row } = await requestManualRun(ctx.env, ctx.db, ctx.project, ctx.userId, input.agent, ctx.now, { deps: ctx.hooks?.runDeps, waitUntil: ctx.waitUntil });
+    const scope = runAgentScope(input);
+    const { row } = await requestManualRun(ctx.env, ctx.db, ctx.project, ctx.userId, input.agent, ctx.now, { deps: ctx.hooks?.runDeps, waitUntil: ctx.waitUntil, scope });
     return {
       data: { runId: row.id, agent: row.agent, status: row.status, livePath: projectRoute(ctx.project.id, "live") },
       summary: `Started ${AGENT_LABEL[input.agent]} run ${row.id} (${row.status})`,

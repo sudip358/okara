@@ -23,6 +23,7 @@
  * dynamic IN lists are chunked below D1's 100 bound parameters; unknown cost stays null (never $0);
  * no aggregated score and no projections. Untrusted text (prompts, errors, URLs) is clipped plain text.
  */
+import { parseScope } from "@shared/run-scope";
 import type {
   ActivityItem,
   ActivityLane,
@@ -166,6 +167,8 @@ interface RunRowLite {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  /** Migration 0016; absent before it is applied. */
+  scope_json?: string | null;
 }
 
 interface EventRow {
@@ -449,7 +452,8 @@ export async function buildRunActivity(db: Db, project: ProjectRow, runId: strin
   const ws = project.workspace_id;
   const pid = project.id;
   const run = await db.first<RunRowLite>(
-    "SELECT id, agent, status, trigger, created_at, started_at, finished_at FROM agent_runs WHERE workspace_id = ? AND project_id = ? AND id = ?",
+    // SELECT * so a database without migration 0016 (scope_json) still reads runs.
+    "SELECT * FROM agent_runs WHERE workspace_id = ? AND project_id = ? AND id = ?",
     ws,
     pid,
     runId,
@@ -680,8 +684,12 @@ export async function buildRunActivity(db: Db, project: ProjectRow, runId: strin
   // ---------------------------------------------------------------- lanes + queued (GEO only)
   let lanes: ActivityLane[] = [];
   let queued: ActivityQueuedItem[] = [];
+  const scope = parseScope(run.scope_json ?? null);
   if (isGeo) {
-    const built = await buildLanes(db, ws, pid, run, active, obs, laneEvents, latencyOf, opts.configuredEngines ?? []);
+    // A partial run limited to some engines shows only those lanes (src/worker/runs/scope.ts).
+    const only = scope?.engines ? new Set(scope.engines) : null;
+    const configured = (opts.configuredEngines ?? []).filter((p) => !only || only.has(p));
+    const built = await buildLanes(db, ws, pid, run, active, obs, laneEvents, latencyOf, scope && !scope.steps.includes("batch") ? [] : configured);
     lanes = built.lanes;
     queued = built.queued;
   }
@@ -700,6 +708,7 @@ export async function buildRunActivity(db: Db, project: ProjectRow, runId: strin
       startedAt: run.started_at,
       finishedAt: run.finished_at,
       elapsedMs,
+      scope,
     },
     active,
     totals: {

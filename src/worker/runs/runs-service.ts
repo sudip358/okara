@@ -13,6 +13,7 @@ import { POLICY_VERSION } from "./policy";
 import { acquireRunLock, releaseRunLock } from "./locks";
 import { executeRun, type OrchestrateDeps } from "./orchestrate";
 import type { RunRow } from "./runtime";
+import { parseScope, type RunScope } from "@shared/run-scope";
 
 export interface CreateRunInput {
   workspaceId: string;
@@ -58,7 +59,7 @@ export async function createRun(db: Db, input: CreateRunInput): Promise<{ runId:
  */
 export async function createManualRun(
   db: Db,
-  input: Omit<CreateRunInput, "trigger"> & { perDay: number },
+  input: Omit<CreateRunInput, "trigger"> & { perDay: number; scope?: RunScope | null },
 ): Promise<{ runId: string | null; created: boolean; quotaExceeded: boolean }> {
   const existing = await db.first<{ id: string }>(
     "SELECT id FROM agent_runs WHERE idempotency_key = ? AND workspace_id = ? AND project_id = ?",
@@ -69,9 +70,12 @@ export async function createManualRun(
   if (existing) return { runId: existing.id, created: false, quotaExceeded: false };
   const id = newId("run");
   const nowIso = iso(input.now);
+  // Partial runs share the same daily cap: each counts as one manual run. scope_json (migration 0016) is only
+  // written for a partial run, so full runs keep working on a database without that column.
+  const scoped = input.scope ? JSON.stringify(input.scope) : null;
   const r = await db.run(
-    `INSERT OR IGNORE INTO agent_runs (id, workspace_id, project_id, agent, trigger, idempotency_key, status, policy_version, created_by, created_at)
-     SELECT ?, ?, ?, ?, 'manual', ?, 'pending', ?, ?, ?
+    `INSERT OR IGNORE INTO agent_runs (id, workspace_id, project_id, agent, trigger, idempotency_key, status, policy_version, created_by, created_at${scoped ? ", scope_json" : ""})
+     SELECT ?, ?, ?, ?, 'manual', ?, 'pending', ?, ?, ?${scoped ? ", ?" : ""}
       WHERE (SELECT COUNT(*) FROM agent_runs
               WHERE workspace_id = ? AND project_id = ? AND trigger = 'manual' AND substr(created_at, 1, 10) = ?) < ?`,
     id,
@@ -82,6 +86,7 @@ export async function createManualRun(
     POLICY_VERSION,
     input.createdBy,
     nowIso,
+    ...(scoped ? [scoped] : []),
     input.workspaceId,
     input.projectId,
     nowIso.slice(0, 10),
@@ -150,7 +155,7 @@ export async function startRun(env: Env, db: Db, run: { id: string; projectId: s
 }
 
 // ------------------------------------------------------------------ mapping
-export function toRunSummary(row: Pick<RunRow, "id" | "agent" | "trigger" | "status" | "created_at" | "started_at" | "finished_at" | "error" | "summary_json">): RunSummary {
+export function toRunSummary(row: Pick<RunRow, "id" | "agent" | "trigger" | "status" | "created_at" | "started_at" | "finished_at" | "error" | "summary_json" | "scope_json">): RunSummary {
   return {
     id: row.id,
     agent: row.agent,
@@ -161,5 +166,6 @@ export function toRunSummary(row: Pick<RunRow, "id" | "agent" | "trigger" | "sta
     finishedAt: row.finished_at,
     error: row.error,
     summary: parseJson<Record<string, unknown>>(row.summary_json, {}),
+    scope: parseScope(row.scope_json ?? null),
   };
 }

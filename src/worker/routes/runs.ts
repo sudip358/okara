@@ -2,7 +2,8 @@
  * Runs + usage routes (runtime module).
  *   GET  /projects/:pid/runs        RunSummary[]
  *   GET  /runs/:id                  RunDetail (events + decisions)
- *   POST /projects/:pid/runs        manual run {agent}; max 3 manual runs per project per UTC day
+ *   POST /projects/:pid/runs        manual run {agent, steps?, engines?}; max 3 manual runs per project per UTC day
+ *                                   (a partial run of some steps counts as one manual run; src/worker/runs/scope.ts)
  *   POST /runs/:id/cancel           sets cancel_requested; pending runs are cancelled immediately
  *   GET  /projects/:pid/usage       UsageSummary
  * Access always resolves through requireProject (membership check), including for /runs/:id.
@@ -23,10 +24,20 @@ import { releaseRunLock } from "../runs/locks";
 import type { OrchestrateDeps } from "../runs/orchestrate";
 import type { RunRow } from "../runs/runtime";
 import { claimAndLock, createManualRun, startRun, toRunSummary } from "../runs/runs-service";
+import { checkScopeReady, parseRunScope } from "../runs/scope";
+import { MANUAL_RUNS_PER_DAY, type RunScope } from "@shared/run-scope";
 
-export const MANUAL_RUNS_PER_PROJECT_PER_DAY = 3;
+export const MANUAL_RUNS_PER_PROJECT_PER_DAY = MANUAL_RUNS_PER_DAY;
 
-const manualRunBody = z.object({ agent: z.enum(["seo", "geo"]) });
+const manualRunBody = z
+  .object({
+    agent: z.enum(["seo", "geo"]),
+    /** Partial run: work steps to run ("crawl", "gsc_sync", "recommend" | "batch", "proposals"); omit = all. */
+    steps: z.array(z.string().max(40)).max(10).optional(),
+    /** GEO batch only: engine lanes to ask ("gemini", "custom_geo:<id>", ...). */
+    engines: z.array(z.string().max(100)).max(20).optional(),
+  })
+  .strict();
 
 export interface RunRouteDeps {
   orchestrate?: OrchestrateDeps;
@@ -80,6 +91,8 @@ export function mapEvent(r: Record<string, unknown>): RunEvent {
  * Manual run for a member (route POST /projects/:pid/runs and Ask Okara's confirmed run_agent_now action):
  * per-project daily quota, same-minute double-submit returns the existing run, demo projects refused, a run
  * refused because another run holds the lock is removed so it does not consume quota. Throws HttpError.
+ * `scope` (already parsed with parseRunScope) makes it a partial run: pre-checked (409 missing stored data,
+ * 412 missing setup) before any quota is used; it counts as one manual run in the same daily cap.
  */
 export async function requestManualRun(
   env: Env,
@@ -88,13 +101,16 @@ export async function requestManualRun(
   userId: string,
   agent: AgentKind,
   now: Date,
-  opts: { deps?: RunRouteDeps; waitUntil?: (p: Promise<unknown>) => void } = {},
+  opts: { deps?: RunRouteDeps; waitUntil?: (p: Promise<unknown>) => void; scope?: RunScope | null } = {},
 ): Promise<{ row: RunRow; created: boolean }> {
   const deps = opts.deps ?? {};
+  const scope = opts.scope ?? null;
   if (project.is_demo === 1) throw new HttpError(409, "demo_project", "Demo projects use fixture data; runs are disabled.");
+  await checkScopeReady(env, db, project, agent, scope, now);
 
-  // Same project + agent within the same minute (double submit) returns the existing run.
-  const key = `${project.id}:${agent}:manual:${Math.floor(now.getTime() / 60000)}`;
+  // Same project + agent (+ same scope) within the same minute (double submit) returns the existing run.
+  const scopeKey = scope ? `:${scope.steps.join("+")}${scope.engines ? `@${scope.engines.join("+")}` : ""}` : "";
+  const key = `${project.id}:${agent}:manual${scopeKey}:${Math.floor(now.getTime() / 60000)}`;
   const result = await createManualRun(db, {
     workspaceId: project.workspace_id,
     projectId: project.id,
@@ -103,6 +119,7 @@ export async function requestManualRun(
     createdBy: userId,
     now,
     perDay: MANUAL_RUNS_PER_PROJECT_PER_DAY,
+    scope,
   });
   if (result.quotaExceeded || !result.runId) {
     throw new HttpError(429, "quota_exceeded", `Manual run limit reached (${MANUAL_RUNS_PER_PROJECT_PER_DAY} per project per UTC day). Scheduled runs continue daily.`);
@@ -183,7 +200,8 @@ export function createRunRoutes(deps: RunRouteDeps = {}) {
     const now = c.get("now");
     const project = await requireProject(db, user.id, c.req.param("pid"));
     const parsed = manualRunBody.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) throw badRequest("Body must be {agent: 'seo' | 'geo'}.");
+    if (!parsed.success) throw badRequest("Body must be {agent: 'seo' | 'geo', steps?: string[], engines?: string[]}.");
+    const scope = parseRunScope(parsed.data.agent, parsed.data.steps, parsed.data.engines);
     let waitUntil: ((p: Promise<unknown>) => void) | undefined;
     try {
       const ec = c.executionCtx;
@@ -191,7 +209,7 @@ export function createRunRoutes(deps: RunRouteDeps = {}) {
     } catch {
       waitUntil = undefined;
     }
-    const { row, created } = await requestManualRun(c.env, db, project, user.id, parsed.data.agent, now, { deps, waitUntil });
+    const { row, created } = await requestManualRun(c.env, db, project, user.id, parsed.data.agent, now, { deps, waitUntil, scope });
     return c.json({ data: toRunSummary(row) }, created ? 201 : 200);
   });
 

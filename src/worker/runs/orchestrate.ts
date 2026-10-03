@@ -4,6 +4,8 @@
  * Steps per agent (names are stored on run_events, prefixed by agent for the [SEO]/[GEO] run log):
  *   SEO: seo.validate -> seo.crawl -> seo.gsc_sync -> seo.recommend -> seo.summary
  *   GEO: geo.validate -> geo.batch -> geo.proposals -> geo.summary
+ * A manual run may carry a scope (agent_runs.scope_json, src/worker/runs/scope.ts): only its work steps run
+ * (validate and summary always do); scheduled runs have no scope and run every step.
  *
  * Semantics
  * - Each step logs started + completed/partial/failed/skipped. A failing step does not erase earlier
@@ -29,6 +31,8 @@ import { buildRunContext, createRunLogger, loadRun, type RunRow } from "./runtim
 import { redact } from "./calls";
 import { runCrawl, syncGsc, generateSeoRecommendations } from "../seo/entry";
 import { runGeoBatch, generateGeoProposals } from "../geo/entry";
+import { parseScope, scopeLabel } from "@shared/run-scope";
+import { stepsForScope } from "./scope";
 
 export type StepName =
   | "seo.validate"
@@ -168,7 +172,8 @@ export async function prepareRun(env: Env, runId: string, deps: OrchestrateDeps 
   const clock = deps.clock ?? systemClock;
   const run = await loadRun(db, runId);
   if (!run) throw new Error(`Run ${runId} not found.`);
-  const steps = AGENT_STEPS[run.agent];
+  const scope = parseScope(run.scope_json);
+  const steps = stepsForScope(run.agent, AGENT_STEPS[run.agent], scope);
   if (TERMINAL.has(run.status)) return { proceed: false, agent: run.agent, steps, reason: `Run already ${run.status}.` };
   const log = logger(db, run, clock);
   if (run.cancel_requested === 1) {
@@ -193,7 +198,8 @@ export async function prepareRun(env: Env, runId: string, deps: OrchestrateDeps 
     POLICY_VERSION,
     run.id,
   );
-  await log.event(`${run.agent}.run`, "started", `${run.agent.toUpperCase()} run started (${run.trigger}).`);
+  const partial = scopeLabel(scope);
+  await log.event(`${run.agent}.run`, "started", `${run.agent.toUpperCase()} run started (${run.trigger}${partial ? `; ${partial}` : ""}).`);
   return { proceed: true, agent: run.agent, steps, reason: null };
 }
 
