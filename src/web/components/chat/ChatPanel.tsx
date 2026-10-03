@@ -533,9 +533,19 @@ export function ChatPanel({
     >
       <div className="flex items-center gap-1.5 border-b border-zinc-200 px-3 py-2.5 dark:border-zinc-800">
         <Icon />
-        <h2 id={titleId} className="min-w-0 flex-1 truncate text-base font-semibold tracking-tight">
-          Ask Okara <Badge tone="info" className="ml-1 align-middle">beta</Badge>
-        </h2>
+        <div className="min-w-0 flex-1">
+          <h2 id={titleId} className="truncate text-base font-semibold tracking-tight">
+            Ask Okara <Badge tone="info" className="ml-1 align-middle">beta</Badge>
+          </h2>
+          {chat.status?.model && (
+            <p className="truncate text-[11px] text-zinc-500 dark:text-zinc-400" title="Ask Okara uses the writer model selected on the Integrations page">
+              Model: {chat.status.model.model} ·{" "}
+              <Link className="underline" to={projectPath(projectId, "integrations")} onClick={() => onMinimize()}>
+                change in Integrations
+              </Link>
+            </p>
+          )}
+        </div>
         <HeaderButton
           label="New chat"
           onClick={() => {

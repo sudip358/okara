@@ -31,13 +31,55 @@ export interface OpenAiChatConfig extends WriterHooks {
   maxResponseBytes?: number;
 }
 
+type RawToolCall = { id?: unknown; type?: unknown; function?: { name?: unknown; arguments?: unknown } };
+
 interface ChatCompletion {
   model?: string;
   choices?: Array<{
-    message?: { role?: string; content?: string | null; refusal?: string | null; tool_calls?: Array<{ id?: string; type?: string; function?: { name?: string; arguments?: string } }> };
+    message?: {
+      role?: string;
+      /** A string, or (some compatible servers) an array of parts like { type: "text", text }. */
+      content?: unknown;
+      refusal?: string | null;
+      tool_calls?: RawToolCall[] | null;
+      /** Legacy single function call (pre-tools API), still sent by some compatible servers. */
+      function_call?: { name?: unknown; arguments?: unknown } | null;
+    };
     finish_reason?: string | null;
   }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number };
+}
+
+/** Text of a message `content`: a string, or the text parts of a content-part array. */
+export function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((p) => (typeof p === "string" ? p : p && typeof p === "object" && typeof (p as { text?: unknown }).text === "string" ? (p as { text: string }).text : ""))
+    .join("");
+}
+
+/**
+ * Tool calls some OpenAI-compatible servers (open-weight model hosts, gateways) put in the text instead of
+ * `tool_calls`: <tool_call>{"name": "...", "arguments": {...}}</tool_call>. Only well-formed JSON with a string
+ * name is taken; the blocks are removed from the visible text. The arguments are validated server-side like any
+ * other tool input.
+ */
+const TEXT_TOOL_CALL = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
+export function extractTextToolCalls(text: string): { text: string; calls: Array<{ name: string; arguments: string }> } {
+  const calls: Array<{ name: string; arguments: string }> = [];
+  const rest = text.replace(TEXT_TOOL_CALL, (whole, json: string) => {
+    try {
+      const v = JSON.parse(json) as { name?: unknown; arguments?: unknown; parameters?: unknown };
+      if (typeof v.name !== "string") return whole;
+      const a = v.arguments ?? v.parameters ?? {};
+      calls.push({ name: v.name, arguments: typeof a === "string" ? a : JSON.stringify(a) });
+      return "";
+    } catch {
+      return whole;
+    }
+  });
+  return { text: calls.length ? rest.trim() : text, calls };
 }
 
 export function buildOpenAiChatMessages(req: Pick<RoundRequest, "system" | "history" | "turn">): Array<Record<string, unknown>> {
@@ -65,9 +107,9 @@ export function parseOpenAiChatResponse(body: ChatCompletion): RoundResult {
   const msg = choice?.message ?? {};
   const toolCalls: ToolCall[] = [];
   const rawCalls: Array<Record<string, unknown>> = [];
-  for (const tc of msg.tool_calls ?? []) {
-    if (!tc || typeof tc.id !== "string" || typeof tc.function?.name !== "string") continue;
-    const args = typeof tc.function.arguments === "string" ? tc.function.arguments : "";
+  const push = (id: string, name: string, argsValue: unknown) => {
+    // Some servers send arguments as an object instead of a JSON string.
+    const args = typeof argsValue === "string" ? argsValue : argsValue && typeof argsValue === "object" ? JSON.stringify(argsValue) : "";
     let input: unknown = {};
     let invalidJson = false;
     try {
@@ -75,10 +117,22 @@ export function parseOpenAiChatResponse(body: ChatCompletion): RoundResult {
     } catch {
       invalidJson = true;
     }
-    toolCalls.push({ id: tc.id, name: tc.function.name, input, ...(invalidJson ? { invalidJson } : {}) });
-    rawCalls.push({ id: tc.id, type: "function", function: { name: tc.function.name, arguments: args } });
+    toolCalls.push({ id, name, input, ...(invalidJson ? { invalidJson } : {}) });
+    rawCalls.push({ id, type: "function", function: { name, arguments: args } });
+  };
+  // Some servers omit the call id; a stable synthetic one keeps tool results paired with their call.
+  const callId = (i: number) => `call_okara_${i}`;
+  (Array.isArray(msg.tool_calls) ? msg.tool_calls : []).forEach((tc, i) => {
+    if (!tc || typeof tc.function?.name !== "string") return;
+    push(typeof tc.id === "string" && tc.id ? tc.id : callId(i), tc.function.name, tc.function.arguments);
+  });
+  if (!toolCalls.length && msg.function_call && typeof msg.function_call.name === "string") push(callId(0), msg.function_call.name, msg.function_call.arguments);
+  let text = contentText(msg.content);
+  if (!toolCalls.length) {
+    const fromText = extractTextToolCalls(text);
+    fromText.calls.forEach((c, i) => push(callId(i), c.name, c.arguments));
+    text = fromText.text;
   }
-  const text = typeof msg.content === "string" ? msg.content : "";
   const raw: Record<string, unknown> = { role: "assistant", content: text || null };
   if (rawCalls.length) raw.tool_calls = rawCalls;
   const fr = choice?.finish_reason;
@@ -92,6 +146,14 @@ export function parseOpenAiChatResponse(body: ChatCompletion): RoundResult {
   };
 }
 
+/** Field names only (never values) of a response that yielded neither text nor a tool call, for the error shown to the user. */
+export function describeEmptyResponse(body: ChatCompletion): string {
+  const choice = body.choices?.[0];
+  if (!choice) return "no choices in the response";
+  const fields = Object.keys(choice.message ?? {}).filter((k) => k !== "role").sort();
+  return `finish_reason ${choice.finish_reason ?? "none"}; message fields: ${fields.length ? fields.join(", ") : "none"}`;
+}
+
 export function createOpenAiChatModel(cfg: OpenAiChatConfig): ChatModel {
   const base = normalizeBaseUrl(cfg.baseUrl);
   const maxRetries = cfg.maxRetries ?? CHAT_MAX_RETRIES;
@@ -101,6 +163,7 @@ export function createOpenAiChatModel(cfg: OpenAiChatConfig): ChatModel {
     async round(req: RoundRequest): Promise<RoundResult> {
       const body = buildOpenAiChatRequest(cfg.model, req);
       let parsed: RoundResult | null = null;
+      let empty: string | null = null;
       try {
         await metered(
           cfg,
@@ -119,11 +182,13 @@ export function createOpenAiChatModel(cfg: OpenAiChatConfig): ChatModel {
               maxResponseBytes: cfg.maxResponseBytes,
               secrets: [cfg.apiKey],
             });
-            parsed = parseOpenAiChatResponse((r.json ?? {}) as ChatCompletion);
+            const json = (r.json ?? {}) as ChatCompletion;
+            parsed = parseOpenAiChatResponse(json);
             const failure =
               parsed.stop === "refusal" ? new WriterOutputError("The model declined the request.", "refusal")
               : parsed.stop === "max_tokens" ? new WriterOutputError("The model's answer was cut off (output limit).", "truncated")
               : null;
+            if (!failure && !parsed.text.trim() && !parsed.toolCalls.length) empty = describeEmptyResponse(json);
             return { result: { usage: parsed.usage }, failure, requestId: r.requestId, latencyMs: r.latencyMs };
           },
         );
@@ -132,6 +197,12 @@ export function createOpenAiChatModel(cfg: OpenAiChatConfig): ChatModel {
         throw e;
       }
       if (!parsed) throw new ChatModelError("The model returned no response.", "invalid_response");
+      if (empty) {
+        throw new ChatModelError(
+          `${cfg.model} answered with neither text nor a tool call (${empty}). It may not support tool calling through this endpoint; pick another model under Integrations → Custom writer.`,
+          "invalid_response",
+        );
+      }
       return parsed;
     },
   };
