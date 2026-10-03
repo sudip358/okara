@@ -699,7 +699,16 @@ export function ChatPanel({ projectId, onClose, onMinimize }: { projectId: strin
   );
 }
 
-/** Sidebar toggle + panel (portal), mounted once per project page. */
+function ChatBubbleIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21 12a8 8 0 0 1-11.8 7l-4.7 1.3 1.3-4.4A8 8 0 1 1 21 12Z" />
+      <path d="M8.5 11h.01M12 11h.01M15.5 11h.01" />
+    </svg>
+  );
+}
+
+/** Sidebar toggle + floating bottom-right bubble + panel (portal), mounted once per project page. */
 export function ChatLauncher({ projectId, className }: { projectId: string; className?: string }) {
   const [mode, setMode] = useState<"closed" | "open" | "minimized">(() => (store.get(openKey) === "1" ? "open" : "closed"));
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -713,15 +722,20 @@ export function ChatLauncher({ projectId, className }: { projectId: string; clas
   const panel =
     mode === "open" ? (
       <ChatPanel projectId={projectId} onClose={close} onMinimize={() => setMode("minimized")} />
-    ) : mode === "minimized" ? (
+    ) : (
+      // Closed or minimised: a floating chat bubble at the bottom right of every project page.
       <button
         type="button"
         onClick={() => setMode("open")}
-        className="fixed right-4 bottom-4 z-50 inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-3.5 py-2 text-sm font-medium shadow-lg hover:bg-zinc-50 focus-visible:outline-2 focus-visible:outline-sky-600 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+        aria-label="Ask Okara: open the chat"
+        title="Ask Okara"
+        className="group fixed right-4 bottom-4 z-50 inline-flex h-14 items-center gap-2 rounded-full bg-sky-600 px-4 text-sm font-semibold text-white shadow-lg ring-1 ring-black/5 transition hover:bg-sky-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-600 sm:right-6 sm:bottom-6 dark:bg-sky-500 dark:hover:bg-sky-400 dark:text-zinc-950 print:hidden"
       >
-        <Icon /> Ask Okara
+        <ChatBubbleIcon />
+        <span className="hidden sm:inline">Ask Okara</span>
+        {mode === "minimized" && <span className="absolute -top-0.5 -right-0.5 h-3 w-3 rounded-full bg-emerald-400 ring-2 ring-white dark:ring-zinc-900" aria-hidden="true" />}
       </button>
-    ) : null;
+    );
   return (
     <>
       <button
