@@ -1,17 +1,19 @@
 /**
- * Data for the Live view's project containers (docs/live-view-design.md section 17). Each container fetches
+ * Data for the Live view's project containers (docs/live-view-design.md sections 17 and 18). Each container fetches
  * its own aggregate when it mounts (containers below the fold mount lazily) and again only when:
  *   - the step that changes it reaches a terminal status in the heartbeat the page already polls
- *     (seo.gsc_sync -> 10/11, seo.crawl -> 12, geo.batch -> GEO 06-09; budget after any terminal step,
- *     throttled), or
- *   - a run button of the view finished (a sheet "Sync now", a DataForSEO refresh, a started run).
+ *     (seo.gsc_sync -> 10/11, seo.crawl -> 12 and the internal-link containers 16-20, geo.batch -> GEO 06-09;
+ *     budget after any terminal step, throttled), or
+ *   - a run button of the view finished (a sheet "Sync now", a DataForSEO refresh, a link graph rebuild or link
+ *     analysis, a started run).
  * There is no polling loop of its own, so the section 3 budget (one heartbeat + one feed per 2 s) holds.
  */
 import { createContext, useContext, useEffect, useState } from "react";
 import type { CompetitorDataPanel, CompetitorDomainDetail } from "@shared/competitor-data";
-import type { LiveInsight, LiveInsightKind } from "@shared/types";
+import type { AnchorAuditReport, BrokenLinksReport, LinkClusterReport, LinkGraphSummary, LiveInsight, LiveInsightKind, PlacedLinksReport } from "@shared/types";
 import { api } from "@web/lib/api";
 import { useApi, type ApiState } from "@web/lib/hooks";
+import { linkDeps } from "./links-lib";
 
 const p = (pid: string) => `/projects/${encodeURIComponent(pid)}`;
 
@@ -21,7 +23,19 @@ export const morePaths = {
   competitorDomain: (pid: string, domain: string) => `${p(pid)}/competitors/dataforseo/domains/${encodeURIComponent(domain)}`,
   syncNow: (pid: string, syncId: string) => `${p(pid)}/import/syncs/${encodeURIComponent(syncId)}/run`,
   competitorRefresh: (pid: string) => `${p(pid)}/competitors/dataforseo/refresh`,
+  /** Section 18: the internal links workbench reads (existing GET endpoints, unchanged). */
+  links: (pid: string, what: LinkReadKind) => `${p(pid)}/seo/internal-links/${what}`,
 };
+
+/** The internal links workbench GETs the section 18 containers read (16 graph … 20 placed). */
+export type LinkReadKind = "graph" | "broken" | "clusters" | "anchors" | "placed";
+export interface LinkReadData {
+  graph: LinkGraphSummary;
+  broken: BrokenLinksReport;
+  clusters: LinkClusterReport;
+  anchors: AnchorAuditReport;
+  placed: PlacedLinksReport;
+}
 
 /** Refetch keys: the id of a step's latest terminal event in the shown run ("" = none), or a counter. */
 export interface MoreKeys {
@@ -36,6 +50,8 @@ export interface MoreKeys {
 export interface MoreReloads {
   sheets: number;
   gap: number;
+  /** Section 18: a link graph rebuild or a link analysis finished (both rebuild the stored graph). */
+  links?: number;
 }
 
 export interface LiveMoreValue {
@@ -57,7 +73,7 @@ export const LiveMoreContext = createContext<LiveMoreValue>({
   demo: false,
   replaying: false,
   keys: { gsc: "", crawl: "", batch: "", budget: "" },
-  reloads: { sheets: 0, gap: 0 },
+  reloads: { sheets: 0, gap: 0, links: 0 },
   hidden: NO_HIDDEN,
 });
 
@@ -87,6 +103,12 @@ export function insightDeps(kind: LiveInsightKind, v: Pick<LiveMoreValue, "keys"
 export function useInsight<T extends LiveInsight>(projectId: string, kind: LiveInsightKind): ApiState<T> {
   const v = useLiveMore();
   return useApi<T>(projectId ? morePaths.insight(projectId, kind) : null, insightDeps(kind, v));
+}
+
+/** One internal links workbench read (GET /seo/internal-links/<what>), refetched only on its keys. */
+export function useLinkRead<K extends LinkReadKind>(projectId: string, what: K): ApiState<LinkReadData[K]> {
+  const v = useLiveMore();
+  return useApi<LinkReadData[K]>(projectId ? morePaths.links(projectId, what) : null, linkDeps(v));
 }
 
 /** SEO 13: the existing DataForSEO panel (state, prices, caps, domains with their latest refresh). */

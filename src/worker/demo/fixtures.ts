@@ -437,14 +437,21 @@ export interface DemoLinkSuggestion {
   role: "explains_concept" | "deeper_detail" | "broader_guide" | "next_step" | "product_service" | "comparison";
   shouldExist: number;
   reused: boolean;
+  /**
+   * Fictional owner action (labelled demo data) on a suggestion the demo SEO run did not reuse, so the "Placed &
+   * verified" tab and Live container 20 have rows: accepted before the demo crawl, the graph build checks it against
+   * that crawl ("not found in crawl of <date>": the page does not link yet); accepted after it, it waits for the next
+   * crawl of the source page ("pending").
+   */
+  accepted?: { minutesAgo: number };
 }
 
 export const DEMO_LINK_SUGGESTIONS: DemoLinkSuggestion[] = [
   { source: "/blog/how-to-choose-a-washable-sofa", target: "/products/linen-slipcover-sofa", anchor: "linen slipcover sofa", sentence: d("A linen slipcover sofa with removable covers is the easiest to keep clean."), role: "product_service", shouldExist: 0.92, reused: true },
   { source: "/blog/how-to-choose-a-washable-sofa", target: "/collections/sofas", anchor: "washable sofas", sentence: d("Compare washable sofas by cover fabric, cushion fill and frame."), role: "broader_guide", shouldExist: 0.88, reused: true },
-  { source: "/collections/sofas", target: "/blog/how-to-choose-a-washable-sofa", anchor: "choose a washable sofa", sentence: d("Not sure where to start? Read how to choose a washable sofa."), role: "explains_concept", shouldExist: 0.9, reused: false },
+  { source: "/collections/sofas", target: "/blog/how-to-choose-a-washable-sofa", anchor: "choose a washable sofa", sentence: d("Not sure where to start? Read how to choose a washable sofa."), role: "explains_concept", shouldExist: 0.9, reused: false, accepted: { minutesAgo: 125 } },
   { source: "/products/brass-table-lamp", target: "/collections/table-lamps", anchor: "table lamps", sentence: d("See all table lamps in the collection."), role: "broader_guide", shouldExist: 0.86, reused: true },
-  { source: "/", target: "/pages/about", anchor: "about the store", sentence: d("Read more about the store and how we test fabrics."), role: "next_step", shouldExist: 0.62, reused: false },
+  { source: "/", target: "/pages/about", anchor: "about the store", sentence: d("Read more about the store and how we test fabrics."), role: "next_step", shouldExist: 0.62, reused: false, accepted: { minutesAgo: 60 } },
 ];
 
 // ------------------------------------------------------------------ approved competitor pages (Live view panel 05, GEO C)

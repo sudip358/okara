@@ -1,5 +1,5 @@
 /**
- * Live view containers per mode (docs/live-view-design.md sections 4, 5 and 17): their keys (the panel testIds
+ * Live view containers per mode (docs/live-view-design.md sections 4, 5, 17 and 18): their keys (the panel testIds
  * the run buttons and the "Containers" menu use), numbers, titles, phone-tab labels and accents, plus the
  * per-viewer show/hide state. Pure (no React, no DOM): storage is passed in, so a private window or blocked
  * storage simply means "everything shown".
@@ -11,7 +11,7 @@ export type LiveModeKey = "seo" | "geo";
 
 export interface ContainerDef {
   key: string;
-  /** "01".."15"; empty for the GEO engine columns (a group, not a numbered panel). */
+  /** "01".."20"; empty for the GEO engine columns (a group, not a numbered panel). */
   num: string;
   title: string;
   /** Phone-width tab label. */
@@ -19,7 +19,12 @@ export interface ContainerDef {
   accent: Accent;
   /** Added by section 17 (project-level containers fetched on their own, lazily below the fold). */
   more?: boolean;
+  /** Added by section 18: internal-link containers on the links workbench (fetched on their own, lazily below the fold). */
+  links?: boolean;
 }
+
+/** Containers that fetch their own data and mount when they come near the viewport (sections 17 and 18). */
+export const isLazy = (c: ContainerDef) => !!(c.more || c.links);
 
 export const SEO_CONTAINERS: readonly ContainerDef[] = [
   { key: "pages", num: "01", title: "Pages being read", tab: "Crawl", accent: "sky" },
@@ -37,6 +42,11 @@ export const SEO_CONTAINERS: readonly ContainerDef[] = [
   { key: "competitor-gap", num: "13", title: "Competitor keyword gap (DataForSEO)", tab: "Gap", accent: "amber", more: true },
   { key: "sheets", num: "14", title: "Master sheet sync", tab: "Sheets", accent: "zinc", more: true },
   { key: "budget", num: "15", title: "Budget and quotas today", tab: "Budget", accent: "zinc", more: true },
+  { key: "link-graph", num: "16", title: "Link graph coverage", tab: "Link graph", accent: "sky", links: true },
+  { key: "broken-links", num: "17", title: "Broken and redirected internal links", tab: "Broken links", accent: "rose", links: true },
+  { key: "cluster-gaps", num: "18", title: "Hub and cluster gaps", tab: "Clusters", accent: "emerald", links: true },
+  { key: "anchor-flags", num: "19", title: "Anchor text flags", tab: "Anchors", accent: "amber", links: true },
+  { key: "placed-links", num: "20", title: "Placed links verification", tab: "Placed links", accent: "zinc", links: true },
 ];
 
 export const GEO_CONTAINERS: readonly ContainerDef[] = [

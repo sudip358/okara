@@ -58,7 +58,7 @@ import { LiveHeader, LivePill } from "./LiveHeader";
 import { LIVE_CSS, useReducedMotion } from "./motion";
 import { ReplayControls } from "./ReplayControls";
 import { PanelActionsContext, RunActionsProvider, RunAllMenu } from "./RunActions";
-import { geoPanelActions, manualRunsToday, moreGeoActions, moreSeoActions, runAllActions, seoPanelActions, type ActionEnv, type ReloadKey } from "./run-actions";
+import { geoPanelActions, linkContainerActions, manualRunsToday, moreGeoActions, moreSeoActions, runAllActions, seoPanelActions, type ActionEnv, type ReloadKey } from "./run-actions";
 import { RunRail } from "./RunRail";
 import { SeoBoard } from "./SeoBoard";
 import { DEMO_LABEL, LIVE_TEXT, fmtInt, pillText, spendPhrase, spendSoFarText, urlHost, type LiveMode } from "./text";
@@ -285,7 +285,7 @@ export function LivePage() {
   const panelActions = useMemo(
     () =>
       agent === "seo"
-        ? { ...seoPanelActions(actionEnv), ...moreSeoActions(actionEnv) }
+        ? { ...seoPanelActions(actionEnv), ...moreSeoActions(actionEnv), ...linkContainerActions(actionEnv) }
         : { ...geoPanelActions(actionEnv, laneIds ? laneIds.split("\n") : []), ...moreGeoActions(actionEnv) },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [envKey],
@@ -295,10 +295,10 @@ export function LivePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [envKey],
   );
-  // ------------------------------------------------------------------ project containers (docs/live-view-design.md section 17)
-  // Reload counters bumped by the run controls (a sheet "Sync now", a DataForSEO refresh, any start): the
-  // containers refetch on them; there is no polling of their own.
-  const [reloads, setReloads] = useState({ sheets: 0, gap: 0, budget: 0 });
+  // ------------------------------------------------------------------ project containers (docs/live-view-design.md sections 17 and 18)
+  // Reload counters bumped by the run controls (a sheet "Sync now", a DataForSEO refresh, a link graph rebuild or link
+  // analysis, any start): the containers refetch on them; there is no polling of their own.
+  const [reloads, setReloads] = useState({ sheets: 0, gap: 0, links: 0, budget: 0 });
   /** Bumps one reload counter; every bump also refetches the budget (spend or quota may have changed). */
   const bump = (k: keyof typeof reloads) => setReloads((r) => (k === "budget" ? { ...r, budget: r.budget + 1 } : { ...r, [k]: r[k] + 1, budget: r.budget + 1 }));
   const onRunStarted = (run: RunSummary) => {
@@ -310,7 +310,11 @@ export function LivePage() {
   };
   const onToolDone = (what: ReloadKey) => {
     if (what === "buyer") seoData.buyer.reload();
-    else if (what === "links") seoData.links.reload();
+    else if (what === "links") {
+      // A link analysis also rebuilds the stored link graph: panel 08 and the section 18 containers reload.
+      seoData.links.reload();
+      bump("links");
+    } else if (what === "link-graph") bump("links");
     else bump(what === "sheets" ? "sheets" : "gap");
   };
   const mode17: LiveModeKey = agent;
@@ -336,10 +340,10 @@ export function LivePage() {
       demo: project.isDemo,
       replaying,
       keys: { gsc: gscKey, crawl: crawlKey, batch: batchKey, budget: budgetKey },
-      reloads: { sheets: reloads.sheets, gap: reloads.gap },
+      reloads: { sheets: reloads.sheets, gap: reloads.gap, links: reloads.links },
       hidden,
     }),
-    [activity?.run.id, project.isDemo, replaying, gscKey, crawlKey, batchKey, budgetKey, reloads.sheets, reloads.gap, hidden],
+    [activity?.run.id, project.isDemo, replaying, gscKey, crawlKey, batchKey, budgetKey, reloads.sheets, reloads.gap, reloads.links, hidden],
   );
 
   // ------------------------------------------------------------------ full screen / focus mode

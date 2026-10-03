@@ -1057,3 +1057,69 @@ engine.
 are not stored, so "ranks worse" cannot be computed without another paid call. No share of voice, visibility
 score, traffic or forecast anywhere; differences are measured between two stored windows and always show both
 values.
+
+## 18. Internal-link containers (amendment 2026-10-03, docs/build-kit.md [A32])
+
+Owner request on `/projects/:pid/live` (SEO mode): containers built on the internal links workbench ([A30]), each with
+a run button where a real action exists and a link "Open Internal links ›" to the matching tab of the Internal links
+page. They are project containers like section 17 (same caption, setup, empty, error, demo and replay conventions,
+listed in the "Containers" menu, lazily mounted) and read the workbench's existing GET endpoints unchanged (no new
+endpoint, no worker change). Code: `src/web/pages/live/more/{LinkContainers.tsx,links-lib.ts}` (pure helpers),
+`more/data.ts` (`useLinkRead`), `more/registry.ts` (`links: true`), the mapping `linkContainerActions` /
+`linkGraphActionKey` in `run-actions.ts`. Tests: `tests/live-links-{containers,actions,demo}.test.ts`.
+
+| # | Container [accent] | Data (GET `/projects/:pid/seo/internal-links/…`) | Button | Tab |
+|---|---|---|---|---|
+| 16 | Link graph coverage [sky], full row | `graph` → `LinkGraphSummary`: counter "8 analysed / of 8 sitemap URLs"; n-of-m meters with bars: sitemap URLs analysed (oldest/newest snapshot), orphan pages (0 links in) of the sitemap URLs (crawled pages without a sitemap), no content links in (sitemap URLs only; no bar without a sitemap), stale snapshots of crawled pages, known URLs not crawled yet (rolling crawl, pages per run); graph built time and trigger ("after a crawl", "rebuilt on request", "by a link analysis run", "from the demo crawl"), link and URL counts, a newer-crawl notice, the server's notes | ▶ Rebuild link graph, or ▶ Run crawl while no crawl is stored (below) | graph |
+| 17 | Broken and redirected internal links [rose] | `broken` → `BrokenLinksReport`: counter = links listed ("3 to 4xx/5xx · 2 redirected"); 4xx / 5xx / 3xx groups with links and distinct URLs; redirected links through a chain (2+ hops), ending in 4xx/5xx, leaving the site; linked URLs not crawled yet; top 20 rows: source path, anchor (plain text) and link position, target and final URL, status ("404", "301 → 200 (2 hops)", "302 → off-site", chain in the tooltip), stale snapshot, the server's fix text | ▶ Run crawl (partial `["crawl"]`) | broken |
+| 18 | Hub and cluster gaps [emerald] | `clusters` → `LinkClusterReport`: counter "spokes missing a link of N spokes in M hubs"; linked both ways / partly / unlinked / no hub; missing hub → spoke and spoke → hub links; the top 8 hubs sorted by missing links (then unlinked spokes, size), each with a linked · partly · unlinked bar ("n · n · n of m") and its first 3 spokes with the missing direction | ▶ Run link analysis (`POST …/internal-links/run`) | clusters |
+| 19 | Anchor text flags [amber] | `anchors` (flagged only) → `AnchorAuditReport`: counter = flagged pages; pages per flag; the returned `thresholds` as a one-line caption ("exact match > 50% with ≥ 5 links · repeated: one anchor from ≥ 10 pages and ≥ 60% · no query terms: ≥ 3 anchored links", engineering defaults) and as full sentences in each flag chip's tooltip (a threshold not returned is left out, never guessed); top 12 pages: flags, anchored links, distinct and empty anchors, keyword and its basis, the most used anchor (unless a reason quotes it), the server's reason lines | ▶ Run crawl | anchors |
+| 20 | Placed links verification [zinc] | `placed` → `PlacedLinksReport`: counter "verified of N placed links · n not found"; verified / not found / source unavailable / pending crawl (pending + not checked) as a stacked bar and "n of N"; the latest 6 "not found in crawl of <date>" rows (source → target, anchor, accepted / implemented / from your sheet, since) with the server's label; links waiting for the next crawl | ▶ Run link analysis | placed |
+
+**Numbers:** every count is the server's count of the stored graph or a count of listed rows (17 and 19 count the rows
+the endpoint lists, at most 2,000 / 500; "Showing n of m" and the server's truncation note say so). Percentages appear
+only in 19: the returned thresholds and the server's own reason lines. Bars are n/m widths with both numbers printed.
+
+**Captions:** demo label first for demo projects; then "From your latest link graph (built 3 Oct, 19:12 after a
+crawl)". The summary does not say which crawl built the graph, so a crawl-built graph claims neither "this run" nor
+"not part of this run"; a graph rebuilt on request, by a link analysis run or by the demo seed adds ", not part of this
+run". 20: "From your placed links, checked at every link graph build (latest check: crawl of <date>)". During a
+replay "Current state, not replayed" is added. Titles, anchors, keywords, URLs and fix texts are React text only.
+
+**States:** loading shimmer; error "Could not load …"; setup (`state: "setup_required"`: unverified site, or for 16 no
+crawl stored) with the server's message and Settings when the site is not verified; no graph yet ("It is built at the
+end of every crawl; 16 can rebuild it"); empty (17 "No broken or redirected internal links in the analysed pages.",
+18 "No hubs found yet.", 19 "No anchor flags…", 20 "No placed links yet." with links to Internal links and Import);
+demo (labelled).
+
+**Run buttons** (`linkContainerActions`; same disabled reasons and confirm dialog as section 16):
+- 16: `POST …/graph/rebuild` is deterministic (no provider call, no budget), 6 per project per hour
+  (`GRAPH_REBUILD_RATE_LIMIT`, stated in the dialog and asserted by the tests) and answers 409 while another build runs.
+  Without a stored crawl (or on an unverified site) the route returns the unchanged `setup_required` summary and
+  rebuilds nothing, so 16 picks its button from its own data (`linkGraphActionKey`): ▶ Run crawl (the panel 01 action,
+  `["crawl"]`; the graph is rebuilt at the end of every crawl) while the summary is `setup_required`, else ▶ Rebuild
+  link graph. Disabled in demo and on an unverified site; not blocked by a running agent or the manual-run quota (not
+  an agent run).
+- 17 and 19: ▶ Run crawl (statuses, redirect chains and anchors come from crawled snapshots).
+- 18 and 20: ▶ Run link analysis (the panel 08 tool: rebuilds the graph, re-derives clusters, re-checks placed links).
+- The dialog shows a 409 as "Not started: …" and a 429 as "Limit reached: …" in amber (server message as text).
+
+**Data plan** (no polling of their own; the section 3 budget holds): each container fetches when it mounts (lazily),
+then refetches only on `linkDeps`: the id of the shown run's latest `seo.crawl` terminal event (the crawl step logs it
+after the rebuilt graph is stored) and a reload counter bumped when a rebuild or a link analysis of the view finished
+(both rebuild the graph, so all five reload; a link analysis also reloads panel 08). A crawl started from 16, 17 or 19
+switches the view to that run (section 16) and the containers refetch when its crawl ends.
+
+**Layout:** 16 spans the row (`xl:col-span-12`, 260 px) above 17 | 18 and 19 | 20 (`xl:col-span-6`, 420 px); below `xl`
+they stack (16 spans both `md` columns); phone tabs "Link graph", "Broken links", "Clusters", "Anchors", "Placed
+links". Tables are `table-fixed` with the target and fix columns dropped below the container's `@lg` width (the fix
+moves under the link); no horizontal page scroll at 390 px, light and dark (verified on the dev server).
+
+**Demo:** the demo seed's link graph feeds 16, 18 and 19 (8 of 8 sitemap URLs, 3 orphans, 2 hubs with 2 partly linked
+spokes, 2 exact-match-heavy pages). It has no failing or redirecting link targets, so 17 shows its empty state (adding
+one would need a redirecting page and snapshot: not a tiny fixture). For 20 the seed marks two fictional suggestions the
+demo SEO run did not reuse as "accepted" (labelled demo data): one before the demo crawl, checked against it ("not
+found in crawl of <date>"), one after it (pending the next crawl). Accepted-only links are not flagged on the Overview.
+
+**Not shown:** verification of links that are only suggested (open), per-URL link counts (the Link graph tab has them),
+and anything about link equity, value or expected ranking change: the workbench stores none of it.

@@ -2,7 +2,8 @@
  * SEO mode (docs/live-view-design.md section 4): nine stage panels, each one real stage of the agent's work.
  * Run-scoped panels (01–04, 08, 09) are fed by this run's revealed stored rows; project-level panels (05–07)
  * show current stored state with a caption saying they are not part of this run. Counters: during a replay,
- * counts of revealed rows; live and at the end of a replay, the server's whole-run totals.
+ * counts of revealed rows; live and at the end of a replay, the server's whole-run totals. Then the project
+ * containers: 10-15 (section 17) and the internal-link containers 16-20 on the links workbench (section 18).
  */
 import { memo, useMemo, useState, type ReactElement } from "react";
 import type { RunActivity } from "@shared/types";
@@ -36,7 +37,8 @@ import { GscPanel, PagesPanel, QueriesPanel } from "./seo/RunPanels";
 import type { LiveMode } from "./text";
 import { LazyMount } from "./more/common";
 import { useLiveMore } from "./more/data";
-import { SEO_CONTAINERS, type ContainerDef } from "./more/registry";
+import { AnchorFlagsContainer, BrokenLinksContainer, ClusterGapsContainer, LinkGraphContainer, PlacedLinksContainer } from "./more/LinkContainers";
+import { SEO_CONTAINERS, isLazy, type ContainerDef } from "./more/registry";
 import { CompetitorGapContainer, MoversContainer, StrikingContainer, TechnicalContainer } from "./more/SeoContainers";
 import { BudgetContainer, SheetsContainer } from "./more/SharedContainers";
 
@@ -67,8 +69,9 @@ const PENDING_QUERIES = Math.min(5, MAX_PENDING);
 export const SKIP_FACTOR_PAGES = 8;
 
 /**
- * Grid cell per container (design section 4; section 17 for 10-15): fixed heights at >= 1280, so arriving rows
- * never shift the page; the project-level containers 10-15 sit in pairs under 08 / 09.
+ * Grid cell per container (design section 4; section 17 for 10-15; section 18 for 16-20): fixed heights at >= 1280,
+ * so arriving rows never shift the page; the project-level containers 10-15 sit in pairs under 08 / 09; 16 (link
+ * graph coverage) spans the row above the link containers 17-20, which sit in pairs.
  */
 const CELL: Record<string, string> = {
   pages: "xl:col-span-3 xl:h-[340px]",
@@ -86,6 +89,11 @@ const CELL: Record<string, string> = {
   "competitor-gap": "xl:col-span-6 xl:h-[420px]",
   sheets: "xl:col-span-6 xl:h-[400px]",
   budget: "xl:col-span-6 xl:h-[400px]",
+  "link-graph": "md:col-span-2 xl:col-span-12 xl:h-[260px]",
+  "broken-links": "xl:col-span-6 xl:h-[420px]",
+  "cluster-gaps": "xl:col-span-6 xl:h-[420px]",
+  "anchor-flags": "xl:col-span-6 xl:h-[420px]",
+  "placed-links": "xl:col-span-6 xl:h-[420px]",
 };
 
 export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
@@ -237,6 +245,12 @@ export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
     "competitor-gap": <CompetitorGapContainer projectId={p.projectId} reduced={p.reduced} />,
     sheets: <SheetsContainer projectId={p.projectId} reduced={p.reduced} mode="seo" />,
     budget: <BudgetContainer projectId={p.projectId} reduced={p.reduced} mode="seo" />,
+    // Section 18: internal-link containers on the links workbench (stored link graph; lazily below the fold).
+    "link-graph": <LinkGraphContainer projectId={p.projectId} reduced={p.reduced} verified={p.verified} />,
+    "broken-links": <BrokenLinksContainer projectId={p.projectId} reduced={p.reduced} verified={p.verified} />,
+    "cluster-gaps": <ClusterGapsContainer projectId={p.projectId} reduced={p.reduced} verified={p.verified} />,
+    "anchor-flags": <AnchorFlagsContainer projectId={p.projectId} reduced={p.reduced} verified={p.verified} />,
+    "placed-links": <PlacedLinksContainer projectId={p.projectId} reduced={p.reduced} verified={p.verified} />,
   };
 
   const shown: ContainerDef[] = SEO_CONTAINERS.filter((c) => !more.hidden.has(c.key));
@@ -288,13 +302,14 @@ export const SeoBoard = memo(function SeoBoard(p: SeoBoardProps) {
     <div className="min-w-0 space-y-4">
       {feedBanner}
       {allHidden}
-      {/* Rows (design section 4): 01 02 03 | 04 05 | 06 07 | 08 09, then section 17: 10 11 | 12 13 | 14 15. Panels
-          fed by rows of this run keep a fixed height so arriving rows never shift the page; the project-level rows
-          size to their content (capped); containers 10-15 mount when they come near the viewport. */}
+      {/* Rows (design section 4): 01 02 03 | 04 05 | 06 07 | 08 09, then section 17: 10 11 | 12 13 | 14 15, then
+          section 18: 16 | 17 18 | 19 20. Panels fed by rows of this run keep a fixed height so arriving rows never
+          shift the page; the project-level rows size to their content (capped); containers 10-20 mount when they
+          come near the viewport. */}
       <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-12">
         {shown.map((c) => (
           <Cell key={c.key} cls={CELL[c.key] ?? "xl:col-span-6"}>
-            {c.more ? (
+            {isLazy(c) ? (
               <LazyMount def={c} reduced={p.reduced}>
                 {panels[c.key]!}
               </LazyMount>

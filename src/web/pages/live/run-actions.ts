@@ -6,12 +6,13 @@
  * - run:  a manual agent run, all steps or a partial run (POST /projects/:pid/runs {agent, steps?, engines?}).
  *         "Run both" is one action with two runs.
  * - call: an existing standalone tool endpoint (buyer-query classification, internal-link analysis; section 17:
- *         a sheet's "Sync now" and the paid DataForSEO refresh, whose domain is picked in the confirm dialog).
+ *         a sheet's "Sync now" and the paid DataForSEO refresh, whose domain is picked in the confirm dialog;
+ *         section 18: the deterministic link graph rebuild).
  * - link: navigation to the flow that needs the user's per-item approval (competitor pages); never auto-fetches.
  * A panel with no runnable action has no entry (no fake buttons).
  */
 import type { CompetitorDataPanel } from "@shared/competitor-data";
-import type { AgentKind, LiveSheetSyncRow } from "@shared/types";
+import type { AgentKind, LinkGraphSummary, LiveSheetSyncRow } from "@shared/types";
 import { MANUAL_RUNS_PER_DAY, STEP_LABEL, type SectionStep } from "@shared/run-scope";
 import { refreshCostNote, refreshState } from "@web/pages/geo/competitor-data-lib";
 
@@ -38,8 +39,11 @@ export interface ConfirmText {
   lines: string[];
 }
 
-/** What a finished tool call reloads: an existing panel's data or a section 17 container. */
-export type ReloadKey = "buyer" | "links" | "sheets" | "competitor-gap";
+/**
+ * What a finished tool call reloads: an existing panel's data or a section 17 container. "links" (link analysis) and
+ * "link-graph" (graph rebuild) both rebuild the stored link graph, so both also reload the section 18 containers.
+ */
+export type ReloadKey = "buyer" | "links" | "link-graph" | "sheets" | "competitor-gap";
 
 /** A pick the confirm dialog asks for before calling (sent as `body[field]`), e.g. which competitor domain. */
 export interface ActionChoice {
@@ -304,6 +308,63 @@ export function moreGeoActions(env: ActionEnv): Record<string, SectionAction> {
     "cited-domains": { ...all, key: "geo-batch-domains" },
     "prompt-history": { ...all, key: "geo-batch-history" },
   };
+}
+
+// ------------------------------------------------------------------ section 18: internal-link containers
+
+/** POST /seo/internal-links/graph/rebuild limit (GRAPH_REBUILD_RATE_LIMIT in src/worker/routes/links.ts; asserted by tests). */
+export const GRAPH_REBUILDS_PER_HOUR = 6;
+export const UNVERIFIED_GRAPH_REASON = "Verify site ownership first: the link graph is built only from crawls of your verified site.";
+
+/**
+ * Candidate actions of the internal-link containers, keyed by container testId (17-20) or `link-graph:<kind>` (16,
+ * which picks one with `linkGraphActionKey` from its own data, since the right action depends on whether a crawl is
+ * stored):
+ * - 16 Link graph coverage: "Rebuild link graph" (POST …/graph/rebuild: deterministic, no provider call, no budget,
+ *   6 per project per hour, 409 while another build runs). Without a stored crawl the route answers with the
+ *   unchanged setup_required summary and rebuilds nothing, so 16 offers "Run crawl" instead (partial SEO run, the
+ *   same action as panel 01; the graph is rebuilt at the end of every crawl).
+ * - 17 Broken links and 19 Anchor flags: "Run crawl": statuses, redirect chains and anchors come from crawled snapshots.
+ * - 18 Cluster gaps and 20 Placed links: "Run link analysis" (the panel 08 tool, POST …/internal-links/run, 3 per hour),
+ *   which rebuilds the graph, re-derives clusters and re-checks placed links.
+ */
+export function linkContainerActions(env: ActionEnv): Record<string, SectionAction> {
+  const m = seoPanelActions(env);
+  const crawl = m.pages!;
+  const analysis = m.links!;
+  const rebuild: SectionAction = {
+    kind: "call",
+    key: "link-graph-rebuild",
+    label: "Rebuild link graph",
+    path: `/projects/${encodeURIComponent(env.projectId)}/seo/internal-links/graph/rebuild`,
+    reload: "link-graph",
+    disabled: env.demo ? DEMO_REASON : env.verifiedHost ? null : UNVERIFIED_GRAPH_REASON,
+    doneText: "graph rebuilt",
+    confirm: {
+      title: "Rebuild the link graph now?",
+      lines: [
+        "Rebuilds the internal link graph from the latest stored snapshot of every crawled page (no new crawl): links in and out, orphans, broken and redirected links, clusters, anchor flags, and the check of placed links.",
+        `Deterministic: no provider call and no budget used. Limited to ${GRAPH_REBUILDS_PER_HOUR} per hour per project; refused while another build runs. Not an agent run: no manual run is used.`,
+      ],
+    },
+  };
+  return {
+    "link-graph:rebuild": rebuild,
+    "link-graph:crawl": { ...crawl, key: "crawl-link-graph" },
+    "broken-links": { ...crawl, key: "crawl-broken-links" },
+    "anchor-flags": { ...crawl, key: "crawl-anchor-flags" },
+    "cluster-gaps": { ...analysis, key: "links-cluster-gaps" },
+    "placed-links": { ...analysis, key: "links-placed-links" },
+  };
+}
+
+/**
+ * 16's action from its own data: null until the summary loaded; "Run crawl" while no crawl is stored (or the site is
+ * not verified: the crawl action then says why it is disabled); otherwise "Rebuild link graph".
+ */
+export function linkGraphActionKey(graph: Pick<LinkGraphSummary, "state"> | null | undefined): "link-graph:rebuild" | "link-graph:crawl" | null {
+  if (!graph) return null;
+  return graph.state === "setup_required" ? "link-graph:crawl" : "link-graph:rebuild";
 }
 
 export const OWNER_REASON_DFS = "Only the workspace owner can refresh competitor data.";

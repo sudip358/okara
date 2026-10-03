@@ -14,7 +14,7 @@
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { Link } from "react-router";
 import type { RunSummary } from "@shared/types";
-import { api, errorMessage, isRateLimited, isSetupRequired } from "@web/lib/api";
+import { ApiError, api, errorMessage, isRateLimited, isSetupRequired } from "@web/lib/api";
 import { Button, cx } from "@web/components/ui";
 import type { ReloadKey, SectionAction } from "./run-actions";
 
@@ -33,6 +33,18 @@ export function syncFailure(res: unknown): string | null {
   const o = (res as { outcome?: { status?: string; message?: string | null } } | null)?.outcome;
   if (!o || o.status === "ok") return null;
   return o.status === "busy" ? (o.message ?? "A sync of this tab is already running.") : `Sync failed: ${o.message ?? "the sheet could not be read."}`;
+}
+
+/**
+ * Prefix and tone of an error shown in the confirm dialog: a limit (429), missing setup (412) and a refusal because
+ * something else is in the way (409: another graph build or run in progress, "run the crawl first") are states the
+ * server reported before doing any work, shown in amber; anything else failed (red).
+ */
+export function dialogError(err: unknown): { prefix: string; tone: "warn" | "error" } {
+  if (isRateLimited(err)) return { prefix: "Limit reached: ", tone: "warn" };
+  if (isSetupRequired(err)) return { prefix: "Setup required: ", tone: "warn" };
+  if (err instanceof ApiError && err.status === 409) return { prefix: "Not started: ", tone: "warn" };
+  return { prefix: "", tone: "error" };
 }
 
 /** Body of POST /projects/:pid/runs for one run spec. */
@@ -220,8 +232,8 @@ export function ConfirmDialog({
           </fieldset>
         )}
         {error !== null && (
-          <p role="alert" className={cx("mt-3 text-sm", isRateLimited(error) || isSetupRequired(error) ? "text-amber-800 dark:text-amber-300" : "text-red-700 dark:text-red-400")}>
-            {isRateLimited(error) ? "Limit reached: " : isSetupRequired(error) ? "Setup required: " : ""}
+          <p role="alert" className={cx("mt-3 text-sm", dialogError(error).tone === "warn" ? "text-amber-800 dark:text-amber-300" : "text-red-700 dark:text-red-400")}>
+            {dialogError(error).prefix}
             {errorMessage(error)}
           </p>
         )}

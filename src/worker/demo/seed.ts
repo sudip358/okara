@@ -444,8 +444,10 @@ export async function seedDemoProject(env: Env, db: Db, userId: string, now: Dat
       suggestion_key: `${src}|${tgt}|${l.anchor.toLowerCase()}`, sentence_index: 0, sentence_text: sentences[0], anchor_text: l.anchor, role: l.role,
       method: "jev", tier, should_exist: l.shouldExist, sentence_confidence: null, anchor_confidence: null, role_confidence: null,
       provider: DEMO_MODEL, model: DEMO_MODEL, question_version: "demo-fixture", policy_version: "demo-fixture", decision_record_id: null,
-      status, score: Math.round(l.shouldExist * 70) / 100, reasons_json: JSON.stringify([`${DEMO_LABEL}: fictional suggestion`]), user_status: "open",
-      created_at: at(125.6), updated_at: at(125.6),
+      status, score: Math.round(l.shouldExist * 70) / 100, reasons_json: JSON.stringify([`${DEMO_LABEL}: fictional suggestion`]),
+      // Fictional "accepted" ones are checked by the link graph build below (Placed & verified, Live container 20).
+      user_status: l.accepted ? "accepted" : "open", status_changed_at: l.accepted ? at(l.accepted.minutesAgo) : null,
+      created_at: at(125.6), updated_at: l.accepted ? at(l.accepted.minutesAgo) : at(125.6),
     });
   }
   DEMO_LINK_SUGGESTIONS.forEach((l, i) => {
