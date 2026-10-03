@@ -33,6 +33,7 @@ import { SENTIMENT_LABEL, sourceTypeLabel } from "@web/pages/geo/lib";
 import { customLaneMeasured, laneRatio } from "../engine";
 import { AnimatedNumber, Crossfade, PulseDot, Shimmer, staggerStyle } from "../motion";
 import { EngineBadge, LaneGauge, ToneChip, type ToneName } from "../parts";
+import { PanelAction } from "../RunActions";
 import { LIVE_TEXT, clipText, fmtInt, shortDate, urlHost, urlPath, windowShort } from "../text";
 
 const OUTCOME: Record<NonNullable<LiveGeoAnswerRow["outcome"]>, { label: string; tone: ToneName; rail: string }> = {
@@ -376,7 +377,10 @@ export function LaneColumn(p: LaneColumnProps) {
             {p.board?.stateDetail && <p className="text-[11px] text-amber-800 dark:text-amber-300">{clipText(p.board.stateDetail, 120)}</p>}
           </div>
         </div>
-        <LaneGauge ratio={ratio} caption={mentionOnly ? "Mention rate (no sources returned)" : custom ? "Citation rate, this run (answers with sources)" : "Citation rate, this run"} reduced={p.reduced} />
+        <div className="flex shrink-0 flex-col items-end gap-1.5">
+          <PanelAction panelKey={`lane:${p.provider}`} />
+          <LaneGauge ratio={ratio} caption={mentionOnly ? "Mention rate (no sources returned)" : custom ? "Citation rate, this run (answers with sources)" : "Citation rate, this run"} reduced={p.reduced} />
+        </div>
       </header>
       <dl className="grid grid-cols-3 gap-x-3 gap-y-2 @xl:grid-cols-7 @xl:gap-x-2">
         <Stat

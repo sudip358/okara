@@ -10,7 +10,10 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent } from "react";
 import { useSearchParams } from "react-router";
-import type { EngineBoardResponse } from "@shared/types";
+import type { EngineBoardResponse, RunSummary } from "@shared/types";
+import { scopeLabel } from "@shared/run-scope";
+import { engineName } from "@web/pages/geo/board/lib";
+import { projectPath } from "@web/lib/project-context";
 import { useApi } from "@web/lib/hooks";
 import { useProject } from "@web/lib/project-context";
 import { Button, DemoBanner, EmptyState, ErrorState, LoadingState, cx } from "@web/components/ui";
@@ -51,6 +54,8 @@ import { GeoBoard } from "./GeoBoard";
 import { LiveHeader, LivePill } from "./LiveHeader";
 import { LIVE_CSS, useReducedMotion } from "./motion";
 import { ReplayControls } from "./ReplayControls";
+import { PanelActionsContext, RunActionsProvider, RunAllMenu } from "./RunActions";
+import { geoPanelActions, manualRunsToday, runAllActions, seoPanelActions, type ActionEnv } from "./run-actions";
 import { RunRail } from "./RunRail";
 import { SeoBoard } from "./SeoBoard";
 import { DEMO_LABEL, LIVE_TEXT, fmtInt, pillText, spendPhrase, spendSoFarText, urlHost, type LiveMode } from "./text";
@@ -242,6 +247,47 @@ export function LivePage() {
   const seoBoard = useApi<EngineBoardResponse>(agent === "seo" && activity ? boardPaths.board(projectId) : null);
   const boardLanes = (agent === "geo" ? geoData.board.data : seoBoard.data)?.lanes ?? [];
 
+  // ------------------------------------------------------------------ run controls (docs/live-view-design.md section 16)
+  // Today's manual runs (the server's quota) come from the run list; refetched after a start.
+  const runsForQuota = useApi<RunSummary[]>(project.isDemo ? null : boardPaths.runs(projectId));
+  const boardData = agent === "geo" ? geoData.board.data : seoBoard.data;
+  const actionEnv: ActionEnv = {
+    projectId,
+    demo: project.isDemo,
+    verifiedHost: project.verifiedHost,
+    gscProperty: project.gscProperty,
+    running: {
+      seo: (current.runs ?? []).some((r) => r.agent === "seo" && (r.status === "pending" || r.status === "running")),
+      geo: (current.runs ?? []).some((r) => r.agent === "geo" && (r.status === "pending" || r.status === "running")),
+    },
+    manualToday: manualRunsToday(runsForQuota.data),
+    engines: boardData ? boardData.lanes.map((l) => ({ provider: l.provider, name: engineName(l.provider), ready: l.state === "ready", detail: l.stateDetail })) : null,
+    promptCount: agent === "geo" && live.geo?.plannedPrompts?.length ? live.geo.plannedPrompts.length : null,
+    buyer: seoData.buyer.data,
+    links: seoData.links.data,
+    path: (sub) => projectPath(projectId, sub),
+  };
+  const laneIds = (activity?.lanes ?? []).map((l) => l.provider).join("\n");
+  // Stable identity while the inputs are unchanged (the replay clock re-renders this page every 100 ms).
+  const envKey = JSON.stringify({ ...actionEnv, path: null, agent, laneIds });
+  const panelActions = useMemo(
+    () => (agent === "seo" ? seoPanelActions(actionEnv) : geoPanelActions(actionEnv, laneIds ? laneIds.split("\n") : [])),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [envKey],
+  );
+  const allActions = useMemo(
+    () => runAllActions(actionEnv),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [envKey],
+  );
+  const onRunStarted = (run: RunSummary) => {
+    current.reload();
+    runsForQuota.reload();
+    // Switch to the started run: the view shows it LIVE while it is pending/running.
+    setParams({ run: run.id });
+  };
+  const onToolDone = (what: "buyer" | "links") => (what === "buyer" ? seoData.buyer.reload() : seoData.links.reload());
+
   // ------------------------------------------------------------------ full screen / focus mode
   const rootRef = useRef<HTMLDivElement>(null);
   const [fs, setFs] = useState(false);
@@ -291,6 +337,7 @@ export function LivePage() {
     const tag = t.tagName;
     const isRange = tag === "INPUT" && (t as HTMLInputElement).type === "range";
     if ((tag === "INPUT" && !isRange) || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable) return;
+    if (t.closest?.('[role="alertdialog"],[role="dialog"],[role="menu"]')) return;
     const root = rootRef.current;
     // Inside the view, or nowhere in particular (focus on the page body); never the sidebar or a dialog.
     if (!root || (!root.contains(t) && t !== document.body && t !== document.documentElement)) return;
@@ -440,6 +487,7 @@ export function LivePage() {
               runOver={!activity.active && atEnd}
               controls={replayControls}
             />
+            <PanelActionsContext.Provider value={panelActions}>
             {agent === "seo" ? (
               <SeoBoard
                 projectId={projectId}
@@ -476,6 +524,7 @@ export function LivePage() {
                 data={geoData}
               />
             )}
+            </PanelActionsContext.Provider>
           </>
         )}
       </div>
@@ -492,6 +541,7 @@ export function LivePage() {
         (fs || focusMode) && "fixed inset-0 z-50 overflow-x-hidden overflow-y-auto p-4 sm:p-6",
       )}
     >
+      <RunActionsProvider projectId={projectId} onStarted={onRunStarted} onReload={onToolDone}>
       <style>{LIVE_CSS}</style>
       {(fs || focusMode) && demo && <DemoBanner />}
       <LiveHeader
@@ -504,8 +554,14 @@ export function LivePage() {
         onFullscreen={toggleFullscreen}
         labels={labels}
         replaying={replaying}
+        runAll={<RunAllMenu actions={allActions} />}
         extra={
           <>
+            {activity?.run.scope && (
+              <p data-testid="run-scope" className="text-xs">
+                <span className="rounded bg-sky-50 px-1.5 py-0.5 font-medium text-sky-900 dark:bg-sky-950 dark:text-sky-200">{scopeLabel(activity.run.scope, engineName)}</span>
+              </p>
+            )}
             {mode === "finished" && (
               <div className="flex flex-wrap items-center gap-2 text-xs">
                 <span className="font-medium">Run finished. Panels keep the stored rows.</span>
@@ -534,6 +590,7 @@ export function LivePage() {
         {announce}
       </p>
       {body}
+      </RunActionsProvider>
     </div>
   );
 }

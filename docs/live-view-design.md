@@ -912,3 +912,51 @@ Legend:
 - [ ] Reduced motion: no slides, tweens or shimmer loops; content still updates.
 - [ ] Polling is at most 1 heartbeat plus 1 feed request per 2 s while active, and none while the tab is
       hidden.
+
+## 16. Section run controls (amendment 2026-10-03)
+
+Owner request: "In the Live tab add a separate button for each section to run that section, and one common
+button to run all." Code: `src/web/pages/live/run-actions.ts` (pure mapping, tested), `RunActions.tsx`
+(button, dialog, menu); server: partial runs (`docs/api.md` "Partial (section) runs").
+
+**Panel → action** (no entry = no button; nothing is faked):
+
+| Mode | Panel | Button | What it calls |
+|---|---|---|---|
+| SEO | 01 Pages being read | ▶ Run crawl | partial SEO run `steps: ["crawl"]` |
+| SEO | 02 Search Console | ▶ Run Search Console sync | partial SEO run `["gsc_sync"]` |
+| SEO | 03 Queries classified by Jev | ▶ Classify queries | `POST /seo/buyer-queries` (existing tool; not an agent run) |
+| SEO | 04 Every SEO element judged | ▶ Run judging | partial SEO run `["recommend"]` (uses the latest stored crawl + sync) |
+| SEO | 05 Competitor pages worth adapting | ↗ Review pages to approve | link to the AI engines board approval flow (needs approval per URL; never fetches) |
+| SEO | 06 Answer coverage / 07 AI answers | ▶ Ask AI engines | partial GEO run `["batch"]` |
+| SEO | 08 Internal links judged | ▶ Run link analysis | `POST /seo/internal-links/run` (existing tool, 3 per hour) |
+| SEO | 09 Recommendations drafted | ▶ Run drafting | partial SEO run `["recommend"]` |
+| GEO | each engine column | ▶ Ask <engine> | partial GEO run `["batch"]`, `engines: [<provider>]` |
+| GEO | 01 Prompt × engine, 04 Coverage | ▶ Ask all engines | partial GEO run `["batch"]` |
+| GEO | 05 Proposals | ▶ Run proposals | partial GEO run `["proposals"]` (uses stored answers) |
+| GEO | 02 Inside the latest answer, 03 Cited instead | none | views of stored answers |
+
+**Header:** "▶ Run all ▾" next to full screen: "Run SEO agent (all steps)", "Run GEO agent (all steps)",
+"Run both" (two manual runs).
+
+**Disabled states** (the button stays focusable with `aria-disabled`, the reason as tooltip and screen-reader
+description): demo project ("Demo project: runs are disabled"); the agent has a pending/running run (label
+"Running…"); today's manual runs (UTC, from the run list) would exceed 3; missing setup known on the client
+(site not verified, no Search Console property, no ready engine / that engine's board `stateDetail`, the
+tool's own `setup_required` label). Anything the client cannot know (no stored crawl yet) comes back from the
+server (409/412/429) and is shown in the dialog.
+
+**Confirm:** every action that starts work opens one dialog (focus on Cancel, Tab trapped, Escape closes)
+saying what it calls and what it uses, e.g. "Partial GEO run: ask 4 prompts × Gemini, then analyse each stored
+answer." / "Calls the engine APIs and uses your daily GEO budget" / "Uses 1 manual run of the 3 per project per
+UTC day (2 left today)". The prompt count is the shown GEO run's planned prompts; when unknown it says "your
+approved prompts (up to the per-run cap)".
+
+**After start:** the view switches to the new run (`?run=<id>`), i.e. LIVE mode while it is pending/running;
+tool calls reload their panel's data. A partial run shows "Partial run: crawl only" under the header (also in
+Runs, Run detail and the Activity window). An engine-limited GEO run shows only its lanes.
+
+Layout: the button sits in the panel header (wraps under the title at phone width); the menu is
+`min(18rem, 100vw - 2rem)` wide; colours use the zinc/sky tokens with `dark:` variants like the rest of the
+view. Keyboard: the menu button opens with Enter/Space/ArrowDown; arrows/Home/End move; Escape or Tab closes
+and returns focus; the view's shortcuts (F, Space, arrows) are ignored inside the dialog and menu.

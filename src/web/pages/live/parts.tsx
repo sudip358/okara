@@ -3,6 +3,7 @@
  * engine letter badges and the lane gauge. Light and dark use existing zinc / accent tokens only; status
  * always pairs colour with a word. Untrusted text is passed in as plain strings.
  */
+import { PanelAction } from "./RunActions";
 import { useId, type ReactNode } from "react";
 import type { FactorStatus, LiveSeoVerdict, Ratio } from "@shared/types";
 import { cx } from "@web/components/ui";
@@ -121,6 +122,7 @@ export function Panel({
           </h2>
           {subtitle && <p className="mt-1 line-clamp-2 text-xs text-zinc-600 dark:text-zinc-400">{subtitle}</p>}
         </div>
+        <PanelAction panelKey={testId} />
         {counter && (
           <div className="ml-auto max-w-full shrink-0 text-right">
             <p className="flex items-baseline justify-end gap-1.5">

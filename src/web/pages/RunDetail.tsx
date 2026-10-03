@@ -1,4 +1,6 @@
 /** Run detail: events timeline, decision log [A3] with feedback [A18], cancel. OWNED BY: web-shell. */
+import { scopeLabel } from "@shared/run-scope";
+import { engineName } from "@web/pages/geo/board/lib";
 import { Link, useParams } from "react-router";
 import type { RunDetail, RunEvent } from "@shared/types";
 import { api } from "@web/lib/api";
@@ -78,6 +80,7 @@ export function RunDetailPage() {
         <Card title="Details" className="lg:col-span-1">
           <dl className="space-y-1">
             <Definition term="Trigger">{humanize(r.trigger)}</Definition>
+            <Definition term="Steps">{r.scope ? scopeLabel(r.scope, engineName) : "All steps"}</Definition>
             <Definition term="Created">{formatDateTime(r.createdAt)}</Definition>
             <Definition term="Started">{formatDateTime(r.startedAt)}</Definition>
             <Definition term="Finished">{formatDateTime(r.finishedAt)}</Definition>

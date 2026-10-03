@@ -1,4 +1,6 @@
 /** Run history table. OWNED BY: web-shell. */
+import { scopeLabel } from "@shared/run-scope";
+import { engineName } from "@web/pages/geo/board/lib";
 import { useState } from "react";
 import { Link } from "react-router";
 import type { AgentKind, RunSummary } from "@shared/types";
@@ -77,6 +79,7 @@ export function RunHistoryPage() {
                       {agentLabel(r.agent)} run
                     </Link>
                     <div className="font-mono text-xs text-zinc-500 dark:text-zinc-400">{r.id.slice(0, 12)}</div>
+                    {r.scope && <div className="text-xs font-medium text-sky-800 dark:text-sky-300">{scopeLabel(r.scope, engineName)}</div>}
                   </TD>
                   <TD>
                     <StatusBadge status={r.status} />

@@ -1,5 +1,5 @@
 /**
- * Live view section actions (docs/live-view-design.md section 12): which panel gets which "Run" button, its
+ * Live view section actions (docs/live-view-design.md section 16): which panel gets which "Run" button, its
  * label, its confirm text and why it is disabled. Pure (no React, no I/O) so the mapping is unit-tested.
  *
  * Kinds:

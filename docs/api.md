@@ -74,7 +74,7 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | GET | /projects/:pid/attention | runtime | `AttentionFeed` |
 | GET | /projects/:pid/runs | runtime | `RunSummary[]` |
 | GET | /runs/:id | runtime | `RunDetail` |
-| POST | /projects/:pid/runs | runtime | body `{agent}`; manual run (quota-limited) → `RunSummary` |
+| POST | /projects/:pid/runs | runtime | body `{agent, steps?, engines?}`; manual run, all steps or a partial ("section") run (quota-limited; see "Partial (section) runs") → `RunSummary` |
 | POST | /runs/:id/cancel | runtime | `RunSummary` |
 | GET | /projects/:pid/usage | runtime | `UsageSummary` |
 | GET | /projects/:pid/runs/:runId/activity?after=&limit= | runtime | `RunActivity` (live activity window; see "Run activity") |
@@ -566,6 +566,47 @@ lanes can be saved through `PUT /workspaces/:wid/credentials/:provider`. The sha
 `decide.ts` `SELF_ACCOUNTING_PROVIDERS` lists Jev decision providers only; GEO engines are accounted by
 `geo/batch.ts`. Demo seed data has no rows for the new lanes.
 
+## Partial (section) runs
+
+Owner request 2026-10-03 ("a separate button for each section to run that section, and one common button to
+run all"). `POST /projects/:pid/runs` takes optional `steps` and `engines` (unknown keys → 400):
+
+```json
+{ "agent": "seo", "steps": ["crawl"] }
+{ "agent": "geo", "steps": ["batch"], "engines": ["gemini"] }
+```
+
+- **Step ids** (short form; `"seo.crawl"` is also accepted): SEO `crawl`, `gsc_sync`, `recommend` (Jev query
+  relevance, judging and drafting); GEO `batch` (ask the engines and analyse each answer), `proposals`.
+  `validate` and `summary` always run and cannot be listed. Steps run in agent order whatever the request
+  order. Listing every step without `engines` is a plain full run (no scope stored).
+- **engines** (GEO, only with `batch`): built-in engine ids (`gemini`, `perplexity`, `openai_geo`,
+  `anthropic_geo`) or `custom_geo:<id>`; each must be configured for the workspace (`capabilityPresence`),
+  else 412. The run builds only those GEO lanes.
+- **Dependencies use stored data, never re-run predecessors.** `recommend` without `crawl`/`gsc_sync` in the
+  same run needs a stored crawl (`crawl_runs` completed/partial) or a usable Search Console sync, else
+  **409** "Run the crawl first: …". `proposals` without `batch` needs stored API answers from the last 30 days
+  (`PROPOSAL_WINDOW_DAYS`), else **409** "Ask the AI engines first: …".
+- **Setup pre-checks (412 `setup_required`)**: `crawl` without a verified host, `gsc_sync` without a Search
+  Console property, `batch` with no configured engine. Full runs are not pre-checked (their steps report
+  `setup_required` as before).
+- **Quota (decision):** a partial run is one manual run in the same cap, `MANUAL_RUNS_PER_DAY` = 3 per project
+  per UTC day (`src/shared/run-scope.ts`), shared with full manual runs and Ask Okara's `run_agent_now`.
+  Refused requests (400/409/412, or 409 because the agent is locked) use no quota. Scheduled runs are never
+  counted and never carry a scope (all steps).
+- **Locks:** unchanged, one run per project + agent; a partial run holds the agent's lock like a full run
+  (a second SEO section while one runs → 409 "already in progress"; the SEO and GEO agents run in parallel).
+- **Idempotency:** the key includes the scope (`<pid>:<agent>:manual:<steps>[@<engines>]:<minute>`), so a
+  double submit of the same section returns the same run (200).
+- **Budgets:** unchanged; every provider call still reserves the project's and operator's daily caps.
+- **Storage and display:** `agent_runs.scope_json` (migration `0016_run_scope.sql`; NULL = all steps),
+  `{steps, engines}`. `RunSummary.scope` and `RunActivity.run.scope` return it (null for full runs); the
+  `<agent>.run started` event says e.g. "Partial run: crawl only". Runs, Run detail, the Activity window and
+  the Live view show that label (`scopeLabel`). An activity of a run limited to some engines lists only those
+  lanes.
+- Ask Okara's `run_agent_now` takes optional `steps` (no `engines`), with the same validation and pre-checks
+  in its confirmation step.
+
 ## Run activity (live activity window; types in `src/shared/types.ts`)
 
 Read-only views over the stored rows of ONE run, so the UI can show an agent working in real time and replay
@@ -930,6 +971,28 @@ characters); action (confirmation required) - `run_agent_now` (same quota/lock r
 checked against the project) and `export_csv` (up to 500 rows returned to the UI as a step `download`; the
 model receives only the count and columns; the CSV is built client-side with formula cells neutralised). No tool
 fetches a URL the model chooses.
+
+**Search Console and DataForSEO tools (amends docs/build-kit.md [A27], 2026-10-03; code
+`src/worker/chat/tools-gsc.ts`, `src/worker/chat/tools-dataforseo.ts`).** Every result names its source and
+window: Search Console results carry `dataSource` "Google Search Console (first-party, measured), stored sync of
+<date> (API|CSV import)" or "..., live API call"; DataForSEO results carry "DataForSEO Labs (third-party estimate,
+not measured)" plus fetched date, location and the DataForSEO-reported cost.
+
+| Tool | Kind | Data source | Notes |
+|---|---|---|---|
+| `search_console_queries` | read | stored sync | unchanged arguments; now returns `dataSource` |
+| `search_console_pages` | read | stored sync | same as `search_console_queries` with `dimension=page` (page slice when stored) |
+| `search_console_trend` | read | stored sync (`gsc_daily`, `totals_json`) | daily clicks/impressions/CTR of the current window (finalized days only) + Google's property totals (incl. average position) for both windows; daily position is not stored |
+| `search_console_compare` | read | stored sync | per query or page, current vs previous 28 days: `lost` (prev > 0, now 0), `declined`, `gained` (prev 0), `improved`, each with count, total change and top rows (<= 25); optional `segment` brand / non_brand (queries), `contains`, `metric` clicks / impressions |
+| `search_console_brand_split` | read | stored sync | brand vs non-brand per window (brand.ts matcher), top brand / non-brand queries; `setup_required` without brand terms |
+| `search_console_buyer_queries` | read | stored sync | `jevClassified`: the SEO buyer-query view from cached Jev decisions only (never calls Jev); `modifierMatches`: deterministic commercial-modifier list (`strong-intent-en-2026-09-30.1`, English only), brand excluded unless `includeBrand` |
+| `search_console_live_query` | read (live, free) | Search Console API `searchanalytics.query` | the project's stored `gsc_property` only (the model cannot name a property); `startDate`/`endDate` within the last 16 months, not in the future; up to 3 dimensions of query / page / country / device / date; up to 5 AND filters (query / page / country / device; equals, notEquals, contains, notContains, includingRegex, excludingRegex); `searchType` web / image / video / news; `dataState` final / all; `rowLimit` <= 1,000 (default 100), `startRow` 0. Rate limits: 10 per user per 10 minutes, 100 per project per UTC day. No connection, no property or `invalid_grant` -> `{state: "setup_required", path: <Integrations>}`; demo projects -> `{state: "demo"}`; 429 -> "wait about 15 minutes". Each call is recorded in `provider_calls` (provider `google_search_console`, purpose `chat_gsc_live`, cost 0 actual: the API is not billed). The step result starts "Called Search Console API (live)". |
+| `dataforseo_competitor_data` | read | stored `competitor_snapshots` | one tracked domain (`section` overview / top_keywords / keyword_gap / top_pages / all, `limit` <= 50) or all tracked domains (overview + latest refresh); untracked domain -> error naming the tracked ones; no credentials -> the panel's `setup_required` message |
+| `dataforseo_refresh_competitor` | action (paid) | DataForSEO Labs (3 Live tasks) | workspace owner; tracked domain; credentials required (else `setup_required: ... Integrations → DataForSEO`); the card says "About $0.06 at most, billed by DataForSEO; daily caps apply (2 per domain, 10 per project per UTC day)"; executes the same queue path as `POST /projects/:pid/competitors/dataforseo/refresh` (shares its `dfs_refresh` rate limit) |
+| `dataforseo_keyword_lookup` | action (paid) | DataForSEO Labs Keyword Overview (live) | workspace owner; 1-100 keywords (<= 80 characters, <= 10 words, deduplicated case-insensitively); location = the project's competitor-data location (or the locale mapped through the free locations list); the card shows the ceiling `$0.012 + $0.00012 x keywords`; on confirm: one call, `provider_calls` with the returned cost (actual), `provider_calls` + `usd_micros` reserved first via `budgetForKeySource` and settled to the returned cost (unknown outcome keeps the ceiling); 10 lookups per user per 10 minutes. Results are returned to the chat only (not stored). |
+
+Paid tools never run from a model call alone: the confirmation gate below applies, and keywords, URLs and
+domains returned by Search Console or DataForSEO are untrusted data.
 
 **Confirmation gate (server-enforced).** The loop never executes an action: it validates it (`prepare`), stores
 a `chat_actions` row `pending`, marks the step `awaiting_confirmation`, saves the paused transcript on the

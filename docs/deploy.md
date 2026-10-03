@@ -88,6 +88,9 @@ need more than 10 ms of CPU per step, so agent runs will fail on the free plan. 
      - **No new redirect URI**: the Sheets consent reuses `<APP_ORIGIN>/api/gsc/callback` (the callback dispatches
        on the stored state's purpose). Nothing else to register.
      - Apply migration `0015_sheet_imports.sql` (`npm run db:migrate:remote`) before using the Import page.
+   - **Partial (section) runs** (Live view "▶ Run …" buttons): apply migration `0016_run_scope.sql`
+     (`npm run db:migrate:remote`; adds `agent_runs.scope_json`). Until it is applied, full runs keep working and
+     a partial run request fails.
 
 3. **Secrets and vars**
    Secrets are never committed; set each with `npx wrangler secret put <NAME>`:

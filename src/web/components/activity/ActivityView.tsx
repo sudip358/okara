@@ -3,6 +3,7 @@
  * the run). Untrusted text (prompts, titles, URLs) is rendered as plain text children. No rates, no
  * projections, no aggregated score. OWNED BY: web-activity.
  */
+import { scopeLabel } from "@shared/run-scope";
 import type { ReactNode } from "react";
 import type {
   ActivityItem,
@@ -14,7 +15,7 @@ import { Link } from "react-router";
 import { projectPath } from "@web/lib/project-context";
 import { agentLabel } from "@web/lib/format";
 import { cx } from "@web/components/ui";
-import { CUSTOM_ENGINE_NOTE, apiSampledTipFor, isCustomEngine, lanesApiSampledTip } from "@web/pages/geo/board/lib";
+import { CUSTOM_ENGINE_NOTE, apiSampledTipFor, engineName, isCustomEngine, lanesApiSampledTip } from "@web/pages/geo/board/lib";
 import {
   LABELS,
   LANE_STATE,
@@ -210,6 +211,11 @@ export function RunHeader({
             <Chip tone="neutral" dot={false}>
               {triggerLabel(run.trigger)}
             </Chip>
+            {run.scope && (
+              <Chip tone="neutral" dot={false}>
+                {scopeLabel(run.scope, engineName)}
+              </Chip>
+            )}
             {replay && (
               <Chip tone="neutral" dot={false}>
                 {LABELS.replay}
