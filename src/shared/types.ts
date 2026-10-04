@@ -202,8 +202,14 @@ export interface ProviderModelList {
 export type WriterSource = "default" | `custom:${string}`;
 
 /** A workspace custom provider as the API returns it. The API key is never included (only its last 4 characters). */
-/** writer: a custom writer (0010); geo: a custom GEO engine lane (0011; citation rate only for answers with provider-reported sources, else mention rate only). */
-export type CustomProviderRole = "writer" | "geo";
+/** writer: a custom writer (0010); geo: a custom GEO engine lane (0011; citation rate only for answers with provider-reported sources, else mention rate only); chat: Ask Okara's own chat model (0019, [A36]). */
+export type CustomProviderRole = "writer" | "geo" | "chat";
+
+/**
+ * Which model Ask Okara uses [A36]: "writer" (default; the workspace writer, exactly as before) or "custom:<id>" (a
+ * custom provider with role "chat"). PUT /workspaces/:wid/chat-model-source.
+ */
+export type ChatModelSource = "writer" | `custom:${string}`;
 
 export interface CustomProviderStatus {
   id: string;
@@ -218,6 +224,8 @@ export interface CustomProviderStatus {
   keyHint: string;
   /** True when this provider is the workspace's writer. */
   isWriter: boolean;
+  /** True when this provider (role "chat") is Ask Okara's selected chat model. Absent before migration 0019. */
+  isChat?: boolean;
   lastTestedAt: string | null;
   lastTestOk: boolean | null;
   lastTestDetail: string | null;
@@ -237,6 +245,12 @@ export interface CustomProvidersResponse {
   maxGeoEngines?: number;
   /** Disclosure: what data a custom GEO engine receives. */
   geoDataSent?: string;
+  /** [A36] Ask Okara's model source: "writer" (default) or "custom:<id>" of a role "chat" provider. */
+  chatSource?: ChatModelSource;
+  /** Most Ask Okara chat providers (role "chat") per workspace. */
+  maxChatProviders?: number;
+  /** Disclosure: what data a custom chat provider receives. */
+  chatDataSent?: string;
 }
 
 /** POST /workspaces/:wid/custom-providers/models. `models` are untrusted ids (plain text). */
@@ -253,9 +267,11 @@ export interface CustomProviderInput {
   baseUrl: string;
   model: string;
   apiKey: string;
-  /** Select it as the workspace writer (default true; ignored for role "geo"). */
+  /** Select it as the workspace writer (default true; role "writer" only). */
   useAsWriter?: boolean;
-  /** "geo" adds a custom GEO engine lane instead of a writer (default "writer"). */
+  /** Select it as Ask Okara's chat model (default true; role "chat" only). */
+  useAsChat?: boolean;
+  /** "geo" adds a custom GEO engine lane, "chat" an Ask Okara chat model, instead of a writer (default "writer"). */
   role?: CustomProviderRole;
 }
 
@@ -1625,8 +1641,10 @@ export interface ChatSessionDetail extends ChatSessionSummary {
 
 export interface ChatStatus {
   state: "ready" | "setup_required";
-  /** The configured chat model (the workspace writer); never a default id. */
+  /** The configured chat model (the workspace writer, or the chat model chosen for Ask Okara [A36]); never a default id. */
   model: { provider: string; model: string } | null;
+  /** [A36] "writer": Ask Okara uses the workspace writer; "custom": its own chat model (Integrations → Ask Okara chat model). */
+  source?: "writer" | "custom";
   message: string | null;
   limits: { maxMessageChars: number; maxToolRounds: number; sessionsKept: number };
 }

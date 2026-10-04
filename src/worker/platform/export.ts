@@ -9,7 +9,7 @@
  */
 import type { Db, Row } from "../lib/db";
 import { iso } from "../lib/time";
-import { isMissingRoleColumnError, isMissingTableError } from "./custom-providers";
+import { isMissingChatColumnError, isMissingRoleColumnError, isMissingTableError } from "./custom-providers";
 
 export const EXPORT_FORMAT = "okara-project-export";
 export const EXPORT_VERSION = 1;
@@ -101,15 +101,25 @@ export async function exportProject(db: Db, workspaceId: string, projectId: stri
   tables.oauth_connections = integrations;
   // Workspace-level custom providers: configuration only; key_enc and key_hint are never selected.
   // role (0011) says whether a row is a writer or a custom GEO engine.
-  const customCols = (withRole: boolean) =>
-    `SELECT id, ${withRole ? "role" : "'writer' AS role"}, label, base_url, host, model, is_writer, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at
+  // is_chat (0019, [A36]) marks Ask Okara's selected chat model (role 'chat').
+  const customCols = (withRole: boolean, withChat: boolean) =>
+    `SELECT id, ${withRole ? "role" : "'writer' AS role"}, label, base_url, host, model, is_writer, ${withChat ? "is_chat" : "0 AS is_chat"}, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at
        FROM workspace_custom_providers WHERE workspace_id = ? ORDER BY created_at, id`;
   try {
     try {
-      tables.workspace_custom_providers = await db.all(customCols(true), workspaceId);
+      tables.workspace_custom_providers = await db.all(customCols(true, true), workspaceId);
     } catch (e) {
-      if (!isMissingRoleColumnError(e)) throw e;
-      tables.workspace_custom_providers = await db.all(customCols(false), workspaceId);
+      if (isMissingChatColumnError(e)) {
+        try {
+          tables.workspace_custom_providers = await db.all(customCols(true, false), workspaceId);
+        } catch (e2) {
+          if (!isMissingRoleColumnError(e2)) throw e2;
+          tables.workspace_custom_providers = await db.all(customCols(false, false), workspaceId);
+        }
+      } else {
+        if (!isMissingRoleColumnError(e)) throw e;
+        tables.workspace_custom_providers = await db.all(customCols(false, false), workspaceId);
+      }
     }
   } catch (e) {
     if (!isMissingTableError(e)) throw e;

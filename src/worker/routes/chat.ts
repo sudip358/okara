@@ -108,6 +108,7 @@ chatRoutes.get("/projects/:pid/chat/status", async (c) => {
     state: s.ready ? "ready" : "setup_required",
     model: s.provider && s.model ? { provider: s.provider, model: s.model } : null,
     message: s.ready ? null : s.message,
+    source: s.source,
     limits: { maxMessageChars: CHAT_MAX_MESSAGE_CHARS, maxToolRounds: CHAT_MAX_TOOL_ROUNDS, sessionsKept: CHAT_SESSIONS_KEPT },
   };
   return c.json({ data });

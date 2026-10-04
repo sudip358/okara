@@ -787,6 +787,7 @@ describe("migration 0010 and export", () => {
       "created_at",
       "updated_at",
       "role", // migration 0011 (custom GEO engines); existing rows default to 'writer'
+      "is_chat", // migration 0019 (Ask Okara chat model, [A36]); existing rows 0
     ]);
     const row = (id: string, isWriter: number) => ({
       id,

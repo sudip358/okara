@@ -29,6 +29,8 @@ export interface OpenAiChatConfig extends WriterHooks {
   maxRetries?: number;
   /** Response body cap per attempt (custom providers). */
   maxResponseBytes?: number;
+  /** Where the owner picks another model (error text); default the writer card. */
+  changeModelHint?: string;
 }
 
 type RawToolCall = { id?: unknown; type?: unknown; function?: { name?: unknown; arguments?: unknown } };
@@ -256,7 +258,7 @@ export function createOpenAiChatModel(cfg: OpenAiChatConfig): ChatModel {
   function finish(a: Attempt): RoundResult {
     if (a.ok) return a.result;
     throw new ChatModelError(
-      `${cfg.model} answered with neither text nor a tool call (${a.empty})${a.text ? ", also when the tools were described in the prompt" : ""}. Pick another model under Integrations → Writer → Change model.`,
+      `${cfg.model} answered with neither text nor a tool call (${a.empty})${a.text ? ", also when the tools were described in the prompt" : ""}. Pick another model under ${cfg.changeModelHint ?? "Integrations → Writer → Change model"}.`,
       "invalid_response",
     );
   }

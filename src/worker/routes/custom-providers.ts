@@ -17,14 +17,18 @@
  *   POST   /workspaces/:wid/custom-providers/:id/test     member -> {ok, detail, modelListed}; GET {base}/models with the saved key,
  *                                                                   result recorded (modelListed: is the saved model in the list)
  *   POST   /workspaces/:wid/custom-providers/models       owner  -> body {baseUrl, apiKey} | {providerId}; CustomProviderModelList
- *   PUT    /workspaces/:wid/writer-source                 owner  -> body {source: "default" | "custom:<id>"}
+ *   PUT    /workspaces/:wid/writer-source                 owner  -> body {source: "default" | "custom:<id>"} (role "writer" rows only)
+ *   PUT    /workspaces/:wid/chat-model-source             owner  -> body {source: "writer" | "custom:<id>"} [A36]: Ask Okara's model;
+ *                                                                   "writer" (default) = the workspace writer as before;
+ *                                                                   custom = a role "chat" provider (POST role "chat",
+ *                                                                   max 3, selected unless useAsChat is false)
  * Outbound requests: only the validated provider host is admitted to the guarded API fetch, 10 s timeout,
  * redirects never followed, provider bodies never echoed (only parsed model ids). Keys are decrypted only
  * server-side and never returned or logged.
  */
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import type { CustomProviderChange, CustomProviderModelList, CustomProviderRole, CustomProvidersResponse, WriterSource } from "@shared/types";
+import type { ChatModelSource, CustomProviderChange, CustomProviderModelList, CustomProviderRole, CustomProvidersResponse, WriterSource } from "@shared/types";
 import type { AppEnv } from "../app";
 import type { Env } from "../env";
 import type { Db } from "../lib/db";
@@ -34,7 +38,10 @@ import { newId } from "../lib/ids";
 import { iso } from "../lib/time";
 import { requireWorkspaceMember, requireWorkspaceOwner, type SessionUser } from "../platform/access";
 import {
+  MAX_CUSTOM_CHAT_PROVIDERS,
   MAX_CUSTOM_GEO_ENGINES,
+  isMissingChatColumnError,
+  isPreChatSchemaError,
   MAX_CUSTOM_PROVIDERS,
   isMissingRoleColumnError,
   withRoleColumns,
@@ -62,6 +69,10 @@ export const CUSTOM_WRITER_DATA_SENT = `${DATA_SENT.writer} It goes only to the 
 export const CUSTOM_GEO_DATA_SENT =
   "Your approved GEO prompt text and locale/language only, as an OpenAI-compatible Chat Completions request with no tools, to the custom provider's base URL (host shown on the card). No site content, Search Console data, context documents, or credentials.";
 
+export const CUSTOM_CHAT_DATA_SENT =
+  "Your Ask Okara conversation (your messages and the results of the tools it runs on this project's stored data, such as Search Console, crawl, recommendation and GEO results) plus the tool definitions, as an OpenAI-compatible Chat Completions request with function tools, only to the custom provider's base URL (host shown on the card). Never API keys or credentials.";
+
+const CHAT_MIGRATION_PENDING = "Ask Okara chat models need database migration 0019_custom_provider_chat_role.sql to be applied.";
 const MIGRATION_PENDING = "Custom providers need database migration 0010_workspace_custom_providers.sql to be applied.";
 const GEO_MIGRATION_PENDING = "Custom GEO engines need database migration 0011_workspace_models_custom_geo.sql to be applied.";
 
@@ -133,7 +144,8 @@ function parseLabel(raw: unknown, fallback: string): string {
 async function responseFor(db: Db, workspaceId: string, canManage: boolean): Promise<CustomProvidersResponse> {
   const rows = await tableGuard(() => listCustomProviders(db, workspaceId));
   const changes = rows.length > 0 ? await listCustomProviderChanges(db, workspaceId) : new Map<string, CustomProviderChange[]>();
-  const writer = rows.find((r) => r.is_writer === 1);
+  const writer = rows.find((r) => r.is_writer === 1 && r.role !== "chat" && r.role !== "geo");
+  const chat = rows.find((r) => r.is_chat === 1 && r.role === "chat");
   return {
     providers: rows.map((r) => toCustomProviderStatus(r, changes.get(r.id) ?? [])),
     writerSource: writer ? `custom:${writer.id}` : "default",
@@ -142,6 +154,9 @@ async function responseFor(db: Db, workspaceId: string, canManage: boolean): Pro
     dataSent: CUSTOM_WRITER_DATA_SENT,
     maxGeoEngines: MAX_CUSTOM_GEO_ENGINES,
     geoDataSent: CUSTOM_GEO_DATA_SENT,
+    chatSource: chat ? `custom:${chat.id}` : "writer",
+    maxChatProviders: MAX_CUSTOM_CHAT_PROVIDERS,
+    chatDataSent: CUSTOM_CHAT_DATA_SENT,
   };
 }
 
@@ -167,6 +182,24 @@ async function selectWriter(db: Db, workspaceId: string, id: string | null, now:
   ];
   if (id) stmts.push(["UPDATE workspace_custom_providers SET is_writer = 1, updated_at = ? WHERE workspace_id = ? AND id = ?", now, workspaceId, id]);
   await db.batch(stmts);
+}
+
+/**
+ * Select `id` (a role 'chat' row) as Ask Okara's chat model, or none (null: the workspace writer). One batch: the
+ * partial unique index allows one chat model. Before migration 0019 there are no chat rows, so "none" is a no-op.
+ */
+async function selectChat(db: Db, workspaceId: string, id: string | null, now: string) {
+  const stmts: Array<[string, ...unknown[]]> = [
+    ["UPDATE workspace_custom_providers SET is_chat = 0, updated_at = ? WHERE workspace_id = ? AND is_chat = 1", now, workspaceId],
+  ];
+  if (id) stmts.push(["UPDATE workspace_custom_providers SET is_chat = 1, updated_at = ? WHERE workspace_id = ? AND id = ? AND role = 'chat'", now, workspaceId, id]);
+  try {
+    await db.batch(stmts);
+  } catch (e) {
+    if (!id && isMissingChatColumnError(e)) return;
+    if (isMissingChatColumnError(e)) throw setupRequired(CHAT_MIGRATION_PENDING);
+    throw e;
+  }
 }
 
 /** Decrypt a saved key; null when it cannot be decrypted (e.g. the encryption key was rotated away). */
@@ -235,20 +268,22 @@ customProviderRoutes.post(
     const db = c.get("db");
     await requireWorkspaceOwner(db, user.id, wid);
     const body = objectBody(await jsonBody(c));
-    onlyKeys(body, ["label", "baseUrl", "model", "apiKey", "useAsWriter", "role"]);
-    if (body.role !== undefined && body.role !== "writer" && body.role !== "geo") throw fieldError("role", "invalid", 'role must be "writer" or "geo".');
-    const role: CustomProviderRole = body.role === "geo" ? "geo" : "writer";
+    onlyKeys(body, ["label", "baseUrl", "model", "apiKey", "useAsWriter", "useAsChat", "role"]);
+    if (body.role !== undefined && body.role !== "writer" && body.role !== "geo" && body.role !== "chat") throw fieldError("role", "invalid", 'role must be "writer", "geo" or "chat".');
+    const role: CustomProviderRole = body.role === "geo" ? "geo" : body.role === "chat" ? "chat" : "writer";
     const { baseUrl, host } = parseBaseUrl(c.env, body.baseUrl);
     const apiKey = parseKey(body.apiKey);
     const model = parseModel(body.model);
     const label = parseLabel(body.label, host);
     if (body.useAsWriter !== undefined && typeof body.useAsWriter !== "boolean") throw fieldError("useAsWriter", "invalid", "useAsWriter must be true or false.");
+    if (body.useAsChat !== undefined && typeof body.useAsChat !== "boolean") throw fieldError("useAsChat", "invalid", "useAsChat must be true or false.");
+    if (body.useAsChat !== undefined && role !== "chat") throw fieldError("useAsChat", "invalid", 'useAsChat applies to role "chat" only.');
     if (!encryptionConfigured(c.env)) throw setupRequired("Server-side encryption is not configured (TOKEN_ENCRYPTION_KEY_V1).");
 
     const id = newId("cprov");
     const now = iso(c.get("now"));
     const keyEnc = await encryptSecret(c.env, apiKey, customProviderAad(wid, id));
-    const cap = role === "geo" ? MAX_CUSTOM_GEO_ENGINES : MAX_CUSTOM_PROVIDERS;
+    const cap = role === "geo" ? MAX_CUSTOM_GEO_ENGINES : role === "chat" ? MAX_CUSTOM_CHAT_PROVIDERS : MAX_CUSTOM_PROVIDERS;
     // One statement checks the per-workspace, per-role cap and inserts, so concurrent saves cannot exceed it.
     const values = [id, wid, label, baseUrl, host, model, keyEnc, apiKey.slice(-4), now, now, wid, cap];
     let r: { changes: number };
@@ -262,6 +297,8 @@ customProviderRoutes.post(
         ),
       );
     } catch (e) {
+      // Before migration 0019 the role CHECK refuses 'chat'.
+      if (role === "chat" && (isPreChatSchemaError(e) || isMissingRoleColumnError(e))) throw setupRequired(CHAT_MIGRATION_PENDING);
       if (!isMissingRoleColumnError(e)) throw e;
       // Before migration 0011 every row is a writer; GEO engines need the role column.
       if (role === "geo") throw setupRequired(GEO_MIGRATION_PENDING);
@@ -276,10 +313,13 @@ customProviderRoutes.post(
       throw conflict(
         role === "geo"
           ? `A workspace can have at most ${MAX_CUSTOM_GEO_ENGINES} custom GEO engines; remove one first.`
-          : `A workspace can have at most ${MAX_CUSTOM_PROVIDERS} custom providers; remove one first.`,
+          : role === "chat"
+            ? `A workspace can have at most ${MAX_CUSTOM_CHAT_PROVIDERS} Ask Okara chat models; remove one first.`
+            : `A workspace can have at most ${MAX_CUSTOM_PROVIDERS} custom providers; remove one first.`,
       );
     }
     if (role === "writer" && body.useAsWriter !== false) await selectWriter(db, wid, id, now);
+    if (role === "chat" && body.useAsChat !== false) await selectChat(db, wid, id, now);
     return c.json({ data: await responseFor(db, wid, true) }, 201);
   },
 );
@@ -429,7 +469,7 @@ customProviderRoutes.post(
       result =
         key === null
           ? { ok: false, detail: "Saved key could not be decrypted; please re-enter it.", modelListed: null }
-          : await testCustomProvider(providerFetch(c.env, check.host), check.baseUrl, key, row.model, row.role === "geo" ? "the first GEO run" : "the first draft");
+          : await testCustomProvider(providerFetch(c.env, check.host), check.baseUrl, key, row.model, row.role === "geo" ? "the first GEO run" : row.role === "chat" ? "the first Ask Okara message" : "the first draft");
     }
     const now = iso(c.get("now"));
     await db.run(
@@ -465,9 +505,41 @@ customProviderRoutes.put(
       const row = await loadRow(db, wid, source.slice("custom:".length));
       // A custom GEO engine is never the writer (its key was entered for answer sampling only).
       if (row.role === "geo") throw fieldError("source", "not_writer", "This custom provider is a GEO engine, not a writer; add it as a writer to use it for drafting.");
+      if (row.role === "chat") throw fieldError("source", "not_writer", "This custom provider is an Ask Okara chat model, not a writer; add it as a writer to use it for drafting.");
       await selectWriter(db, wid, row.id, now);
     } else {
       throw fieldError("source", "invalid", 'source must be "default" or "custom:<id>".');
+    }
+    return c.json({ data: await responseFor(db, wid, true) });
+  },
+);
+
+const chatSourceBody = z.object({ source: z.string().max(120) }).strict();
+
+/** [A36] Ask Okara's model: the workspace writer (default) or a role 'chat' custom provider. Owner only. */
+customProviderRoutes.put(
+  "/workspaces/:wid/chat-model-source",
+  rateLimit({ key: userBucket("cprov_write"), limit: 20, windowSeconds: 60 }),
+  async (c) => {
+    const user = userOf(c);
+    const wid = c.req.param("wid");
+    const db = c.get("db");
+    await requireWorkspaceOwner(db, user.id, wid);
+    const parsed = chatSourceBody.safeParse(await jsonBody(c));
+    if (!parsed.success) throw fieldError("source", "invalid", 'source must be "writer" or "custom:<id>".');
+    const source = parsed.data.source as ChatModelSource;
+    const now = iso(c.get("now"));
+    if (source === "writer") {
+      await tableGuard(() => selectChat(db, wid, null, now));
+    } else if (source.startsWith("custom:")) {
+      const row = await loadRow(db, wid, source.slice("custom:".length));
+      // Only a provider added for Ask Okara (its key was entered for chat) is ever the chat model.
+      if (row.role !== "chat") {
+        throw fieldError("source", "not_chat", "This custom provider is not an Ask Okara chat model; add it under Integrations → Ask Okara chat model to use it for the chat.");
+      }
+      await selectChat(db, wid, row.id, now);
+    } else {
+      throw fieldError("source", "invalid", 'source must be "writer" or "custom:<id>".');
     }
     return c.json({ data: await responseFor(db, wid, true) });
   },

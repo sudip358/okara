@@ -2,8 +2,10 @@
  * Workspace custom providers: an OpenAI-compatible endpoint (OpenRouter, Groq, Together, DeepSeek, Mistral,
  * a self-hosted gateway, ...) that the workspace owner adds with a base URL, an API key and a model id, and
  * selects as the workspace's writer (role 'writer'), or adds as a custom GEO engine lane (role 'geo', at most
- * 2; citation rate only for answers with provider-reported sources, else mention rate only; see geo/custom-lanes.ts). Table: workspace_custom_providers (migrations
- * 0010, 0011 adds `role`). A GEO row is never the writer.
+ * 2; citation rate only for answers with provider-reported sources, else mention rate only; see geo/custom-lanes.ts), or adds
+ * as Ask Okara's own chat model (role 'chat', at most 3, one selected with is_chat = 1; [A36], chat/model.ts). Table:
+ * workspace_custom_providers (migrations 0010, 0011 adds `role`, 0019 adds role 'chat' and `is_chat`). A GEO or chat
+ * row is never the writer; only a chat row is ever the chat model.
  *
  * Safety rules (CLAUDE.md, build kit SSRF rules):
  *  - The base URL is validated before it is stored and again before every use: https only, no credentials,
@@ -51,6 +53,19 @@ export const customProviderAad = (workspaceId: string, id: string) => `workspace
 /** True for "no such table" errors (code deployed before migration 0010 was applied). */
 export function isMissingTableError(e: unknown): boolean {
   return /no such table/i.test(String((e as Error)?.message ?? e));
+}
+
+/** True when workspace_custom_providers has no `is_chat` column yet (code deployed before migration 0019). */
+export function isMissingChatColumnError(e: unknown): boolean {
+  return /no such column:?\s*"?is_chat\b|has no column named "?is_chat\b/i.test(String((e as Error)?.message ?? e));
+}
+
+/**
+ * True when a role 'chat' row is refused by the pre-0019 CHECK (role IN ('writer', 'geo')) or the pre-0019 table
+ * has no is_chat column: Ask Okara chat providers need migration 0019.
+ */
+export function isPreChatSchemaError(e: unknown): boolean {
+  return isMissingChatColumnError(e) || /CHECK constraint failed/i.test(String((e as Error)?.message ?? e));
 }
 
 /**
@@ -393,10 +408,12 @@ export async function testCustomProvider(
 
 // ------------------------------------------------------------------ rows
 
-export type CustomProviderRole = "writer" | "geo";
+export type CustomProviderRole = "writer" | "geo" | "chat";
 
 /** Most custom GEO engine lanes (role 'geo') per workspace; counted separately from writer rows. */
 export const MAX_CUSTOM_GEO_ENGINES = 2;
+/** Most Ask Okara chat providers (role 'chat', migration 0019) per workspace; counted separately. */
+export const MAX_CUSTOM_CHAT_PROVIDERS = 3;
 
 export interface CustomProviderRow {
   id: string;
@@ -408,6 +425,8 @@ export interface CustomProviderRow {
   model: string;
   key_hint: string;
   is_writer: number;
+  /** 1 = the workspace's selected Ask Okara chat model (role 'chat' only; 0 before migration 0019). */
+  is_chat: number;
   last_tested_at: string | null;
   last_test_ok: number | null;
   last_test_detail: string | null;
@@ -417,35 +436,47 @@ export interface CustomProviderRow {
 
 /** Columns selected everywhere a row leaves the database without its key. */
 export const CUSTOM_PROVIDER_COLUMNS =
-  "id, workspace_id, role, label, base_url, host, model, key_hint, is_writer, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at";
+  "id, workspace_id, role, label, base_url, host, model, key_hint, is_writer, is_chat, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at";
+/** The same columns before migration 0019 (no chat rows). */
+const PRE_CHAT_COLUMNS =
+  "id, workspace_id, role, label, base_url, host, model, key_hint, is_writer, 0 AS is_chat, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at";
 /** The same columns before migration 0011 (every row was a writer). */
 const LEGACY_COLUMNS =
-  "id, workspace_id, 'writer' AS role, label, base_url, host, model, key_hint, is_writer, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at";
+  "id, workspace_id, 'writer' AS role, label, base_url, host, model, key_hint, is_writer, 0 AS is_chat, last_tested_at, last_test_ok, last_test_detail, created_at, updated_at";
+
+const roleLiteral = (r: CustomProviderRole) => (r === "geo" ? "geo" : r === "chat" ? "chat" : "writer");
 
 /**
- * Run a query that selects provider columns and may filter by role, falling back to the pre-0011 schema (no
- * role column: every row is a writer) so the writer keeps working when code is deployed before the
- * migration. `roleIs(r)` is an SQL condition on the role; `r` is always one of the two fixed literals.
+ * Run a query that selects provider columns and may filter by role, falling back to the pre-0019 schema (no
+ * is_chat column: no chat rows) and then the pre-0011 schema (no role column: every row is a writer) so the
+ * writer keeps working when code is deployed before the migrations. `roleIs(r)` is an SQL condition on the role;
+ * `r` always maps to one of three fixed literals.
  */
 export async function withRoleColumns<T>(fn: (columns: string, roleIs: (r: CustomProviderRole) => string) => Promise<T>): Promise<T> {
   try {
-    return await fn(CUSTOM_PROVIDER_COLUMNS, (r) => `role = '${r === "geo" ? "geo" : "writer"}'`);
+    return await fn(CUSTOM_PROVIDER_COLUMNS, (r) => `role = '${roleLiteral(r)}'`);
+  } catch (e) {
+    if (!isMissingChatColumnError(e) && !isMissingRoleColumnError(e)) throw e;
+  }
+  try {
+    return await fn(PRE_CHAT_COLUMNS, (r) => `role = '${roleLiteral(r)}'`);
   } catch (e) {
     if (!isMissingRoleColumnError(e)) throw e;
-    return fn(LEGACY_COLUMNS, (r) => (r === "geo" ? "0 = 1" : "1 = 1"));
+    return fn(LEGACY_COLUMNS, (r) => (r === "writer" ? "1 = 1" : "0 = 1"));
   }
 }
 
 export function toCustomProviderStatus(row: CustomProviderRow, changes: CustomProviderChange[] = []): CustomProviderStatus {
   return {
     id: row.id,
-    role: row.role === "geo" ? "geo" : "writer",
+    role: row.role === "geo" ? "geo" : row.role === "chat" ? "chat" : "writer",
     label: row.label,
     baseUrl: row.base_url,
     host: row.host,
     model: row.model,
     keyHint: row.key_hint,
     isWriter: row.is_writer === 1,
+    isChat: row.is_chat === 1,
     lastTestedAt: row.last_tested_at,
     lastTestOk: row.last_test_ok === null ? null : row.last_test_ok === 1,
     lastTestDetail: row.last_test_detail,
@@ -559,7 +590,7 @@ export async function listCustomProviderChanges(db: Db, workspaceId: string): Pr
 export async function listCustomProviders(db: Db, workspaceId: string): Promise<CustomProviderRow[]> {
   return withRoleColumns((cols) =>
     db.all<CustomProviderRow>(
-      `SELECT ${cols} FROM workspace_custom_providers WHERE workspace_id = ? ORDER BY created_at, id LIMIT ${(MAX_CUSTOM_PROVIDERS + MAX_CUSTOM_GEO_ENGINES) * 2}`,
+      `SELECT ${cols} FROM workspace_custom_providers WHERE workspace_id = ? ORDER BY created_at, id LIMIT ${(MAX_CUSTOM_PROVIDERS + MAX_CUSTOM_GEO_ENGINES + MAX_CUSTOM_CHAT_PROVIDERS) * 2}`,
       workspaceId,
     ),
   );
@@ -594,6 +625,25 @@ export async function selectedCustomWriter(db: Db, workspaceId: string): Promise
     throw e;
   }
 }
+
+/**
+ * The workspace's selected Ask Okara chat provider (role 'chat', is_chat = 1), without decrypting anything.
+ * null = Ask Okara uses the workspace writer (chat model source "writer"; also before migrations 0010/0019).
+ */
+export async function selectedCustomChat(db: Db, workspaceId: string): Promise<CustomProviderRow | null> {
+  try {
+    return await db.first<CustomProviderRow>(
+      `SELECT ${CUSTOM_PROVIDER_COLUMNS} FROM workspace_custom_providers WHERE workspace_id = ? AND is_chat = 1 AND role = 'chat'`,
+      workspaceId,
+    );
+  } catch (e) {
+    if (isMissingTableError(e) || isMissingChatColumnError(e) || isMissingRoleColumnError(e)) return null;
+    throw e;
+  }
+}
+
+/** "writer" (the default: Ask Okara uses the workspace writer) or "custom:<id>" (a selected role 'chat' row). */
+export type ChatModelSourceValue = "writer" | `custom:${string}`;
 
 export interface ResolvedCustomProvider {
   id: string;
@@ -653,6 +703,17 @@ export async function resolveCustomProviderRow(env: Env, db: Db, workspaceId: st
  */
 export async function resolveCustomWriter(env: Env, db: Db, workspaceId: string): Promise<CustomWriterResolution> {
   const row = await selectedCustomWriter(db, workspaceId);
+  if (!row) return { status: "none" };
+  return (await resolveCustomProviderRow(env, db, workspaceId, row)) ?? { status: "none" };
+}
+
+/**
+ * Ask Okara's selected chat provider (role 'chat') with its decrypted key, re-validated before use. Selected but
+ * unusable -> "unusable": the caller reports setup_required and never falls back to the writer (which could send
+ * the conversation to a different provider than the one the owner picked for chat).
+ */
+export async function resolveCustomChat(env: Env, db: Db, workspaceId: string): Promise<CustomWriterResolution> {
+  const row = await selectedCustomChat(db, workspaceId);
   if (!row) return { status: "none" };
   return (await resolveCustomProviderRow(env, db, workspaceId, row)) ?? { status: "none" };
 }
