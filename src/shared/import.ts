@@ -107,6 +107,38 @@ export interface ImportOptions {
   addCompetitors?: string[];
   /** Record keys (from a dry run) the owner unchecked; never applied, also on later syncs. */
   excludeKeys?: string[];
+  /**
+   * Competitors [A39]: "Fetch DataForSEO data for new competitors". Absent = the default: on when the import adds at
+   * most 10 new domains (the per-project daily cap), off above. Kept for later syncs.
+   */
+  fetchCompetitorData?: boolean;
+  /** Competitors [A39]: likely-typo hosts (e.g. "ww.lumens.com") whose suggested fix the owner accepted in the preview. Kept for later syncs. */
+  acceptDomainFixes?: string[];
+}
+
+/** Competitors [A39]: the DataForSEO cost estimate and fetch decision shown in the dry run. */
+export interface CompetitorFetchPlan {
+  /** Competitor domains this import starts tracking. */
+  newDomains: number;
+  /** Published-price ceiling of one refresh (3 DataForSEO Labs tasks). */
+  perDomainUsd: number;
+  /** newDomains x perDomainUsd. */
+  maxUsd: number;
+  /** Refreshes per project per UTC day (manual + automatic). */
+  perDay: number;
+  /** UTC days needed at the daily cap. */
+  days: number;
+  /** "N new competitor domains → up to N × $0.0624 DataForSEO (≈$X), fetched at most 10 per day" */
+  estimate: string;
+  /** Default of the option: on for <= perDay new domains, off above. */
+  defaultOn: boolean;
+  /** The owner's explicit choice, null = default. */
+  selected: boolean | null;
+  /** True when the import will queue DataForSEO refreshes for the new domains. */
+  willFetch: boolean;
+  /** ready | setup_required (no credentials: nothing fetched) | auto_fetch_off | disabled (demo). */
+  state: "ready" | "setup_required" | "auto_fetch_off" | "disabled";
+  message: string | null;
 }
 
 export type ImportSourceInput =
@@ -144,6 +176,10 @@ export interface ImportPlan {
   itemsTotal: number;
   /** GEO prompts: competitor names found in "(position)" headers, and whether they are tracked already. */
   suggestedCompetitors?: Array<{ name: string; tracked: boolean }>;
+  /** Competitors [A39]: DataForSEO estimate and whether the new domains will be fetched. */
+  competitorFetch?: CompetitorFetchPlan;
+  /** Competitors [A39]: likely typos ("ww." / "wwww."), each with the suggested domain; applied only when accepted. */
+  domainFixes?: Array<{ key: string; from: string; to: string; row: number | null; accepted: boolean }>;
 }
 
 export interface ImportRecordSummary {

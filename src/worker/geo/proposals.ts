@@ -109,7 +109,10 @@ export interface GeoCandidate {
   target: RecommendationDraft["target"];
   entity: { name: string; url: string | null; sourceType: SourceType } | null;
   prompts: string[];
+  /** Recommended competitors named in the text (most recommended first, at most MAX_NAMED_COMPETITORS). */
   competitors: string[];
+  /** How many distinct competitors were recommended (competitors may be a top-N of them). */
+  competitorsTotal?: number;
   /** [A21] Set for readiness-checklist candidates (checklist-proposals.ts). */
   checklist?: GeoChecklistPlan;
 }
@@ -189,6 +192,23 @@ export function geoClaimViolations(text: string): string[] {
   return out;
 }
 
+/** Brand rows read for proposals (self + mentioned/cited competitors of <= 1000 observations). */
+export const PROPOSAL_BRAND_ROWS_LIMIT = 20_000;
+/** Competitors named in a proposal's text; the rest are counted ("and N other tracked competitors"). */
+export const MAX_NAMED_COMPETITORS = 5;
+
+export function namedCompetitors(counts: Map<string, number>): string[] {
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, MAX_NAMED_COMPETITORS)
+    .map(([k]) => k);
+}
+
+export function competitorList(named: string[], total: number): string {
+  const more = total - named.length;
+  return more > 0 ? `${named.join(", ")} and ${more} other tracked competitor${more === 1 ? "" : "s"}` : named.join(", ");
+}
+
 async function loadInputs(ctx: RunContext) {
   const ws = ctx.project.workspaceId;
   const pid = ctx.project.id;
@@ -210,11 +230,24 @@ async function loadInputs(ctx: RunContext) {
   for (const o of all) if (!latestCohort.has(o.provider)) latestCohort.set(o.provider, o.cohort_key);
   const obs = all.filter((o) => latestCohort.get(o.provider) === o.cohort_key);
   const ids = new Set(obs.map((o) => o.id));
+  // Bounded read ([A39]): only rows that carry information (self, or a competitor mentioned / cited) of the
+  // observations loaded above. Rows of competitors absent from an answer are "not mentioned" by definition, and with
+  // up to 60 tracked competitors they would multiply the read by 60.
   const brands = (
     await ctx.db.all<BrandLite>(
-      "SELECT observation_id, brand_key, is_self, mentioned, cited, recommendation_status, sentiment FROM geo_brand_observations WHERE workspace_id = ? AND project_id = ?",
+      `SELECT b.observation_id, b.brand_key, b.is_self, b.mentioned, b.cited, b.recommendation_status, b.sentiment FROM geo_brand_observations b
+        WHERE b.workspace_id = ? AND b.project_id = ? AND (b.is_self = 1 OR b.mentioned = 1 OR b.cited = 1)
+          AND b.observation_id IN (SELECT id FROM geo_observations
+                WHERE workspace_id = ? AND project_id = ? AND measurement_type = 'api' AND status = 'ok' AND created_at >= ?
+                  AND (substr(provider, 1, 11) <> 'custom_geo:' OR grounded = 1)
+                ORDER BY created_at DESC LIMIT 1000)
+        LIMIT ?`,
       ws,
       pid,
+      ws,
+      pid,
+      since,
+      PROPOSAL_BRAND_ROWS_LIMIT,
     )
   ).filter((b) => ids.has(b.observation_id));
   const disps = (
@@ -284,7 +317,7 @@ export async function buildCandidates(input: Awaited<ReturnType<typeof loadInput
   }
 
   // b. missing from answer: self absent, a competitor recommended (per discovery prompt)
-  const mAgg = new Map<string, { obs: ObsLite[]; competitors: Set<string> }>();
+  const mAgg = new Map<string, { obs: ObsLite[]; competitors: Map<string, number> }>();
   for (const o of obs) {
     if (o.prompt_type !== "discovery") continue;
     const self = selfOf(o.id);
@@ -292,17 +325,18 @@ export async function buildCandidates(input: Awaited<ReturnType<typeof loadInput
     const recs = brandsOf(o.id).filter((b) => b.is_self === 0 && b.mentioned === 1 && b.recommendation_status === "recommended");
     if (recs.length === 0) continue;
     const k = o.prompt_id ?? o.prompt_text;
-    if (!mAgg.has(k)) mAgg.set(k, { obs: [], competitors: new Set() });
+    if (!mAgg.has(k)) mAgg.set(k, { obs: [], competitors: new Map() });
     mAgg.get(k)!.obs.push(o);
-    for (const r of recs) mAgg.get(k)!.competitors.add(r.brand_key);
+    for (const r of recs) mAgg.get(k)!.competitors.set(r.brand_key, (mAgg.get(k)!.competitors.get(r.brand_key) ?? 0) + 1);
   }
   for (const [k, a] of mAgg) {
     const prompt = a.obs[0]!.prompt_text;
-    const comps = [...a.competitors];
+    // [A39] Most-recommended competitors first, at most MAX_NAMED_COMPETITORS named (the writer and Jev read this text).
+    const comps = namedCompetitors(a.competitors);
     out.push({
       dedupKey: `geo:geo_missing_from_answer:${await shortHash(k)}`,
       issueType: "geo_missing_from_answer",
-      summary: `For the buyer prompt "${prompt}", API-sampled answers recommended ${comps.join(", ")} but did not mention the brand; propose clarifying the specific product facts that answer this question on the brand's pages.`,
+      summary: `For the buyer prompt "${prompt}", API-sampled answers recommended ${competitorList(comps, a.competitors.size)} but did not mention the brand; propose clarifying the specific product facts that answer this question on the brand's pages.`,
       observations: a.obs,
       pairs: distinctPairs(a.obs),
       latestAt: latest(a.obs),
@@ -311,6 +345,7 @@ export async function buildCandidates(input: Awaited<ReturnType<typeof loadInput
       entity: null,
       prompts: [prompt],
       competitors: comps,
+      competitorsTotal: a.competitors.size,
     });
   }
 
@@ -476,7 +511,7 @@ export function templateDraft(c: GeoCandidate, brand: string, evidence: Evidence
       return {
         ...base,
         trigger: `Provider answers missing ${brand} for "${prompt.slice(0, 120)}"`.slice(0, 200),
-        issue: `For "${prompt}", API-sampled answers from ${providersLabel(c)} recommended ${c.competitors.join(", ")} and did not mention ${brand}.`.slice(0, 400),
+        issue: `For "${prompt}", API-sampled answers from ${providersLabel(c)} recommended ${competitorList(c.competitors, c.competitorsTotal ?? c.competitors.length)} and did not mention ${brand}.`.slice(0, 400),
         action: `Make sure the page that best answers this buyer question states the specific facts a buyer needs (what the product is, who it is for, and the requirement named in the question) [confirm: the page URL] [confirm: the facts that apply to your products].`.slice(0, 600),
         rationale: `Competitors were recommended for this question while ${brand} was absent; stating the relevant facts clearly on your own page gives answer engines accurate material to draw on, without any guarantee of inclusion.`.slice(0, 600),
         effort: "medium",

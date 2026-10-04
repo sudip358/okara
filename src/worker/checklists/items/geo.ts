@@ -6,6 +6,7 @@
 import { BESTOF_PATTERN, COMPARISON_PATTERN, HOWTO_PATTERN, isQuestionHeading, plural, titleAndPath } from "../text";
 import { LINK, type ItemDef, manualItem, noCrawl, notConnected, ratioStatus, urlEvidence } from "./common";
 import { useCasePages } from "./seo";
+import { MAX_COMPETITORS } from "@shared/competitors";
 import {
   aiCrawlerAccess,
   articleAttribute,
@@ -442,10 +443,22 @@ const tracking: ItemDef[] = [
       const valid = ctx.validObs();
       const grounded = valid.filter((o) => o.grounded);
       const groundedIds = new Set(grounded.map((o) => o.id));
-      const cites = (key: string, isSelf: boolean) =>
-        new Set(ctx.d.geo.brandObs.filter((b) => groundedIds.has(b.observationId) && b.cited && (isSelf ? b.isSelf : b.brandKey === key)).map((b) => b.observationId)).size;
+      // One pass over the brand rows (not one per competitor: up to 60 are tracked, [A39]).
+      const citing = new Map<string, Set<string>>();
+      for (const b of ctx.d.geo.brandObs) {
+        if (!b.cited || !groundedIds.has(b.observationId)) continue;
+        const k = b.isSelf ? "\u0000self" : b.brandKey;
+        if (!citing.has(k)) citing.set(k, new Set());
+        citing.get(k)!.add(b.observationId);
+      }
+      const cites = (key: string, isSelf: boolean) => citing.get(isSelf ? "\u0000self" : key)?.size ?? 0;
       const status = comps.length === 0 ? "not_met" : valid.length === 0 ? "partial" : "met";
-      const parts = grounded.length ? [`you: ${cites("self", true)}`, ...comps.map((c) => `${c.name}: ${cites(c.name, false)}`)] : [];
+      // Name the most-cited competitors only (at most 5; the rest are counted).
+      const ranked = comps.map((c, i) => ({ name: c.name, n: cites(c.name, false), i })).sort((a, b) => b.n - a.n || a.i - b.i);
+      const shown = ranked.slice(0, 5);
+      const parts = grounded.length
+        ? [`you: ${cites("self", true)}`, ...shown.map((c) => `${c.name}: ${c.n}`), ...(ranked.length > shown.length ? [`${ranked.length - shown.length} other competitors combined: ${ranked.slice(5).reduce((a, c) => a + c.n, 0)}`] : [])]
+        : [];
       return {
         status,
         method: "measured",
@@ -454,7 +467,7 @@ const tracking: ItemDef[] = [
             ? "No competitors configured, so tracked-brand share cannot be computed."
             : `${plural(comps.length, "competitor")} configured; ${plural(grounded.length, "grounded answer")} sampled.${parts.length ? ` Answers citing each brand's domain: ${parts.join(", ")}.` : ""}`,
         completeness: ctx.geoCompleteness(),
-        guidance: "Configure up to five competitors with their domains and aliases, then compare citation and mention rates on GEO results over matching cohorts.",
+        guidance: `Configure up to ${MAX_COMPETITORS} competitors with their domains and aliases (or import them from your sheet), then compare citation and mention rates on GEO results over matching cohorts.`,
         caveat: `Tracked-brand share is restricted to the brands you configure; it is not market share. ${API_SAMPLED}`,
         links: [LINK.competitors, LINK.geoResults],
       };

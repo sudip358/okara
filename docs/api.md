@@ -32,7 +32,7 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | DELETE | /workspaces/:wid/dataforseo | competitor-data | owner; `{ok:true}` |
 | POST | /workspaces/:wid/dataforseo/test | competitor-data | member; body `{login?, password?}` (typed pair, else the saved workspace credentials; never the operator's: 412); free `GET v3/appendix/user_data`; `DataForSeoTestResult` `{ok, detail, balanceUsd}` |
 | GET | /workspaces/:wid/projects | platform-projects | `Project[]` |
-| POST | /workspaces/:wid/projects | platform-projects | body `ProjectInput`; `Project` |
+| POST | /workspaces/:wid/projects | platform-projects | body `ProjectInput` (≤ 60 competitors, `MAX_COMPETITORS` in `src/shared/competitors.ts`; ≤ 5 domains and 10 aliases each; domains cleaned: hostname, lowercase, no `www.`, no path) [A39]; `Project` |
 | GET | /projects/:pid | platform-projects | `Project` |
 | PATCH | /projects/:pid | platform-projects | partial `ProjectInput` + `scheduleEnabled`; `Project` |
 | DELETE | /projects/:pid | platform-projects | deletes tenant data and the stored GSC token; `{ok:true, gscRevoked:false}` (`gscRevoked` is always false: no remote revoke at Google, see below) |
@@ -109,7 +109,7 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | GET | /projects/:pid/geo/pages/:pageId/skip-factors?promptId=&engine= | geo-analysis | `PageSkipFactors` (measured from the latest crawl; never calls Jev) |
 | POST | /projects/:pid/geo/competitor-pages | geo-analysis | body `CompetitorPageApprovalRequest` `{url}`; 202 `CompetitorPageAssessment` (read within the request: state `assessed`, `blocked` or `failed`; 200 when a recent assessment is reused) [A7] (CSRF; rate-limited; budgeted) |
 | GET | /projects/:pid/geo/competitor-pages | geo-analysis | `CompetitorPageAssessment[]` (newest first) |
-| GET | /projects/:pid/competitors/dataforseo | competitor-data | member; `CompetitorDataPanel` (state, location, caps, published-price ceiling, per competitor domain: latest refresh + overview) |
+| GET | /projects/:pid/competitors/dataforseo | competitor-data | member; `CompetitorDataPanel` (state, location, caps incl. `waitingDomains`, published-price ceiling, per competitor domain: latest refresh + overview + `waiting`) |
 | GET | /projects/:pid/competitors/dataforseo/domains/:domain | competitor-data | member; `CompetitorDomainDetail` (top keywords, keyword gap, top pages of the latest refresh); 404 when the domain is not a current competitor |
 | POST | /projects/:pid/competitors/dataforseo/refresh | competitor-data | owner; body `{domain}`; 202 `CompetitorRefreshResult` (queued, run after the response); 200 `{existing:true}` when one is already queued/running; 412 `setup_required` without credentials; 429 `quota_exceeded` over the daily caps (CSRF; rate-limited 10/min; budgeted; paid) |
 | GET | /projects/:pid/competitors/dataforseo/locations | competitor-data | owner; `CompetitorLocationOption[]` from the free Labs `locations_and_languages` (rate-limited) |
@@ -454,15 +454,26 @@ docs/provider-contracts.md "DataForSEO Labs". Types: `src/shared/competitor-data
   with `intersections:false` (top 100 keywords the competitor ranks for and the project's domain does not),
   `relevant_pages` (top 20 pages by estimated organic traffic). All are third-party estimates, labelled
   "DataForSEO estimate · <location> · fetched <date> · cost $x"; never Search Console data.
-- **Trigger on competitor add:** `POST /workspaces/:wid/projects` and `PATCH /projects/:pid` (when `competitors`
-  changes) queue a refresh for every newly added competitor domain (normalized: no scheme, no leading `www.`;
-  at most 5 per save) when DataForSEO credentials exist (workspace, else operator) and the project's auto-pull
-  is on (default on; `PUT .../settings {autoFetch:false}`). Demo projects never fetch. The save itself never
-  fails because of DataForSEO.
+- **Trigger on competitor add:** `POST /workspaces/:wid/projects`, `PATCH /projects/:pid` (when `competitors`
+  changes), Ask Okara `update_competitors` and a competitors import or sync (when its option "Fetch DataForSEO
+  data for new competitors" is on, see "Import") queue a refresh for every newly added competitor domain
+  (normalized: no scheme, no leading `www.`) when DataForSEO credentials exist (workspace, else operator) and the
+  project's auto-pull is on (default on; `PUT .../settings {autoFetch:false}`). Demo projects never fetch. The save
+  itself never fails because of DataForSEO.
+- **Many new domains at once ([A39], up to 60 competitors):** new domains are queued in the order given (sheet row
+  order for imports) up to what today's per-project cap (10) still allows; the rest are **deferred, never dropped**:
+  they wait in `competitor_fetch_backlog` (migration `0021_competitor_fetch_backlog.sql`) and the cron moves them
+  into the queue as the next UTC days' caps allow (up to 5 projects per tick; a domain at its own per-domain cap
+  waits for the next day). A waiting domain is dropped from the backlog when it is no longer a tracked competitor;
+  the whole project backlog is cleared (nothing called) when auto-pull is off, the project is a demo, or DataForSEO
+  credentials are missing at drain time. `CompetitorDataPanel.caps.waitingDomains` and
+  `CompetitorDomainSummary.waiting` show it ("Waiting (daily cap)"). Spend therefore stays at most 10 refreshes
+  (≤ 10 × $0.0624 published-price ceiling) per project per UTC day, under the per-project budget as before.
 - **Scheduling (Workers-safe):** the request only inserts `competitor_fetches` rows (`queued`); the work runs
   after the response in `ctx.waitUntil` (at most 2 domains per request = 6 parallel subrequests, each with a 25 s
-  timeout, so it fits the post-response `waitUntil` window). The cron tick (every 15 min) processes up to 4
-  refreshes still queued after 60 s and marks refreshes `running` for over 10 min as failed (their stranded
+  timeout, so it fits the post-response `waitUntil` window). The cron tick (every 15 min) first moves deferred
+  domains from the backlog into the queue (see above), then processes up to 4 refreshes still queued after 60 s
+  (or promoted by this tick) and marks refreshes `running` for over 10 min as failed (their stranded
   reservations are marked `unknown`, i.e. stay counted, by the existing stale-reservation sweep after 1 h). Without an execution context
   (tests, dev) the work is awaited in the request. The panel polls while a refresh is queued/running.
 - **Caps:** at most 1 queued/running refresh per (project, domain) (partial unique index); 2 refreshes per
@@ -480,7 +491,9 @@ docs/provider-contracts.md "DataForSEO Labs". Types: `src/shared/competitor-data
 - **Storage/retention:** `competitor_snapshots` holds one row per endpoint per refresh with the parsed, bounded
   `data_json` (no raw responses); the snapshots of the newest 3 completed/partial refreshes per (project,
   domain) are kept, older ones and those of domains that are no longer competitors are deleted after each
-  refresh; the refresh log keeps the newest 10 rows per domain. All three tables carry `workspace_id` and
+  refresh (found per domain and deleted in chunks, so 60 competitors × 5 domains stay under D1's 100 bound
+  parameters; the panel reads the refresh log and snapshots in chunks of 90 domains / fetch ids); the refresh log
+  keeps the newest 10 rows per domain. All four tables (with the backlog) carry `workspace_id` and
   `project_id`; every query filters by both; they are included in the project export and cascade on project
   delete.
 - **States:** `setup_required` (no credentials → "Add DataForSEO API credentials…"; locale not mappable →
@@ -522,7 +535,8 @@ docs/provider-contracts.md "Google Sheets API v4".
   for prompts/competitors/links, 20,000 for documents, cap stated in the plan).
 - **Destinations and mappings** (column names from the header row; unknown column → 400 `header_changed`):
   `geo_prompts {question, done?, notes?[]}` + options `{approvePrompts?, addCompetitors?[]}`;
-  `competitors {domain, notes?, assignedTo?, metrics?[]}`; `implemented_links {source, target, anchor?, date?,
+  `competitors {domain, notes?, assignedTo?, metrics?[]}` + options `{fetchCompetitorData?: boolean,
+  acceptDomainFixes?: string[≤500]}` ([A39], both kept for later syncs); `implemented_links {source, target, anchor?, date?,
   method?, hub?, status?}` (absolute URLs or `/paths` on the verified host); `backlinks {liveUrl, target, anchor?,
   target2?, anchor2?, vendor?, type?, date?, da?, traffic?, price?}` ([A38], see "Backlinks"); `context_doc` / `reference
   {columns?[], sortBy?, title?}`. `options.excludeKeys[]`: record keys unchecked in the dry run (also excluded on
@@ -532,7 +546,27 @@ docs/provider-contracts.md "Google Sheets API v4".
   or orphan tabs → reference; anything else → imported research document.
 - **ImportPlan:** `counts {add, update, unchanged, skip, remove, not_added}`, `summary[]` (e.g. "42 prompts new, 3
   skipped" + "3 skipped: duplicate question in the sheet"), `notes[]`, `items[]` (≤ 300, changes first, each with
-  row number and reason), `suggestedCompetitors` for prompts.
+  row number and reason), `suggestedCompetitors` for prompts; for competitors ([A39]) `competitorFetch`
+  (`CompetitorFetchPlan {newDomains, perDomainUsd, maxUsd, perDay, days, estimate, defaultOn, selected, willFetch,
+  state ready/setup_required/auto_fetch_off/disabled, message}`) and `domainFixes[{key, from, to, row, accepted}]`.
+- **Competitors import ([A39], owner request 2026-10-04 "add competitors data from sheet"):** up to 60 tracked
+  competitors (`MAX_COMPETITORS`, shared by worker and web). Each domain cell is cleaned
+  (`cleanCompetitorDomain`, `src/shared/competitors.ts`): URL → hostname; `http(s)` only, no credentials or port;
+  lowercase; trailing dot and a leading `www.` removed; a path / query is dropped and the row is noted "from a page
+  URL"; IP literals, local names (`localhost`, `.local`, `.internal` ...) and invalid labels are skipped with the
+  reason; duplicates are found after cleaning ("duplicate of row N"); the project's own domain (or a sub/parent
+  domain of it) is skipped. A host starting with `ww.` or `wwww.` is a likely typo: the row is skipped with
+  "possible typo: did you mean X?" and listed in `domainFixes` until the owner accepts the fix
+  (`options.acceptDomainFixes` = the typo host); it is never corrected silently. A subdomain of another listed
+  domain (in the sheet, after accepted fixes, or already tracked) is added to that domain's competitor as an extra
+  domain ("merged into X", at most 5 domains per competitor) instead of becoming a competitor. New competitors are
+  appended in sheet order until 60; the rest are `not_added` with their sheet metrics kept. DataForSEO: the dry run
+  shows "N new competitor domains → up to N × $0.0624 DataForSEO (≈$X), fetched at most 10 per day" (published-price
+  ceiling `maxRefreshCostUsd`); the option `fetchCompetitorData` defaults to on for ≤ 10 new domains and off above
+  (the owner can tick it); when it is on the new domains are queued in sheet order and the daily cap defers the
+  rest to later days (see "Competitor data (DataForSEO)"); without credentials nothing is queued (state
+  `setup_required`). A manual import never removes competitors; a sync untracks domains removed from the sheet (as
+  before).
 - **Idempotency and provenance:** `import_records` keeps one row per (project, destination, normalized key) with the
   sheet's values; `imports` one row per applied import (manual or sync) with counts and a change log
   (`+ lumens.com`, `− 1800lighting.com`); `import_changes` the previous state of each record changed (undo).
@@ -1387,7 +1421,7 @@ key hint, encrypted column, OAuth token or state row, session or verification to
 | `edit_link_cluster` | action | PUT `/clusters/hub`, `/clusters/assign` | mark / unmark / clear hub, assign / unassign / reset spoke; URLs on the verified host; 120 edits/hour/project |
 | `manage_import_sync` | action | POST `/import/syncs/:id/run`, PATCH `/import/syncs/:id` | **owner only** (checked at proposal and again at execution); run_now (per-sync hourly limit) / enable / disable / set_frequency (6, 12, 24) |
 | `update_geo_prompts` | action | PUT `/geo/prompts` | approve / unapprove / remove by id, add prompts; brand-blind discovery prompts, <= 25, no duplicates; saves a new version |
-| `update_competitors` | action | PATCH `/projects/:pid` (`competitors`) | add / remove; new domains may auto-fetch DataForSEO data (said on the card) |
+| `update_competitors` | action | PATCH `/projects/:pid` (`competitors`) | add (≤ 20 per call) / remove; at most 60 competitors; the card states the DataForSEO estimate for the new domains ("N new competitor domains → up to N × $0.0624 ..., fetched at most 10 per day") when auto-fetch applies |
 | `update_project_settings` | action | PATCH `/projects/:pid`, PUT `/limits` | name, brand, aliases, description, audience, voice, site type, locale, language, schedule; limits within `LIMIT_BOUNDS` (e.g. crawl pages per run 1-200). Site URL: Settings page |
 | `update_checklist_item` | action | PUT `/checklists/:kind/:itemId`, `/pages/:pageId/checklist/:itemId` | manual items only |
 | `classify_buyer_queries` | action | POST `/seo/buyer-queries` | Jev; the route's per-user and per-project-day limits |

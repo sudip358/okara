@@ -19,7 +19,7 @@ import { badRequest } from "../lib/errors";
 import type { WritingProvider } from "../providers/types";
 import { PROMPT_GENERATOR_SYSTEM, GEO_WRITER_SYSTEM, WRITER_PROMPTS_VERSION } from "../writing/prompts";
 import { DISCOVERY_PROMPTS_JSON_SCHEMA, discoveryPromptsOutputSchema, toProviderSchema } from "../writing/schemas";
-import { containsTerm, projectBrands, type ProjectBrandSource } from "./detect";
+import { projectBrands, termMatcher, type ProjectBrandSource } from "./detect";
 
 export { PROMPT_GENERATOR_SYSTEM, GEO_WRITER_SYSTEM, WRITER_PROMPTS_VERSION };
 
@@ -43,13 +43,14 @@ export interface BrandBlindViolation {
 /** Terms a discovery prompt may not contain: every brand's name/aliases and tracked domains. */
 export function brandBlindViolations(text: string, project: ProjectBrandSource): BrandBlindViolation[] {
   const out: BrandBlindViolation[] = [];
+  const containsTerm = termMatcher(text); // normalize the prompt once for every tracked term
   for (const b of projectBrands(project)) {
     for (const term of [b.name, ...b.aliases]) {
-      const hit = containsTerm(text, term);
+      const hit = containsTerm(term);
       if (hit) out.push({ term, brandKey: b.key, kind: "name_or_alias", matched: hit.text });
     }
     for (const d of b.domains) {
-      const hit = containsTerm(text, d);
+      const hit = containsTerm(d);
       if (hit) out.push({ term: d, brandKey: b.key, kind: "domain", matched: hit.text });
     }
   }

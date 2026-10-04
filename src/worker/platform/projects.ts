@@ -10,6 +10,9 @@ import { HttpError, badRequest, conflict } from "../lib/errors";
 import { newId, randomToken } from "../lib/ids";
 import { iso } from "../lib/time";
 import type { ProjectRow } from "./access";
+import { MAX_COMPETITORS, MAX_COMPETITOR_ALIASES, MAX_COMPETITOR_DOMAINS, cleanCompetitorDomain, isPublicHostname } from "@shared/competitors";
+
+export { MAX_COMPETITORS, isPublicHostname };
 
 /**
  * Outbound fetch used by platform routes (Google OAuth/Search Console, DNS-over-HTTPS, file verification).
@@ -19,13 +22,10 @@ export const outbound: { fetch: typeof fetch } = {
   fetch: (input, init) => fetch(input, init),
 };
 
-export const MAX_COMPETITORS = 5;
 export const MAX_PROJECTS_PER_WORKSPACE = 25;
 export const CONTEXT_KINDS: readonly ContextKind[] = ["product", "positioning", "competitors", "voice", "pillars"];
 
 // ------------------------------------------------------------------ site URL and domains
-
-const BLOCKED_SUFFIXES = [".localhost", ".local", ".internal", ".lan", ".home.arpa", ".onion"];
 
 /** Validate a user-entered site URL: https only, no credentials, no port, a public-looking DNS host. Returns the origin. */
 export function normalizeSiteUrl(input: string): { origin: string; host: string } {
@@ -43,26 +43,15 @@ export function normalizeSiteUrl(input: string): { origin: string; host: string 
   return { origin: `https://${host}`, host };
 }
 
-export function isPublicHostname(host: string): boolean {
-  if (!host || host.length > 253) return false;
-  if (host.startsWith("[") || /^\d+(\.\d+){3}$/.test(host) || /^[0-9.]+$/.test(host)) return false; // IP literals
-  if (host === "localhost" || BLOCKED_SUFFIXES.some((s) => host.endsWith(s))) return false;
-  const labels = host.split(".");
-  if (labels.length < 2) return false;
-  return labels.every((l) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(l));
-}
-
-/** Accepts "brand.com", "https://brand.com/x" or "www.brand.com"; returns a lowercase hostname. */
+/**
+ * Accepts "brand.com", "https://www.brand.com/x" or "www.Brand.com"; returns the cleaned lowercase hostname without
+ * "www." (shared rules, src/shared/competitors.ts). A likely "ww."/"wwww." typo is kept as entered (never corrected
+ * silently; the web form and the import preview ask the owner).
+ */
 export function normalizeDomain(input: string): string {
-  const raw = input.trim().toLowerCase();
-  let host: string;
-  try {
-    host = new URL(raw.includes("://") ? raw : `https://${raw}`).hostname.replace(/\.$/, "");
-  } catch {
-    throw badRequest(`Invalid competitor domain: ${input.slice(0, 100)}`);
-  }
-  if (!isPublicHostname(host)) throw badRequest(`Invalid competitor domain: ${input.slice(0, 100)}`);
-  return host;
+  const r = cleanCompetitorDomain(input);
+  if (!r.ok) throw badRequest(`Invalid competitor domain: ${input.slice(0, 100)}`);
+  return r.domain;
 }
 
 const normTerm = (s: string) => s.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
@@ -121,8 +110,8 @@ const term = z.string().trim().min(1).max(80);
 
 export const competitorSchema = z.object({
   name: z.string().trim().min(1).max(120),
-  domains: z.array(z.string().trim().min(1).max(253)).max(5).default([]),
-  aliases: z.array(term).max(10).default([]),
+  domains: z.array(z.string().trim().min(1).max(253)).max(MAX_COMPETITOR_DOMAINS).default([]),
+  aliases: z.array(term).max(MAX_COMPETITOR_ALIASES).default([]),
 });
 
 export const siteTypeSchema = z.enum(["ecommerce", "saas", "publisher", "local", "other"]);

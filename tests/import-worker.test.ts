@@ -374,14 +374,17 @@ describe("Competitors from the 04 - Competitors tab", () => {
     expect(lumens.metrics).toMatchObject({ DA: "71", "Organic Traffic": "250,000", "Homepage Ratio": "23%" });
   });
 
-  it("does not queue DataForSEO without credentials; caps at 5 competitors; undo untracks", async () => {
+  it("does not queue DataForSEO without credentials; caps at 60 competitors; undo untracks", async () => {
     const s = await setup();
-    const rows = [["Competing Domains"], ...["a1.example", "a2.example", "a3.example", "a4.example", "a5.example", "a6.example"].map((d) => [d])];
+    // The seeded project tracks 1 competitor (Brass Co): 61 sheet rows -> 59 added, 2 not added (limit).
+    const rows = [["Competing Domains"], ...Array.from({ length: 61 }, (_, i) => [`a${i + 1}.example`])];
     const r = await call(s.env, s.u, "POST", `/projects/${s.pid}/import/commit`, csvBody("c.csv", rows, "competitors", { domain: "Competing Domains" }));
-    expect(r.json!.data.plan.counts).toMatchObject({ add: 4, not_added: 2 });
+    expect(r.json!.data.plan.counts).toMatchObject({ add: 59, not_added: 2 });
+    expect(r.json!.data.plan.competitorFetch).toMatchObject({ newDomains: 59, state: "setup_required", willFetch: false });
     expect(await s.db.all("SELECT id FROM competitor_fetches WHERE project_id = ?", s.pid)).toHaveLength(0);
+    expect(await s.db.all("SELECT id FROM competitor_fetch_backlog WHERE project_id = ?", s.pid)).toHaveLength(0);
     let project = (await call(s.env, s.u, "GET", `/projects/${s.pid}`)).json!.data as Project;
-    expect(project.competitors).toHaveLength(5);
+    expect(project.competitors).toHaveLength(60);
     const u = await call(s.env, s.u, "POST", `/projects/${s.pid}/import/${r.json!.data.import.id}/undo`);
     expect(u.status).toBe(200);
     project = (await call(s.env, s.u, "GET", `/projects/${s.pid}`)).json!.data as Project;

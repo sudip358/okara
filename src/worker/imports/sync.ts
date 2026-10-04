@@ -13,7 +13,9 @@
  *   - records ok/error, the error code and message on the sync row. Failures never stop silently: the Import page
  *     and the Overview "needs attention" feed show them until a sync succeeds or the owner stops syncing.
  * DataForSEO refreshes for new competitor domains go through onCompetitorsChanged, so its daily caps and budgets
- * apply unchanged.
+ * apply unchanged; the stored fetchCompetitorData choice (default: on for <= 10 new domains) and accepted typo fixes
+ * apply to every sync ([A39]). Domains removed from the sheet are untracked by a sync (removeMissing = true, as
+ * before); a manual import never removes.
  */
 import { SYNC_FREQUENCIES, columnIndex, requiredColumns, type ImportDestination, type ImportMapping, type ImportOptions, type SyncErrorCode } from "@shared/import";
 import type { Env } from "../env";
@@ -72,7 +74,10 @@ export async function upsertSync(
   },
 ): Promise<SyncRow> {
   const ts = iso(args.now);
+  // Kept for later syncs: unchecked keys, and for competitors the DataForSEO fetch choice and accepted typo fixes ([A39]).
   const opts: ImportOptions = { excludeKeys: (args.options.excludeKeys ?? []).slice(0, 500) };
+  if (typeof args.options.fetchCompetitorData === "boolean") opts.fetchCompetitorData = args.options.fetchCompetitorData;
+  if (args.options.acceptDomainFixes?.length) opts.acceptDomainFixes = args.options.acceptDomainFixes.slice(0, 500);
   await db.run(
     `INSERT INTO import_syncs (id, workspace_id, project_id, spreadsheet_id, spreadsheet_title, tab, sheet_tab_id, destination, mapping_json, options_json,
        frequency_hours, enabled, next_run_at, last_run_at, last_status, last_import_id, created_by, created_at, updated_at)

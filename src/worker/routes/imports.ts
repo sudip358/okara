@@ -135,6 +135,8 @@ const optionsSchema = z
     approvePrompts: z.boolean().optional(),
     addCompetitors: z.array(z.string().trim().min(1).max(120)).max(10).optional(),
     excludeKeys: z.array(z.string().max(1200)).max(5000).optional(),
+    fetchCompetitorData: z.boolean().optional(),
+    acceptDomainFixes: z.array(z.string().trim().min(1).max(253)).max(500).optional(),
   })
   .strict()
   .default({});

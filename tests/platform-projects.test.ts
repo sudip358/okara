@@ -10,7 +10,7 @@ import { createSession, lookupSession } from "@worker/platform/session";
 import { projectRoutes } from "@worker/routes/projects";
 import { integrationRoutes } from "@worker/routes/integrations";
 import { demoRoutes } from "@worker/routes/demo";
-import { outbound } from "@worker/platform/projects";
+import { MAX_COMPETITORS, outbound } from "@worker/platform/projects";
 import { gscTokenAad } from "@worker/platform/gsc-oauth";
 import { clearGscTokenCache, createGscProvider } from "@worker/platform/gsc-client";
 import { gscEntryVerifiesHost, gscPropertyCoversHost, parseTxtData } from "@worker/platform/verification";
@@ -166,9 +166,16 @@ describe("projects CRUD and tenancy", () => {
     expect(body.error.message).toContain(fragment);
   });
 
-  it("rejects more than five competitors and unknown fields", async () => {
-    const competitors = Array.from({ length: 6 }, (_, i) => ({ name: `C${i}`, domains: [`c${i}.example`], aliases: [] }));
-    expect((await call(A, "POST", `/workspaces/${A.workspaceId}/projects`, { ...baseInput, competitors })).status).toBe(400);
+  it("rejects more than MAX_COMPETITORS (60) competitors and unknown fields; accepts 60 with cleaned domains", async () => {
+    const competitors = Array.from({ length: MAX_COMPETITORS + 1 }, (_, i) => ({ name: `C${i}`, domains: [`c${i}.example`], aliases: [] }));
+    const over = await call(A, "POST", `/workspaces/${A.workspaceId}/projects`, { ...baseInput, competitors });
+    expect(over.status).toBe(400);
+    const sixty = competitors.slice(0, MAX_COMPETITORS).map((c, i) => (i === 0 ? { ...c, domains: ["https://WWW.C0.example/some/page?x=1"] } : c));
+    const ok = await call(A, "POST", `/workspaces/${A.workspaceId}/projects`, { ...baseInput, name: "Sixty", competitors: sixty });
+    expect(ok.status).toBe(201);
+    const created = (await ok.json()) as { data: { competitors: Array<{ domains: string[] }> } };
+    expect(created.data.competitors).toHaveLength(60);
+    expect(created.data.competitors[0]!.domains).toEqual(["c0.example"]);
     expect((await call(A, "POST", `/workspaces/${A.workspaceId}/projects`, { ...baseInput, workspaceId: B.workspaceId })).status).toBe(400);
   });
 

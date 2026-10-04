@@ -170,7 +170,7 @@ export function ProjectForm({
 
       <Card
         title={`Competitors (${v.competitors.length} of ${MAX_COMPETITORS})`}
-        description="Names, domains, and aliases. Competitor sites are never crawled automatically. If DataForSEO is connected, a newly added competitor domain pulls DataForSEO search estimates (paid per request; see the Competitors page)."
+        description="Names, domains, and aliases. Domains are cleaned as you add them (full URLs become the domain, www. is dropped). Competitor sites are never crawled automatically. If DataForSEO is connected and auto-pull is on, newly added competitor domains pull DataForSEO search estimates (paid per request; the project's daily refresh cap spreads many new domains over the following days; prices and caps on the Competitors page). To add a long list, use Import with your sheet's competitor tab."
         actions={
           <Button
             size="sm"

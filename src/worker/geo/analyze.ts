@@ -61,11 +61,24 @@ import {
 import { classifySourceByRules, isSourceType, type SourceTypeMethod } from "./source-type";
 import { GEO_QUESTION_IDS, geoQuestion, geoQuestionVersion, type GeoQuestionId } from "./questions";
 
-export const ANALYSIS_VERSION = "geo-analysis-2026-09-30.1";
-const MAX_ADJUDICATIONS = 12;
-const MAX_SOURCE_QUESTIONS = 20;
-const MAX_BRAND_QUESTIONS = 6;
+export const ANALYSIS_VERSION = "geo-analysis-2026-10-04.1";
+export const MAX_ADJUDICATIONS = 12;
+export const MAX_SOURCE_QUESTIONS = 20;
+export const MAX_BRAND_QUESTIONS = 6;
 const RAW_TEXT_FOR_JEV = 6000;
+/**
+ * [A39] Jev cost per answer does not grow with the number of tracked competitors (up to MAX_COMPETITORS = 60):
+ *   - deterministic alias / domain matching runs for EVERY tracked brand (code, no model);
+ *   - at most 2 Jev calls per answer (the shared answer state, then passage sentiment), whatever the brand count;
+ *   - questions are asked only about brands actually found in the answer (ambiguous spans <= MAX_ADJUDICATIONS,
+ *     recommendation status / sentiment for <= MAX_BRAND_QUESTIONS brands with a match);
+ *   - the state names only self + the brands found in the answer (most matched first, <= MAX_JEV_STATE_BRANDS), and
+ *     `tracked_domains` only self's domains, those brands' domains and domains matching a cited host
+ *     (<= MAX_JEV_TRACKED_DOMAINS); `brands_note` says how many tracked brands were left out.
+ * Brands never matched are recorded as not mentioned by code, exactly as before.
+ */
+export const MAX_JEV_STATE_BRANDS = 12;
+export const MAX_JEV_TRACKED_DOMAINS = 40;
 
 export interface ObservationRow {
   id: string;
@@ -284,11 +297,29 @@ export async function analyzeObservation(ctx: RunContext, observationId: string)
   // call below, asked only for brands whose mention is confirmed once adjudication is known.
   const asked: AskedQuestion[] = [];
   const adjudicationKeys = new Map<BrandSpan, string>();
+  // Brands named in the Jev state: self + the brands found in this answer, most matched first (config order on ties).
+  const found = brands
+    .map((b, i) => ({ b, i, n: (spansByBrand.get(b.key) ?? []).length }))
+    .filter((x) => !x.b.isSelf && x.n > 0)
+    .sort((x, y) => y.n - x.n || x.i - y.i)
+    .slice(0, MAX_JEV_STATE_BRANDS - 1)
+    .map((x) => x.b);
+  const stateBrands = [...brands.filter((b) => b.isSelf), ...found];
+  const inState = new Set(stateBrands.map((b) => b.key));
+  const citedBrandKeys = new Set(citations.map((c) => c.brandKey).filter((k): k is string => !!k));
+  const stateDomains = [
+    ...new Set([
+      ...stateBrands.flatMap((b) => b.domains),
+      ...brands.filter((b) => !inState.has(b.key) && citedBrandKeys.has(b.key)).flatMap((b) => b.domains),
+    ]),
+  ].slice(0, MAX_JEV_TRACKED_DOMAINS);
+  const left = brands.length - stateBrands.length;
   const state: Record<string, unknown> = {
     brand_description: project.product_description.slice(0, 600),
-    brands: Object.fromEntries(brands.map((b) => [refOf.get(b.key)!, { name: b.name, aliases: b.aliases.slice(0, 10), is_self: b.isSelf }])),
-    tracked_domains: trackedDomains,
+    brands: Object.fromEntries(stateBrands.map((b) => [refOf.get(b.key)!, { name: b.name, aliases: b.aliases.slice(0, 10), is_self: b.isSelf }])),
+    tracked_domains: stateDomains,
   };
+  if (left > 0) state.brands_note = `${left} other tracked brand(s) were not found in this answer and are omitted.`;
   const spansState: Record<string, unknown> = {};
   const mentionsState: Record<string, unknown> = {};
   const citationsState: Record<string, unknown> = {};
@@ -299,7 +330,7 @@ export async function analyzeObservation(ctx: RunContext, observationId: string)
     asked.push({ key: "injection_risk", id: GEO_QUESTION_IDS.injectionRisk, question: geoQuestion(GEO_QUESTION_IDS.injectionRisk, "text") });
 
     let n = 0;
-    for (const b of brands) {
+    for (const b of stateBrands) {
       for (const s of spansByBrand.get(b.key) ?? []) {
         if (!s.ambiguous || n >= MAX_ADJUDICATIONS) continue;
         const key = `adj_${n++}`;
@@ -309,7 +340,7 @@ export async function analyzeObservation(ctx: RunContext, observationId: string)
       }
     }
     let bq = 0;
-    for (const b of brands) {
+    for (const b of stateBrands) {
       const spans = spansByBrand.get(b.key) ?? [];
       if (spans.length === 0 || bq >= MAX_BRAND_QUESTIONS) continue;
       bq++;
@@ -410,7 +441,7 @@ export async function analyzeObservation(ctx: RunContext, observationId: string)
   let sentimentResult: DecisionResult | null = null;
   let sentimentNote: string | null = null;
   if (ctx.decisions && result) {
-    for (const b of brands) {
+    for (const b of stateBrands) {
       const r = resolved.get(b.key)!;
       if (r.confirmed.length === 0 || sentimentAsked.length >= MAX_BRAND_QUESTIONS) continue;
       const ref = refOf.get(b.key)!;

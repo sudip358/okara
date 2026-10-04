@@ -591,7 +591,7 @@ describe("competitor data refresh", () => {
     await db.insert("competitor_fetches", { id: "cfetch_q", workspace_id: u.workspaceId, project_id: pid, domain: "brassco.example", trigger: "competitor_added", status: "queued", created_at: old });
     await db.insert("competitor_fetches", { id: "cfetch_r", workspace_id: u.workspaceId, project_id: pid, domain: "other.example", trigger: "manual", status: "running", created_at: old, started_at: new Date(Date.now() - 3600_000).toISOString() });
     const r = await processQueuedCompetitorFetches(env, new Date());
-    expect(r).toEqual({ failedStale: 1, processed: 1 });
+    expect(r).toEqual({ failedStale: 1, processed: 1, promoted: 0 });
     const rows = await db.all<{ id: string; status: string }>("SELECT id, status FROM competitor_fetches ORDER BY id");
     expect(rows).toEqual([
       { id: "cfetch_q", status: "completed" },

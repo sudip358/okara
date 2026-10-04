@@ -36,6 +36,7 @@ import { RECOMMENDATION_TRANSITIONS, recommendationDetail, setRecommendationStat
 import { requestManualRun } from "../routes/runs";
 import { checkScopeReady, parseRunScope } from "../runs/scope";
 import { scopeLabel, type RunScope } from "@shared/run-scope";
+import { MAX_COMPETITORS } from "@shared/competitors";
 import type { ToolSpec } from "./types";
 import { ToolError, clip, pct, projectRoute, ratioValue, round1, scoped, type ActionTool, type ChatTool, type ReadTool, type ToolContext } from "./tool-base";
 import { GSC_CHAT_TOOLS, storedSyncLabel } from "./tools-gsc";
@@ -623,14 +624,16 @@ const listCompetitors: ReadTool<typeof emptySchema> = {
     "Competitors: the ones configured on the project, the entities AI engines cited instead of this site, and competitor pages the user approved for assessment (verdict, state, short observable reasons). Keyword/ranking competitor data (DataForSEO) is read with dataforseo_competitor_data, not here.",
   schema: emptySchema,
   async run(ctx) {
-    const configured = parseJson<unknown[]>(ctx.project.competitors_json, [])
-      .filter((c): c is { name?: unknown; domains?: unknown } => !!c && typeof c === "object")
-      .slice(0, 20)
-      .map((c) => ({ name: clip(c.name, 80), domains: Array.isArray(c.domains) ? c.domains.filter((d): d is string => typeof d === "string").slice(0, 5) : [] }));
+    // Every configured competitor (bounded by MAX_COMPETITORS = 60, names and domains clipped), in configured order.
+    const all = parseJson<unknown[]>(ctx.project.competitors_json, []).filter((c): c is { name?: unknown; domains?: unknown } => !!c && typeof c === "object");
+    const configured = all
+      .slice(0, MAX_COMPETITORS)
+      .map((c) => ({ name: clip(c.name, 80), domains: Array.isArray(c.domains) ? c.domains.filter((d): d is string => typeof d === "string").slice(0, 5).map((d) => clip(d, 120)) : [] }));
     const disp = await buildDisplacementSummary(ctx.db, ctx.project, "api");
     const pages = await listCompetitorPages(ctx.db, ctx.project);
     const data = {
       configured,
+      configuredTotal: all.length,
       citedInsteadByAiEngines: disp.slice(0, 15).map((d) => ({ entity: clip(d.entity, 120), sourceType: d.sourceType, url: clip(d.url, 300), count: d.count, prompts: d.prompts.slice(0, 3).map((p) => clip(p, 120)) })),
       assessedCompetitorPages: pages.slice(0, 15).map((p) => ({
         url: clip(p.url, 300),

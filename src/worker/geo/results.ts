@@ -122,10 +122,17 @@ async function loadProjectObservations(db: Db, ws: string, pid: string): Promise
   const brands = new Map<string, BrandRow[]>();
   const displacements = new Map<string, DispRow[]>();
   if (rows.length > 0) {
+    // Bounded ([A39]): rows of the observations loaded above only, and only rows that carry information (self, or a
+    // competitor mentioned / cited); a tracked competitor without a row is "not mentioned", which is what every
+    // metric here reads. With up to 60 tracked competitors the full rows would multiply the read by 60.
     const brandRows = await db.all<BrandRow>(
       `SELECT b.observation_id, b.brand_key, b.is_self, b.mentioned, b.cited, b.sentiment, b.list_rank, b.recommendation_status
-         FROM geo_brand_observations b JOIN geo_observations o ON o.id = b.observation_id AND o.workspace_id = b.workspace_id
-        WHERE b.workspace_id = ? AND b.project_id = ?`,
+         FROM geo_brand_observations b
+        WHERE b.workspace_id = ? AND b.project_id = ? AND (b.is_self = 1 OR b.mentioned = 1 OR b.cited = 1)
+          AND b.observation_id IN (SELECT id FROM geo_observations WHERE workspace_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT ${OBSERVATION_LOAD_LIMIT})
+        ORDER BY b.is_self DESC LIMIT ${OBSERVATION_LOAD_LIMIT * 12}`,
+      ws,
+      pid,
       ws,
       pid,
     );

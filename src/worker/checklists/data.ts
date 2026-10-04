@@ -400,7 +400,13 @@ export async function loadGeo(env: Env, db: Db, ws: string, pid: string): Promis
   ).filter((c) => ids.has(c.observation_id));
   const brandObs = (
     await db.all<{ observation_id: string; brand_key: string; is_self: number; mentioned: number; cited: number }>(
-      "SELECT observation_id, brand_key, is_self, mentioned, cited FROM geo_brand_observations WHERE workspace_id = ? AND project_id = ?",
+      // Bounded ([A39]): the loaded observations only, and only self / mentioned / cited rows (what the checklist reads).
+      `SELECT observation_id, brand_key, is_self, mentioned, cited FROM geo_brand_observations
+        WHERE workspace_id = ? AND project_id = ? AND (is_self = 1 OR mentioned = 1 OR cited = 1)
+          AND observation_id IN (SELECT id FROM geo_observations WHERE workspace_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT ${LOAD_LIMITS.observations})
+        ORDER BY is_self DESC LIMIT ${LOAD_LIMITS.observations * 12}`,
+      ws,
+      pid,
       ws,
       pid,
     )

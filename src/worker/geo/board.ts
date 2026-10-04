@@ -189,8 +189,9 @@ export async function buildEngineBoard(env: Env, db: Db, project: ProjectRow, no
   const [brandRows, citationRows, queryCounts, latencyRows] = await Promise.all([
     inChunks(okIds, (chunk, ph) =>
       db.all<SelfRow & { brand_key: string; is_self: number }>(
+        // Self + competitors mentioned or cited only ([A39]: the board reads nothing else; bounded at 60 competitors).
         `SELECT observation_id, brand_key, is_self, mentioned, cited, list_rank, sentiment, method FROM geo_brand_observations
-          WHERE workspace_id = ? AND project_id = ? AND observation_id IN (${ph})`,
+          WHERE workspace_id = ? AND project_id = ? AND observation_id IN (${ph}) AND (is_self = 1 OR mentioned = 1 OR cited = 1)`,
         ws,
         pid,
         ...chunk,

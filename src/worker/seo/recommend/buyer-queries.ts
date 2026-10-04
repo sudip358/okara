@@ -35,6 +35,7 @@ import type { Budget } from "../../runs/context";
 import { weightedPosition } from "../gsc/aggregate";
 import { demandLookup, normalizeDemandQuery } from "../gsc/demand";
 import { projectBrandClassifier } from "../gsc/overview";
+import { competitorTermsForState } from "../gsc/brand";
 import { latestUsableSync } from "../gsc/overview";
 import { windowLabel } from "../gsc/windows";
 import { localeCountryAlpha2 } from "../gsc/countries";
@@ -215,7 +216,11 @@ export async function buildBuyerQueries(deps: BuyerQueriesDeps): Promise<Coverag
         locale: project.locale,
         language: project.language,
         site_type: project.site_type,
-        brand_terms: { self: classifier.terms.self, competitors: classifier.terms.competitors },
+        // [A39] At most MAX_STATE_COMPETITOR_TERMS competitor terms, those found in these queries first.
+        brand_terms: (() => {
+          const comp = competitorTermsForState(classifier.terms, eligible.map((a) => a.query));
+          return { self: classifier.terms.self, competitors: comp.terms, ...(comp.note ? { competitors_note: comp.note } : {}) };
+        })(),
       },
       queries: eligible.map((a) => a.query),
       maxCalls: deps.classify ? Math.max(1, Math.floor(deps.maxCallsPerRequest ?? BUYER_CALLS_PER_REQUEST)) : 0,

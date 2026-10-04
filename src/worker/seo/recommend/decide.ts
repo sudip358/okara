@@ -30,6 +30,7 @@ import { hashJson } from "../../lib/hash";
 import type { RunContext } from "../../runs/context";
 import { DEFAULT_NOUL_BANDS, QUESTION_POLICY, runnerUp, tierFor } from "../../runs/policy";
 import { safeMessage } from "../gsc/sync";
+import { competitorTermsForState } from "../gsc/brand";
 import {
   ACTION_CHOICE_OPTIONS,
   ANSWER_IS_DIRECT,
@@ -149,7 +150,9 @@ export function candidateDecisionRequest(
     // [A23] Intent state: brand terms (self + competitors), country, language.
     state.country = inputs.project.country ?? null;
     state.language = inputs.project.language;
-    state.brand_terms = { self: inputs.project.brandTerms?.self ?? [], competitors: inputs.project.brandTerms?.competitors ?? [] };
+    // [A39] At most MAX_STATE_COMPETITOR_TERMS competitor terms, those found in the query first (note when trimmed).
+    const comp = inputs.project.brandTerms ? competitorTermsForState(inputs.project.brandTerms, c.query ? [c.query] : []) : { terms: [], note: null };
+    state.brand_terms = { self: inputs.project.brandTerms?.self ?? [], competitors: comp.terms, ...(comp.note ? { competitors_note: comp.note } : {}) };
   }
   addKindQuestions(c, inputs, state, questions);
   return { state, questions };

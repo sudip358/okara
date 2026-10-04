@@ -128,6 +128,45 @@ describe("competitor sync", () => {
     expect(back.json!.data.outcome.changes).toEqual(["+ rejuvenation.example"]);
   });
 
+  it("[A39] keeps the fetch choice and accepted typo fixes for later syncs; adds new sheet domains up to the 60 cap; removed ones are untracked as before", async () => {
+    const s = await setup({ DATAFORSEO_LOGIN: "op@example.com", DATAFORSEO_PASSWORD: "op-password" });
+    setCompetitorDataFetch((async () => new Response("{}", { status: 500 })) as typeof fetch);
+    // 55 tracked already (Brass Co + 54): the sheet's 4 domains fit, then only 1 slot is left.
+    const existing = [{ name: "Brass Co", domains: ["brassco.example"], aliases: [] }, ...Array.from({ length: 54 }, (_, i) => ({ name: `Old ${i}`, domains: [`old${i}.example`], aliases: [] }))];
+    await s.db.run("UPDATE projects SET competitors_json = ? WHERE id = ?", JSON.stringify(existing), s.pid);
+    s.sheet.tabs[0]!.rows.push(["ww.typo-fixed.example", "typo", "", "10"]);
+    const r = await call(s.env, s.u, "POST", `/projects/${s.pid}/import/commit`, {
+      source: { kind: "sheets", spreadsheetId: SPREADSHEET_ID, tab: "04 - Competitors" },
+      destination: "competitors",
+      mapping: COMP_MAPPING,
+      options: { fetchCompetitorData: false, acceptDomainFixes: ["ww.typo-fixed.example"] },
+      keepInSync: { frequencyHours: 24 },
+    });
+    expect(r.status).toBe(201);
+    expect(r.json!.data.changes).toEqual(["+ lumens.example", "+ rejuvenation.example", "+ forbes-lomax.example", "+ typo-fixed.example"]);
+    const sync = r.json!.data.sync as ImportSyncSummary;
+    const stored = await s.db.first<{ options_json: string }>("SELECT options_json FROM import_syncs WHERE id = ?", sync.id);
+    expect(JSON.parse(stored!.options_json)).toMatchObject({ fetchCompetitorData: false, acceptDomainFixes: ["ww.typo-fixed.example"] });
+
+    // The sheet grows by 2: one slot left (60 cap) -> 1 added, 1 not added (limit); no DataForSEO fetch (choice kept).
+    const tab = s.sheet.tabs[0]!;
+    tab.rows.push(["https://www.grow-a.example/page", "", "", "1"], ["grow-b.example", "", "", "2"]);
+    const r1 = await syncNow(s, sync.id);
+    expect(r1.json!.data.outcome.changes).toEqual(["+ grow-a.example"]);
+    let project = (await call(s.env, s.u, "GET", `/projects/${s.pid}`)).json!.data as Project;
+    expect(project.competitors).toHaveLength(60);
+    expect(await s.db.all("SELECT id FROM competitor_fetches WHERE project_id = ?", s.pid)).toHaveLength(0);
+    expect(await s.db.all("SELECT id FROM competitor_fetch_backlog WHERE project_id = ?", s.pid)).toHaveLength(0);
+
+    // A domain removed from the sheet is untracked by the sync (existing behaviour), freeing the slot for grow-b.
+    tab.rows = tab.rows.filter((row) => row[0] !== "rejuvenation.example");
+    const r2 = await syncNow(s, sync.id);
+    expect(r2.json!.data.outcome.changes).toEqual(["+ grow-b.example", "− rejuvenation.example"]);
+    project = (await call(s.env, s.u, "GET", `/projects/${s.pid}`)).json!.data as Project;
+    expect(project.competitors).toHaveLength(60);
+    expect(project.competitors.flatMap((c) => c.domains)).toEqual(expect.arrayContaining(["typo-fixed.example", "grow-b.example"]));
+  });
+
   it("token expired, header changed, tab renamed and deleted, not connected: surfaced, never silent", async () => {
     const s = await setup();
     const sync = await linkCompetitors(s);

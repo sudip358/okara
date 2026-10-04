@@ -3,8 +3,10 @@
  * OWNED BY: web-shell.
  */
 import type { Competitor, ProjectInput } from "@shared/types";
+import { MAX_COMPETITORS, MAX_COMPETITOR_DOMAINS, cleanCompetitorDomain } from "@shared/competitors";
 
-export const MAX_COMPETITORS = 5;
+/** Shared with the Worker schema (src/shared/competitors.ts). */
+export { MAX_COMPETITORS };
 export const LIMITS = {
   name: 100,
   brandName: 100,
@@ -13,22 +15,32 @@ export const LIMITS = {
   productDescription: 2000,
   audience: 1000,
   voice: 2000,
-  domains: 10,
+  domains: MAX_COMPETITOR_DOMAINS,
 } as const;
 
 const HOST_RE = /^(?=.{1,253}$)(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/;
 
-/** "https://www.Example.com/path" → "www.example.com" */
+/**
+ * "https://www.Example.com/path" → "example.com" (shared cleaning rules: hostname only, lowercase, no "www.", no path).
+ * Values that cannot be cleaned are returned trimmed and lowercased so domainError can explain why.
+ */
 export function normalizeDomain(raw: string): string {
-  let s = raw.trim().toLowerCase();
-  s = s.replace(/^[a-z]+:\/\//, "");
-  s = s.split(/[/?#]/)[0] ?? "";
-  s = s.replace(/:\d+$/, "").replace(/\.$/, "");
-  return s;
+  const r = cleanCompetitorDomain(raw);
+  return r.ok ? r.domain : raw.trim().toLowerCase();
 }
 
+/** Validity only (used for domains already on the project). */
+function domainInvalid(d: string): string | null {
+  const r = cleanCompetitorDomain(d);
+  return !r.ok || !HOST_RE.test(r.domain) ? `"${d}" is not a valid domain name.` : null;
+}
+
+/** Why a (normalized) competitor domain is rejected when it is added; a likely "ww." / "wwww." typo is rejected with the suggestion, never corrected silently. */
 export function domainError(d: string): string | null {
-  return HOST_RE.test(d) ? null : `"${d}" is not a valid domain name.`;
+  const r = cleanCompetitorDomain(d);
+  if (!r.ok || !HOST_RE.test(r.domain)) return `"${d}" is not a valid domain name.`;
+  if (r.typoOf) return `"${d}" looks like a typo. Did you mean ${r.typoOf}? Type the corrected domain to add it.`;
+  return null;
 }
 
 export function siteUrlError(raw: string): string | null {
@@ -76,8 +88,8 @@ export function validateProjectInput(input: ProjectInput): ValidationResult {
   input.competitors.forEach((c, i) => {
     if (!c.name.trim()) errors[`competitors.${i}.name`] = "Competitor name is required.";
     if (c.domains.length > LIMITS.domains) errors[`competitors.${i}.domains`] = `Up to ${LIMITS.domains} domains.`;
-    const bad = c.domains.find((d) => domainError(d));
-    if (bad) errors[`competitors.${i}.domains`] = domainError(bad)!;
+    const bad = c.domains.find((d) => domainInvalid(d));
+    if (bad) errors[`competitors.${i}.domains`] = domainInvalid(bad)!;
   });
 
   warnings.push(...aliasCollisions(input.brandName, input.brandAliases, input.competitors, input.siteUrl));

@@ -107,14 +107,60 @@ function compile(terms: string[]): CompiledTerm[] {
   });
 }
 
-function matches(words: string[], t: CompiledTerm): boolean {
-  if (t.words.length === 0) return false;
-  if (t.joined && words.includes(t.joined)) return true;
-  outer: for (let i = 0; i + t.words.length <= words.length; i++) {
-    for (let j = 0; j < t.words.length; j++) if (words[i + j] !== t.words[j]) continue outer;
-    return true;
+function matchesAt(words: string[], i: number, t: CompiledTerm): boolean {
+  if (i + t.words.length > words.length) return false;
+  for (let j = 0; j < t.words.length; j++) if (words[i + j] !== t.words[j]) return false;
+  return true;
+}
+
+/**
+ * Terms indexed by first word and by joined form, so a query is classified in O(words) instead of O(terms)
+ * (up to MAX_COMPETITORS = 60 competitors x 11 names/aliases). Indices keep the configured term order: the
+ * first matching term in list order wins, exactly as a linear scan would.
+ */
+interface TermIndex {
+  list: CompiledTerm[];
+  byFirst: Map<string, number[]>;
+  joined: Map<string, number>;
+}
+
+function indexTerms(list: CompiledTerm[]): TermIndex {
+  const byFirst = new Map<string, number[]>();
+  const joined = new Map<string, number>();
+  list.forEach((t, k) => {
+    if (t.words.length === 0) return;
+    const f = t.words[0]!;
+    if (!byFirst.has(f)) byFirst.set(f, []);
+    byFirst.get(f)!.push(k);
+    if (t.joined && !joined.has(t.joined)) joined.set(t.joined, k);
+  });
+  return { list, byFirst, joined };
+}
+
+/** Indices of every term that matches the query words (ascending). */
+function matchingTerms(idx: TermIndex, words: string[]): number[] {
+  const hits = new Set<number>();
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    const j = idx.joined.get(w);
+    if (j !== undefined) hits.add(j);
+    for (const k of idx.byFirst.get(w) ?? []) if (matchesAt(words, i, idx.list[k]!)) hits.add(k);
   }
-  return false;
+  return [...hits].sort((a, b) => a - b);
+}
+
+function firstMatch(idx: TermIndex, words: string[]): CompiledTerm | null {
+  let best = Infinity;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    const j = idx.joined.get(w);
+    if (j !== undefined && j < best) best = j;
+    for (const k of idx.byFirst.get(w) ?? []) {
+      if (k >= best) break;
+      if (matchesAt(words, i, idx.list[k]!)) best = k;
+    }
+  }
+  return best === Infinity ? null : idx.list[best]!;
 }
 
 export interface BrandClassifier {
@@ -124,21 +170,42 @@ export interface BrandClassifier {
 }
 
 export function createBrandClassifier(terms: BrandTerms): BrandClassifier {
-  const self = compile(terms.self);
-  const comp = compile(terms.competitors);
+  const self = indexTerms(compile(terms.self));
+  const comp = indexTerms(compile(terms.competitors));
   const cache = new Map<string, BrandMatch>();
   const classify = (query: string): BrandMatch => {
     const norm = normalizeBrandText(query);
     const hit = cache.get(norm);
     if (hit) return hit;
     const words = norm.split(" ").filter(Boolean);
-    const s = self.find((t) => matches(words, t)) ?? null;
-    const c = comp.find((t) => matches(words, t)) ?? null;
+    const s = firstMatch(self, words);
+    const c = firstMatch(comp, words);
     const m: BrandMatch = { kind: s ? "self_brand" : c ? "competitor_brand" : "non_brand", selfTerm: s?.term ?? null, competitorTerm: c?.term ?? null };
     if (cache.size < 50_000) cache.set(norm, m);
     return m;
   };
   return { terms, classify, isSelfBrand: (q) => (q ? classify(q).kind === "self_brand" : false) };
+}
+
+/** Competitor terms handed to a Jev state (query intent, buyer queries). */
+export const MAX_STATE_COMPETITOR_TERMS = 20;
+
+/**
+ * [A39] The competitor terms put into a Jev state: those found in the given queries first (deterministic match,
+ * in configured order), then the rest in configured order, at most `cap`; `note` says how many were left out
+ * (null when none). With up to 60 tracked competitors the full list would grow every Jev request linearly.
+ */
+export function competitorTermsForState(terms: BrandTerms, queries: readonly string[], cap = MAX_STATE_COMPETITOR_TERMS): { terms: string[]; note: string | null } {
+  const all = terms.competitors;
+  if (all.length <= cap) return { terms: [...all], note: null };
+  const idx = indexTerms(compile(all));
+  const found = new Set<number>();
+  for (const q of queries.slice(0, 500)) {
+    for (const k of matchingTerms(idx, normalizeBrandText(q).split(" ").filter(Boolean))) found.add(k);
+  }
+  const order = [...[...found].sort((a, b) => a - b), ...all.map((_, k) => k).filter((k) => !found.has(k))];
+  const picked = order.slice(0, cap).map((k) => all[k]!);
+  return { terms: picked, note: `${all.length - picked.length} of ${all.length} competitor terms omitted (terms found in the query listed first).` };
 }
 
 // ------------------------------------------------------------------ brand split (SeoOverview.brandSplit)

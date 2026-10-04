@@ -49,6 +49,7 @@ import {
   refreshCostNote,
   refreshState,
   shouldPoll,
+  waitingText,
 } from "./competitor-data-lib";
 
 const base = (projectId: string) => `/projects/${encodeURIComponent(projectId)}/competitors/dataforseo`;
@@ -160,6 +161,7 @@ function LocationSettings({ projectId, panel, onChange }: { projectId: string; p
         </p>
         <p>
           <span className="font-medium">Pull data when a competitor is added:</span> {panel.autoFetch ? "on" : "off"} · up to {panel.caps.refreshesPerDomainPerDay} refreshes per domain and {panel.caps.fetchesPerProjectPerDay} per project per UTC day ({panel.caps.fetchesToday} used today)
+          {(panel.caps.waitingDomains ?? 0) > 0 && ` · ${waitingText(panel.caps.waitingDomains ?? 0, panel.caps.fetchesPerProjectPerDay)}`}
         </p>
       </div>
       {panel.canManage && panel.credentialSource !== "none" && (
@@ -271,6 +273,11 @@ export function CompetitorDomainPanel({
           {f && (
             <Badge tone={STATUS_TONE[f.status] ?? "neutral"} title={f.error ?? undefined}>
               {FETCH_STATUS_LABEL[f.status]}
+            </Badge>
+          )}
+          {d.waiting && (
+            <Badge tone="neutral" title="Added while today's project refresh cap was used up: fetched automatically on a later UTC day, in the order added.">
+              Waiting (daily cap)
             </Badge>
           )}
           {panel.canManage && (

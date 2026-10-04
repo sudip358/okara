@@ -19,7 +19,8 @@ import { HttpError } from "../lib/errors";
 import { parseJson } from "../lib/db";
 import { brandBlindViolations, getActivePromptSet, MAX_PROMPT_LENGTH, MAX_PROMPTS_PER_SET, savePromptSet, type PromptInput } from "../geo/prompts";
 import { putPageManual, putProjectManual } from "../checklists/service";
-import { onCompetitorsChanged } from "../competitors/dataforseo";
+import { addedCompetitorDomains, estimateCompetitorFetch, onCompetitorsChanged } from "../competitors/dataforseo";
+import { MAX_COMPETITORS, MAX_COMPETITOR_DOMAINS, cleanCompetitorDomain } from "@shared/competitors";
 import { MAX_BULK_IDS, updateLinkUserStatusBulk, linkSetup } from "../links/report";
 import { loadSync } from "../imports/sync";
 import { LIMIT_BOUNDS, putLimits, toProject, updateProject } from "../platform/projects";
@@ -258,8 +259,12 @@ const updateGeoPrompts: ActionTool<typeof geoPromptsSchema> = {
 
 // ------------------------------------------------------------------ update_competitors (PATCH /projects/:pid competitors)
 const competitorsSchema = z.object({
-  add: z.array(z.object({ name: z.string().trim().min(1).max(120), domains: z.array(z.string().trim().min(1).max(253)).max(5).optional() })).max(10).optional(),
-  remove: z.array(z.string().trim().min(1).max(120)).max(20).optional().describe("Competitor names to remove (as listed)."),
+  add: z
+    .array(z.object({ name: z.string().trim().min(1).max(120), domains: z.array(z.string().trim().min(1).max(253)).max(MAX_COMPETITOR_DOMAINS).optional() }))
+    .max(20)
+    .optional()
+    .describe(`Up to 20 per call; at most ${MAX_COMPETITORS} competitors per project. For a long list, the Import page (sheet tab) cleans domains and shows the DataForSEO estimate.`),
+  remove: z.array(z.string().trim().min(1).max(120)).max(MAX_COMPETITORS).optional().describe("Competitor names to remove (as listed)."),
 });
 
 function nextCompetitors(project: ProjectRow, input: z.infer<typeof competitorsSchema>): { before: Competitor[]; after: Competitor[] } {
@@ -272,6 +277,7 @@ function nextCompetitors(project: ProjectRow, input: z.infer<typeof competitorsS
     after.push({ name: a.name, domains: a.domains ?? [], aliases: [] } as Competitor);
   }
   if (!input.add?.length && !drop.size) throw new ToolError("Nothing to change.");
+  if (after.length > MAX_COMPETITORS) throw new ToolError(`At most ${MAX_COMPETITORS} competitors per project (${after.length} after this change). Remove some first.`);
   return { before, after };
 }
 
@@ -281,11 +287,14 @@ const updateCompetitors: ActionTool<typeof competitorsSchema> = {
   description: "Propose adding or removing tracked competitors (project settings). New domains may pull DataForSEO data automatically when the workspace enabled it (paid). Needs confirmation.",
   schema: competitorsSchema,
   async prepare(ctx, input) {
-    const { after } = nextCompetitors(await freshProject(ctx), input);
+    const { before, after } = nextCompetitors(await freshProject(ctx), input);
     const adds = (input.add ?? []).map((a) => `${clip(a.name, 60)}${a.domains?.length ? ` (${a.domains.slice(0, 3).join(", ")})` : ""}`);
+    // Published-price ceiling for the new domains (cleaned like the save does), spread by the daily cap ([A39]).
+    const newDomains = addedCompetitorDomains(before, after.map((c) => ({ ...c, domains: c.domains.map((d) => { const r = cleanCompetitorDomain(d); return r.ok ? r.domain : d; }) }))).length;
+    const fetchNote = newDomains > 0 ? `If DataForSEO is configured and auto-fetch is on: ${estimateCompetitorFetch(newDomains).text} (billed by DataForSEO).` : "";
     return {
       title: `Update competitors (${[adds.length ? `add ${adds.length}` : "", input.remove?.length ? `remove ${input.remove.length}` : ""].filter(Boolean).join(", ")})?`,
-      detail: `${adds.length ? `Add: ${clip(adds.join("; "), 200)}. ` : ""}${input.remove?.length ? `Remove: ${clip(input.remove.join(", "), 160)}. ` : ""}${after.length} competitor(s) after. New domains may fetch DataForSEO data (billed by DataForSEO) if auto-fetch is on.`,
+      detail: `${adds.length ? `Add: ${clip(adds.join("; "), 200)}. ` : ""}${input.remove?.length ? `Remove: ${clip(input.remove.join(", "), 160)}. ` : ""}${after.length} of ${MAX_COMPETITORS} competitor(s) after. ${fetchNote}`.trim(),
     };
   },
   async execute(ctx, input) {

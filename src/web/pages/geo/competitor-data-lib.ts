@@ -98,3 +98,8 @@ export function estimate(n: number | null | undefined, digits = 0): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
   return n.toLocaleString(undefined, { maximumFractionDigits: digits });
 }
+
+/** "12 new domains wait for later days (10 per day)" — the auto-fetch backlog [A39]. */
+export function waitingText(n: number, perDay: number): string {
+  return `${n} new domain${n === 1 ? "" : "s"} wait${n === 1 ? "s" : ""} for later days (fetched automatically, at most ${perDay} refreshes per day)`;
+}

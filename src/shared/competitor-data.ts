@@ -143,6 +143,11 @@ export interface CompetitorDomainSummary {
     endpoints: CompetitorEndpointMeta[];
   } | null;
   refreshesToday: number;
+  /**
+   * [A39] The domain was added while today's per-project refresh cap was used up: it waits in the backlog and the
+   * cron fetches it on a later UTC day (in the order added). Absent on older responses.
+   */
+  waiting?: boolean;
 }
 
 export interface CompetitorDomainDetail extends CompetitorDomainSummary {
@@ -171,6 +176,8 @@ export interface CompetitorDataPanel {
     fetchesPerProjectPerDay: number;
     fetchesToday: number;
     keepSnapshotsPerDomain: number;
+    /** [A39] New competitor domains waiting for a later day's cap (auto-fetch backlog). */
+    waitingDomains?: number;
   };
   pricing: {
     /** Published DataForSEO Labs price used for the reservation ceiling (docs/provider-contracts.md). */

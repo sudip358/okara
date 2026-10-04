@@ -237,11 +237,21 @@ export function detectBrands(text: string, brands: BrandDef[]): Map<string, Bran
 
 /** True when `needle` (a name/alias/domain) occurs in `text` under the same matching rules. */
 export function containsTerm(text: string, term: string): Span | null {
-  const alias = normalizeAlias(term);
-  if ([...alias].length < 2) return null;
+  return termMatcher(text)(term);
+}
+
+/**
+ * containsTerm for many terms over one text: the text is normalized once (with up to 60 tracked competitors a
+ * brand-blind check tests hundreds of names, aliases and domains against the same prompt).
+ */
+export function termMatcher(text: string): (term: string) => Span | null {
   const nt = normalizeWithMap(text);
-  const hit = findAlias(nt, alias)[0];
-  return hit ? toOriginal(nt, text, hit[0], hit[1]) : null;
+  return (term: string) => {
+    const alias = normalizeAlias(term);
+    if ([...alias].length < 2) return null;
+    const hit = findAlias(nt, alias)[0];
+    return hit ? toOriginal(nt, text, hit[0], hit[1]) : null;
+  };
 }
 
 // ------------------------------------------------------------------ domains and citations

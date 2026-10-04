@@ -226,24 +226,38 @@ export function groupCitedDomains(
     h.types.set(st, (h.types.get(st) ?? 0) + 1);
     hosts.set(host, h);
   }
+  // Brand tags are resolved only for the rows returned (top `limit` + your own host), not for every distinct host:
+  // with up to 60 tracked competitors x 5 domains each lookup scans ~300 domains ([A39]).
+  const tag = (host: string): LiveCitedDomainRow["brand"] => {
+    const key = brandForHost(host, brands);
+    return key ? { key, isSelf: brands.some((b) => b.key === key && b.isSelf) } : null;
+  };
+  const selfBrands = brands.filter((b) => b.isSelf);
   const ranked: LiveCitedDomainRow[] = [...hosts]
-    .map(([host, h]) => {
-      const key = brandForHost(host, brands);
-      const brand = key ? { key, isSelf: brands.some((b) => b.key === key && b.isSelf) } : null;
-      return {
-        host,
-        answers: h.obs.size,
-        citations: h.citations,
-        engines: engineOrder(h.engines),
-        sourceTypes: [...h.types].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([t]) => t),
-        brand,
-        rank: 0,
-      };
-    })
+    .map(([host, h]) => ({
+      host,
+      answers: h.obs.size,
+      citations: h.citations,
+      engines: engineOrder(h.engines),
+      sourceTypes: [...h.types].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([t]) => t),
+      brand: null as LiveCitedDomainRow["brand"],
+      rank: 0,
+    }))
     .sort((a, b) => b.answers - a.answers || b.citations - a.citations || (a.host < b.host ? -1 : a.host > b.host ? 1 : 0))
     .map((r, i) => ({ ...r, rank: i + 1 }));
-  const shown = ranked.slice(0, limit);
-  const own = shown.some((r) => r.brand?.isSelf) ? null : (ranked.find((r) => r.brand?.isSelf) ?? null);
+  const shown = ranked.slice(0, limit).map((r) => ({ ...r, brand: tag(r.host) }));
+  // Your own host outside the top rows: found with the self brand's domains only, then tagged like the others.
+  let own: LiveCitedDomainRow | null = null;
+  if (!shown.some((r) => r.brand?.isSelf)) {
+    for (const r of ranked.slice(limit)) {
+      if (brandForHost(r.host, selfBrands) === null) continue;
+      const brand = tag(r.host);
+      if (brand?.isSelf) {
+        own = { ...r, brand };
+        break;
+      }
+    }
+  }
   return { rows: shown, own, answersWithCitations: answers.size, totalHosts: ranked.length, unresolved };
 }
 

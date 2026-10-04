@@ -19,6 +19,7 @@ import {
   type ImportDestination,
   type ImportMapping,
   type ImportOverview,
+  type ImportOptions,
   type ImportPlan,
   type ImportRecordSummary,
   type ImportSyncSummary,
@@ -43,7 +44,10 @@ import {
   excludable,
   formatBytes,
   frequencyLabel,
+  competitorFetchCaption,
+  fetchCompetitorDataChecked,
   importRequestBody,
+  withDomainFix,
   planHasChanges,
   readCsvFile,
   sheetsErrorMessage,
@@ -78,6 +82,12 @@ export function ImportPage() {
   const sheetsError = sheetsErrorMessage(params.get("sheetsError"));
   const connected = params.get("sheets") === "connected";
 
+  /** Option changes that alter the plan's outcome (DataForSEO fetch, typo fixes): keep the current plan shown and re-run the dry run. */
+  const setTabAndDryRun = (t: StagedTab, patch: Partial<StagedTab>) => {
+    const next = { ...t, ...patch };
+    setStaged((s) => s.map((x) => (x.id === t.id ? next : x)));
+    void runDry(next);
+  };
   const setTab = (id: string, patch: Partial<StagedTab>) => {
     setStaged((s) => s.map((t) => (t.id === id ? { ...t, ...patch } : t)));
     setPlans((p) => {
@@ -184,6 +194,7 @@ export function ImportPage() {
                   excluded={excluded[t.id] ?? []}
                   disabled={project.isDemo}
                   onChange={(patch) => setTab(t.id, patch)}
+                  onChangeAndDryRun={(patch) => setTabAndDryRun(t, patch)}
                   onToggleExclude={(key) =>
                     setExcluded((x) => {
                       const cur = new Set(x[t.id] ?? []);
@@ -543,6 +554,46 @@ export function MappingFields({ destination, mapping, headers, onChange }: { des
   );
 }
 
+/** Competitors [A39]: likely-typo fixes to accept, and the DataForSEO fetch option with its published-price estimate. */
+export function CompetitorImportOptions({ plan, options, busy, onOptions }: { plan: ImportPlan; options: ImportOptions; busy: boolean; onOptions: (o: ImportOptions) => void }) {
+  const f = plan.competitorFetch;
+  const fixes = plan.domainFixes ?? [];
+  const caption = competitorFetchCaption(plan);
+  return (
+    <div className="space-y-3 rounded-lg border border-zinc-200 p-3 text-sm dark:border-zinc-800" data-testid="competitor-import-options">
+      {fixes.length > 0 && (
+        <fieldset className="space-y-1">
+          <legend className="font-medium">Possible typos: accept a fix to import the corrected domain (never applied automatically)</legend>
+          {fixes.map((fx) => (
+            <label key={fx.key} className="flex flex-wrap items-center gap-2">
+              <input type="checkbox" checked={fx.accepted} disabled={busy} onChange={(e) => onOptions(withDomainFix(options, fx.key, e.target.checked))} />
+              <span>
+                {fx.row ? `Row ${fx.row}: ` : ""}
+                <code>{fx.from}</code> → <code>{fx.to}</code>
+              </span>
+            </label>
+          ))}
+        </fieldset>
+      )}
+      {f && f.newDomains > 0 && (
+        <div className="space-y-1">
+          <label className="flex items-center gap-2 font-medium">
+            <input
+              type="checkbox"
+              checked={f.state === "ready" && fetchCompetitorDataChecked(options, plan)}
+              disabled={busy || f.state !== "ready"}
+              onChange={(e) => onOptions({ ...options, fetchCompetitorData: e.target.checked })}
+            />
+            Fetch DataForSEO data for new competitors
+          </label>
+          <p className="text-xs text-zinc-700 dark:text-zinc-300">{f.estimate} (published-price ceiling; DataForSEO bills the actual cost).</p>
+          {caption && <p className="text-xs text-zinc-600 dark:text-zinc-400">{caption}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function PlanView({ plan, excluded, onToggle, disabled }: { plan: ImportPlan; excluded: string[]; onToggle?: (key: string) => void; disabled?: boolean }) {
   return (
     <div className="space-y-2" data-testid="plan">
@@ -605,6 +656,7 @@ function TabCard({
   excluded,
   disabled,
   onChange,
+  onChangeAndDryRun,
   onToggleExclude,
   onDryRun,
   onImport,
@@ -618,6 +670,7 @@ function TabCard({
   excluded: string[];
   disabled: boolean;
   onChange: (patch: Partial<StagedTab>) => void;
+  onChangeAndDryRun: (patch: Partial<StagedTab>) => void;
   onToggleExclude: (key: string) => void;
   onDryRun: () => void;
   onImport: () => void;
@@ -729,6 +782,9 @@ function TabCard({
           {!plan && <span className="self-center text-xs text-zinc-600 dark:text-zinc-400">Run the dry run first to see what changes.</span>}
         </div>
         {error && <Notice tone="danger">{error}</Notice>}
+        {plan && tab.destination === "competitors" && (
+          <CompetitorImportOptions plan={plan} options={tab.options} busy={busy !== null} onOptions={(options) => onChangeAndDryRun({ options })} />
+        )}
         {plan && <PlanView plan={plan} excluded={excluded} onToggle={onToggleExclude} disabled={disabled} />}
         {result && (
           <Notice tone={result.import ? "success" : "info"}>

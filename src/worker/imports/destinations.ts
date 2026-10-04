@@ -7,10 +7,14 @@
  *                      prompts). "(position)" columns are kept as reference notes "from your sheet, not measured by
  *                      Okara". Sync: new questions are added pending approval; questions removed from the sheet are
  *                      archived (left out of the next set version; earlier versions and their answers are kept).
- *   competitors        each domain -> a tracked competitor (own domain skipped; MAX_COMPETITORS cap); adding one
- *                      queues the DataForSEO refresh as usual (onCompetitorsChanged, daily caps apply). The sheet's
- *                      metrics are stored as an imported snapshot "from your sheet (third-party tool)". Sync: domains
- *                      removed from the sheet are marked "removed from sheet" and no longer tracked.
+ *   competitors        each cleaned domain -> a tracked competitor ([A39]: URL -> host, no "www.", lowercase, page
+ *                      URLs noted, deduped after cleaning, own domain skipped, "ww." typos only with the owner's
+ *                      accepted fix, a subdomain of a listed domain grouped under that competitor; MAX_COMPETITORS
+ *                      cap). New domains queue the DataForSEO refresh only when the import option says so (default
+ *                      on for <= 10 new domains, the preview shows the published-price estimate); the daily cap
+ *                      spreads the rest over later days (onCompetitorsChanged backlog). The sheet's metrics are
+ *                      stored as an imported snapshot "from your sheet (third-party tool)". Sync: domains removed
+ *                      from the sheet are marked "removed from sheet" and no longer tracked.
  *   implemented_links  each (source, target, anchor) -> a link already placed; the suggester treats the pair as
  *                      implemented and the Internal links page checks it against the latest crawl. Append only.
  *   backlinks          each (live URL, target) pair of a built-links tab (up to two per row: Anchor 1/Target and
@@ -36,6 +40,7 @@ import {
   positionHeaderName,
   promptKey,
   type BacklinksMapping,
+  type CompetitorFetchPlan,
   type CompetitorsMapping,
   type DocMapping,
   type ImportCounts,
@@ -56,9 +61,19 @@ import { sha256Hex, stableStringify } from "../lib/hash";
 import { newId } from "../lib/ids";
 import { iso, utcDay } from "../lib/time";
 import type { ProjectRow } from "../platform/access";
-import { MAX_COMPETITORS, isPublicHostname, loadProjectRow, normalizeDomain, siteHost, updateProject } from "../platform/projects";
+import { MAX_COMPETITORS, loadProjectRow, siteHost, updateProject } from "../platform/projects";
+import { MAX_COMPETITOR_DOMAINS, cleanCompetitorDomain, parentDomainIn } from "@shared/competitors";
 import { getActivePromptSet, MAX_PROMPT_LENGTH, MAX_PROMPTS_PER_SET, savePromptSet, brandBlindViolations, type PromptInput } from "../geo/prompts";
-import { onCompetitorsChanged, ownDomain, projectCompetitors } from "../competitors/dataforseo";
+import {
+  FETCHES_PER_PROJECT_PER_DAY,
+  competitorDomains,
+  estimateCompetitorFetch,
+  loadSettings,
+  onCompetitorsChanged,
+  ownDomain,
+  projectCompetitors,
+} from "../competitors/dataforseo";
+import { dataForSeoSource } from "../platform/dataforseo-credentials";
 import { targetDomain } from "../providers/dataforseo";
 import type { LoadedTable } from "./source";
 import { MAX_BACKLINKS_PER_PROJECT } from "@shared/backlinks";
@@ -438,18 +453,71 @@ interface CompetitorData {
   createdCompetitor?: boolean;
 }
 
-function domainOf(raw: string): string | null {
-  const s = raw.trim();
-  if (!s) return null;
-  try {
-    return targetDomain(normalizeDomain(s));
-  } catch {
-    return null;
-  }
-}
-
 const sameSite = (a: string, b: string) => a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`);
 
+/** Plan section for the DataForSEO auto-fetch of new competitor domains (see CompetitorFetchPlan). */
+async function competitorFetchPlan(ctx: ImportCtx, newDomains: number, options: ImportOptions): Promise<CompetitorFetchPlan> {
+  const est = estimateCompetitorFetch(newDomains);
+  const defaultOn = newDomains <= FETCHES_PER_PROJECT_PER_DAY;
+  const selected = typeof options.fetchCompetitorData === "boolean" ? options.fetchCompetitorData : null;
+  let state: CompetitorFetchPlan["state"] = "ready";
+  let message: string | null = null;
+  if (ctx.project.is_demo === 1) {
+    state = "disabled";
+    message = "Demo project: DataForSEO data is never fetched.";
+  } else {
+    let source: Awaited<ReturnType<typeof dataForSeoSource>> = null;
+    try {
+      source = await dataForSeoSource(ctx.env, ctx.db, ctx.project.workspace_id);
+    } catch {
+      source = null;
+    }
+    if (!source) {
+      state = "setup_required";
+      message = "DataForSEO is not configured: nothing will be fetched or billed. Add DataForSEO credentials on the Integrations page, then use Refresh per competitor.";
+    } else {
+      const settings = await loadSettings(ctx.db, ctx.project.workspace_id, ctx.project.id);
+      if (settings && settings.auto_fetch === 0) {
+        state = "auto_fetch_off";
+        message = "Auto-pull of competitor data is off for this project (Competitors page): nothing will be fetched; use Refresh per competitor.";
+      }
+    }
+  }
+  const willFetch = newDomains > 0 && state === "ready" && (selected ?? defaultOn);
+  return {
+    newDomains,
+    perDomainUsd: est.perDomainUsd,
+    maxUsd: est.maxUsd,
+    perDay: est.perDay,
+    days: est.days,
+    estimate: est.text,
+    defaultOn,
+    selected,
+    willFetch,
+    state,
+    message,
+  };
+}
+
+interface CleanCell {
+  domain: string;
+  data: CompetitorData;
+  row: number | null;
+  /** The cell was a page URL (path dropped). */
+  fromPage: boolean;
+  /** Accepted typo fix: the uncorrected host. */
+  fixedFrom: string | null;
+}
+
+/**
+ * Competitors from a sheet tab ([A39] cleaning rules in src/shared/competitors.ts): each cell is cleaned to a
+ * hostname (URL -> host, "www." dropped, lowercase, path dropped and noted "from a page URL"), deduped after
+ * cleaning, the project's own domain skipped, invalid / non-public hosts skipped with the reason. A likely typo
+ * ("ww." / "wwww.") is skipped unless the owner accepted the suggested fix (options.acceptDomainFixes, keyed by the
+ * cleaned host); it is never corrected silently. A subdomain of another listed domain (in the sheet or already
+ * tracked) is grouped under that domain's competitor as an extra domain. New competitors are appended in sheet
+ * order up to MAX_COMPETITORS. DataForSEO: see competitorFetchPlan / onCompetitorsChanged.
+ */
 export async function prepareCompetitors(ctx: ImportCtx, loaded: LoadedTable, mapping: CompetitorsMapping, options: ImportOptions): Promise<Prepared> {
   const { db, project } = ctx;
   const t = loaded.table;
@@ -458,37 +526,57 @@ export async function prepareCompetitors(ctx: ImportCtx, loaded: LoadedTable, ma
   const assignedI = optColumn(loaded, mapping.assignedTo);
   const metricCols = (mapping.metrics ?? []).map((m) => columnIndex(t.headers, m)).filter((i) => i >= 0 && i !== di).slice(0, 30);
   const excluded = excludedSet(options);
+  const acceptedFixes = new Set((options.acceptDomainFixes ?? []).slice(0, 500).map((d) => d.trim().toLowerCase()));
   const records = await loadRecords(db, project, "competitors");
   const own = ownDomain(project);
   const before = projectCompetitors(project);
   const after: Competitor[] = before.map((c) => ({ ...c, domains: [...c.domains], aliases: [...(c.aliases ?? [])] }));
-  const trackedDomain = (d: string) => after.some((c) => c.domains.some((x) => targetDomain(x) === d));
+  const ownerOf = (d: string) => after.find((c) => c.domains.some((x) => targetDomain(x) === d)) ?? null;
+  const trackedDomain = (d: string) => ownerOf(d) !== null;
 
   const b = new PlanBuilder();
   const seen = new Set<string>();
-  const sheetDomains: Array<{ domain: string; data: CompetitorData; row: number | null }> = [];
+  const firstRow = new Map<string, number | null>();
+  const domainFixes: NonNullable<ImportPlan["domainFixes"]> = [];
+  const cells: CleanCell[] = [];
   for (let r = 0; r < t.rows.length; r++) {
     const row = t.rows[r]!;
     const rowNo = t.rowNumbers[r] ?? null;
     const raw = (row[di] ?? "").trim();
     if (!raw) continue;
-    const domain = domainOf(raw);
-    if (!domain || !isPublicHostname(domain)) {
-      b.push(raw.toLowerCase(), raw, "skip", "not a domain name", rowNo);
+    const c = cleanCompetitorDomain(raw);
+    if (!c.ok) {
+      b.push(clip(raw.toLowerCase(), 300), raw, "skip", c.reason, rowNo);
       continue;
     }
+    let domain = c.domain;
+    let fixedFrom: string | null = null;
+    if (c.typoOf) {
+      const accepted = acceptedFixes.has(c.domain);
+      if (domainFixes.length < 100) domainFixes.push({ key: c.domain, from: c.domain, to: c.typoOf, row: rowNo, accepted });
+      if (!accepted) {
+        seen.add(c.domain);
+        b.push(c.domain, raw, "skip", `possible typo: did you mean ${c.typoOf}? Accept the suggested fix to import it (never corrected automatically)`, rowNo);
+        continue;
+      }
+      fixedFrom = c.domain;
+      domain = c.typoOf;
+    }
+    const label = raw === domain ? domain : `${clip(raw, 200)} → ${domain}`;
     if (own && sameSite(domain, own)) {
-      b.push(domain, domain, "skip", "your own domain", rowNo);
+      b.push(domain, label, "skip", "your own domain", rowNo);
       seen.add(domain);
       continue;
     }
     if (seen.has(domain)) {
-      b.push(domain, domain, "skip", "duplicate domain in the sheet", rowNo);
+      const first = firstRow.get(domain);
+      b.push(domain, label, "skip", `duplicate of ${first ? `row ${first}` : "an earlier row"} (${domain}) after cleaning`, rowNo);
       continue;
     }
     seen.add(domain);
+    firstRow.set(domain, rowNo);
     if (excluded.has(domain)) {
-      b.push(domain, domain, "skip", "unchecked by you", rowNo);
+      b.push(domain, label, "skip", "unchecked by you", rowNo);
       continue;
     }
     const data: CompetitorData = {
@@ -496,7 +584,7 @@ export async function prepareCompetitors(ctx: ImportCtx, loaded: LoadedTable, ma
       assignedTo: assignedI >= 0 ? clip((row[assignedI] ?? "").trim(), 120) || null : null,
       metrics: cellsOf(t.headers, row, metricCols, 100),
     };
-    sheetDomains.push({ domain, data, row: rowNo });
+    cells.push({ domain, data, row: rowNo, fromPage: c.fromPage, fixedFrom });
   }
 
   // Removals first (sync): they free competitor slots.
@@ -523,13 +611,24 @@ export async function prepareCompetitors(ctx: ImportCtx, loaded: LoadedTable, ma
     }
   }
 
-  const adds: Array<{ domain: string; data: CompetitorData; mergedInto: string | null }> = [];
+  // Subdomains of another listed domain (sheet or tracked) are grouped under that domain's competitor; parents are
+  // placed first so a subdomain listed above its parent still finds it.
+  const listed = new Set<string>([...cells.map((c) => c.domain), ...competitorDomains(after).map((d) => d.domain)]);
+  const parentOf = new Map(cells.map((c) => [c.domain, parentDomainIn(c.domain, listed)] as const));
+  const ordered = [...cells.filter((c) => !parentOf.get(c.domain)), ...cells.filter((c) => !!parentOf.get(c.domain))];
+
+  const adds: Array<{ domain: string; data: CompetitorData; mergedInto: string | null; row: number | null }> = [];
   const notAdded: Array<{ domain: string; data: CompetitorData }> = [];
   const keeps: Array<{ domain: string; data: CompetitorData }> = [];
-  for (const s of sheetDomains) {
+  const reasonFor = (cell: CleanCell, extra: string | null) =>
+    [extra, cell.fromPage ? "from a page URL (path dropped)" : null, cell.fixedFrom ? `typo fixed: ${cell.fixedFrom} → ${cell.domain} (accepted by you)` : null].filter(Boolean).join("; ") || null;
+  for (const s of ordered) {
     const rec = records.get(s.domain);
     if (trackedDomain(s.domain)) {
-      const data = { ...s.data, createdCompetitor: parseJson<CompetitorData>(rec?.data_json ?? "{}", { notes: null, assignedTo: null, metrics: {} }).createdCompetitor === true };
+      // createdCompetitor is only stored when true (domains merged into a competitor do not carry it), so an
+      // unchanged sheet compares equal and a re-import stays a no-op.
+      const created = parseJson<CompetitorData>(rec?.data_json ?? "{}", { notes: null, assignedTo: null, metrics: {} }).createdCompetitor === true;
+      const data: CompetitorData = { ...s.data, ...(created ? { createdCompetitor: true } : {}) };
       if (rec && rec.status === "tracked" && sameData(rec, data)) b.push(s.domain, s.domain, "unchanged", "already tracked", s.row);
       else {
         b.push(s.domain, s.domain, rec ? "update" : "unchanged", rec ? "sheet metrics updated" : "already tracked; sheet metrics stored", s.row);
@@ -542,36 +641,62 @@ export async function prepareCompetitors(ctx: ImportCtx, loaded: LoadedTable, ma
       b.push(s.domain, s.domain, "skip", "removed from competitors in Okara after an earlier import; not re-added", s.row);
       continue;
     }
+    const parent = parentOf.get(s.domain) ?? null;
+    const parentComp = parent ? ownerOf(parent) : null;
+    if (parentComp && parentComp.domains.length < MAX_COMPETITOR_DOMAINS) {
+      parentComp.domains.push(s.domain);
+      adds.push({ domain: s.domain, data: s.data, mergedInto: parentComp.name, row: s.row });
+      b.push(s.domain, s.domain, "add", reasonFor(s, `merged into "${clip(parentComp.name, 60)}" as an extra domain (subdomain of ${parent})`), s.row);
+      continue;
+    }
     const label = s.domain.split(".")[0]!;
     const merge = after.find((c) => {
       const names = [c.name, ...(c.aliases ?? [])].map((n) => normName(n).replace(/[^\p{L}\p{N}]/gu, ""));
-      return (names.includes(label) || names.includes(s.domain.replace(/[^a-z0-9]/g, ""))) && c.domains.length < 5;
+      return (names.includes(label) || names.includes(s.domain.replace(/[^a-z0-9]/g, ""))) && c.domains.length < MAX_COMPETITOR_DOMAINS;
     });
     if (merge) {
       merge.domains.push(s.domain);
-      adds.push({ domain: s.domain, data: s.data, mergedInto: merge.name });
-      b.push(s.domain, s.domain, "add", `added to existing competitor "${clip(merge.name, 60)}"`, s.row);
+      adds.push({ domain: s.domain, data: s.data, mergedInto: merge.name, row: s.row });
+      b.push(s.domain, s.domain, "add", reasonFor(s, `added to existing competitor "${clip(merge.name, 60)}"`), s.row);
     } else if (after.length < MAX_COMPETITORS) {
       after.push({ name: s.domain, domains: [s.domain], aliases: [] });
-      adds.push({ domain: s.domain, data: { ...s.data, createdCompetitor: true }, mergedInto: null });
-      b.push(s.domain, s.domain, "add", null, s.row);
+      adds.push({ domain: s.domain, data: { ...s.data, createdCompetitor: true }, mergedInto: null, row: s.row });
+      b.push(s.domain, s.domain, "add", reasonFor(s, null), s.row);
     } else {
       notAdded.push({ domain: s.domain, data: s.data });
       b.push(s.domain, s.domain, "not_added", `competitor limit (${MAX_COMPETITORS}) reached: sheet metrics kept as reference; uncheck another domain or remove a competitor to track it`, s.row);
     }
   }
+  // DataForSEO queue order = the sheet's row order.
+  adds.sort((x, y) => (x.row ?? 0) - (y.row ?? 0));
+  const fetchPlan = await competitorFetchPlan(ctx, adds.length, options);
 
   const summary = [countsSentence({ ...b.counts }, { one: "competitor", many: "competitors" }), ...b.skipLines()];
-  if (adds.length) summary.push("New competitor domains queue a DataForSEO refresh when DataForSEO is configured (daily caps apply).");
+  const merged = adds.filter((a) => a.mergedInto).length;
+  if (merged) summary.push(`${merged} domain${merged === 1 ? "" : "s"} grouped under an existing or listed competitor as an extra domain.`);
+  const pendingFixes = domainFixes.filter((f) => !f.accepted).length;
+  if (pendingFixes) summary.push(`${pendingFixes} possible typo${pendingFixes === 1 ? "" : "s"} (www. mistyped): accept the suggested fix to import ${pendingFixes === 1 ? "it" : "them"}.`);
+  if (adds.length) {
+    summary.push(`DataForSEO: ${fetchPlan.estimate}.`);
+    summary.push(
+      fetchPlan.willFetch
+        ? `They will be fetched: up to ${FETCHES_PER_PROJECT_PER_DAY} per project per UTC day in sheet order; the rest wait for the following days (deferred, not dropped).`
+        : fetchPlan.state !== "ready"
+          ? (fetchPlan.message ?? "Nothing will be fetched.")
+          : `Not fetched (option off): no DataForSEO cost. Tick "Fetch DataForSEO data for new competitors" or use Refresh per competitor later.`,
+    );
+  }
   const notes = [
     `Sheet metrics (DA, traffic, referring domains...) are stored as an imported snapshot ${IMPORT_LABEL_THIRD_PARTY}, imported ${utcDay(ctx.now)}; Okara does not measure them.`,
+    `Domains are cleaned: full URLs become their domain (a page URL is noted), "www." is dropped, letters are lowercased, duplicates after cleaning are skipped; a subdomain of a listed domain becomes an extra domain of that competitor (at most ${MAX_COMPETITOR_DOMAINS} per competitor).`,
     `At most ${MAX_COMPETITORS} competitors are tracked per project (GEO detection, DataForSEO).`,
   ];
   const projectChanged = adds.length > 0 || removals.some((r) => r.rec.status === "tracked");
   const noop = !projectChanged && keeps.length === 0 && removals.length === 0 && notAdded.every((n) => records.get(n.domain)?.status === "not_tracked_limit" && sameData(records.get(n.domain), n.data));
+  const plan: ImportPlan = { ...basePlan("competitors", loaded, b, summary, notes), competitorFetch: fetchPlan, ...(domainFixes.length ? { domainFixes } : {}) };
 
   return {
-    plan: basePlan("competitors", loaded, b, summary, notes),
+    plan,
     noop,
     async apply(importId) {
       const changes: ChangeRow[] = [];
@@ -584,14 +709,14 @@ export async function prepareCompetitors(ctx: ImportCtx, loaded: LoadedTable, ma
           if (e instanceof HttpError) throw new HttpError(400, "apply_error", `Competitors could not be saved: ${e.message}`, e.details);
           throw e;
         }
-        await onCompetitorsChanged(ctx.env, db, updated, before, ctx.userId, ctx.now, ctx.schedule);
+        await onCompetitorsChanged(ctx.env, db, updated, before, ctx.userId, ctx.now, ctx.schedule, {}, { fetch: fetchPlan.willFetch, order: adds.map((a) => a.domain) });
       }
       const stmts: Array<[string, ...unknown[]]> = [];
       for (const a of adds) {
         const prev = records.get(a.domain) ?? null;
         stmts.push(upsertRecord(ctx, "competitors", a.domain, a.domain, "tracked", a.data, loaded.source.sourceKey, importId, null));
         changes.push({ key: a.domain, action: prev ? "updated" : "added", prev, refId: COMPETITOR_ADDED });
-        lines.push(`+ ${a.domain}`);
+        lines.push(a.mergedInto ? `+ ${a.domain} (into ${clip(a.mergedInto, 60)})` : `+ ${a.domain}`);
       }
       for (const k of keeps) {
         const prev = records.get(k.domain) ?? null;

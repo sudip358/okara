@@ -17,7 +17,12 @@
  * Scheduling (Workers-safe): the HTTP request only enqueues; work runs in ctx.waitUntil after the response
  * (at most INLINE_PROCESS_DOMAINS domains, i.e. <= 6 parallel subrequests, each with a 25 s timeout), and the
  * cron tick (index.ts, every 15 min) picks up anything still queued and fails refreshes stuck 'running'.
- * Missing credentials -> no call, state setup_required. Nothing is ever simulated.
+ * Many new domains at once ([A39], up to MAX_COMPETITORS = 60 competitors): onCompetitorsChanged queues the new
+ * domains in the order given (sheet order for imports) up to what today's per-project cap still allows; the rest
+ * are DEFERRED, not dropped: they wait in competitor_fetch_backlog (migration 0021) and the cron moves them into the
+ * queue as the next UTC days' caps allow (drainFetchBacklog), so at most FETCHES_PER_PROJECT_PER_DAY refreshes
+ * (manual + automatic) are made per project per day and spend stays bounded by the per-project budget as before.
+ * Missing credentials -> no call, state setup_required, nothing queued or deferred. Nothing is ever simulated.
  */
 import type { Competitor } from "@shared/types";
 import type {
@@ -76,8 +81,10 @@ export const FETCHES_PER_PROJECT_PER_DAY = 10;
 export const KEEP_SNAPSHOTS_PER_DOMAIN = 3;
 /** Refresh log rows kept per (project, domain) (>= the daily cap, so caps stay countable). */
 export const KEEP_FETCH_LOG_PER_DOMAIN = 10;
-/** New domains queued automatically by one project change. */
-export const MAX_AUTO_DOMAINS_PER_CHANGE = 5;
+/** Projects whose backlog the cron drains per tick (each moves at most today's remaining cap into the queue). */
+export const BACKLOG_PROJECTS_PER_TICK = 5;
+/** Backlog rows read per project per drain (>= the daily cap, so a whole day's share is always considered). */
+export const BACKLOG_READ_PER_PROJECT = 25;
 /** Domains processed right after a request (ctx.waitUntil); the rest wait for the cron tick. */
 export const INLINE_PROCESS_DOMAINS = 2;
 /** The cron picks up queued refreshes older than this (the request's waitUntil normally took them). */
@@ -141,12 +148,57 @@ export function ownDomain(p: ProjectRow): string {
   return targetDomain(host);
 }
 
-/** Domains present in `after` but in no competitor of `before` (capped). */
-export function addedCompetitorDomains(before: Competitor[], after: Competitor[]): CompetitorDomain[] {
+/**
+ * Domains present in `after` but in no competitor of `before`, in competitor order, or in `order` first when given
+ * (e.g. the sheet's row order; domains not in `order` follow in competitor order). Never truncated: what does not
+ * fit today's cap is deferred to the backlog, not dropped.
+ */
+export function addedCompetitorDomains(before: Competitor[], after: Competitor[], order: readonly string[] = []): CompetitorDomain[] {
   const old = new Set(competitorDomains(before).map((d) => d.domain));
-  return competitorDomains(after)
-    .filter((d) => !old.has(d.domain))
-    .slice(0, MAX_AUTO_DOMAINS_PER_CHANGE);
+  const added = competitorDomains(after).filter((d) => !old.has(d.domain));
+  if (order.length === 0) return added;
+  const rank = new Map<string, number>();
+  order.forEach((d, i) => {
+    const k = targetDomain(d);
+    if (!rank.has(k)) rank.set(k, i);
+  });
+  return added
+    .map((d, i) => ({ d, i }))
+    .sort((a, b) => (rank.get(a.d.domain) ?? order.length + a.i) - (rank.get(b.d.domain) ?? order.length + b.i))
+    .map((x) => x.d);
+}
+
+// ------------------------------------------------------------------ cost estimate (import preview, chat cards)
+export interface FetchEstimate {
+  newDomains: number;
+  perDomainUsd: number;
+  maxUsd: number;
+  perDay: number;
+  /** UTC days needed at the per-project cap (ignoring refreshes already made today). */
+  days: number;
+  /** "N new competitor domains → up to N × $0.0624 DataForSEO (≈$X), fetched at most 10 per day" */
+  text: string;
+}
+
+/** Per-domain ceiling: exact published price ("$0.0624"). */
+const usdExact = (n: number) => `$${n.toFixed(4).replace(/(\.\d\d)(\d*?)0+$/, "$1$2")}`;
+/** Approximate total, in cents ("≈$3.24"; never "$0.00" for a positive amount). */
+const usdApprox = (n: number) => `$${(n > 0 && n < 0.01 ? 0.01 : n).toFixed(2)}`;
+
+/** Published-price ceiling for refreshing `n` new competitor domains, and how the daily cap spreads them. */
+export function estimateCompetitorFetch(n: number): FetchEstimate {
+  const per = maxRefreshCostUsd();
+  const max = Math.round(n * per * 1e4) / 1e4;
+  const days = Math.ceil(n / FETCHES_PER_PROJECT_PER_DAY);
+  const noun = n === 1 ? "domain" : "domains";
+  return {
+    newDomains: n,
+    perDomainUsd: per,
+    maxUsd: max,
+    perDay: FETCHES_PER_PROJECT_PER_DAY,
+    days,
+    text: `${n} new competitor ${noun} → up to ${n} × ${usdExact(per)} DataForSEO (≈${usdApprox(max)}), fetched at most ${FETCHES_PER_PROJECT_PER_DAY} per day${days > 1 ? ` (about ${days} days)` : ""}`,
+  };
 }
 
 // ------------------------------------------------------------------ location
@@ -294,7 +346,7 @@ const dayStart = (now: Date) => `${utcDay(now)}T00:00:00.000Z`;
 export type EnqueueResult =
   | { kind: "queued"; fetch: FetchRow }
   | { kind: "existing"; fetch: FetchRow }
-  | { kind: "capped"; message: string };
+  | { kind: "capped"; scope: "domain" | "project"; message: string };
 
 /**
  * Queue a refresh. One conditional INSERT: refused when the domain or project daily cap is reached
@@ -343,9 +395,9 @@ export async function enqueueFetch(
   if (active) return { kind: "existing", fetch: active };
   const counts = await todayCounts(db, p, now);
   if ((counts.byDomain.get(domain) ?? 0) >= REFRESHES_PER_DOMAIN_PER_DAY) {
-    return { kind: "capped", message: `Refresh limit reached for ${domain} (${REFRESHES_PER_DOMAIN_PER_DAY} per domain per UTC day).` };
+    return { kind: "capped", scope: "domain", message: `Refresh limit reached for ${domain} (${REFRESHES_PER_DOMAIN_PER_DAY} per domain per UTC day).` };
   }
-  return { kind: "capped", message: `Competitor data refresh limit reached for this project (${FETCHES_PER_PROJECT_PER_DAY} per UTC day).` };
+  return { kind: "capped", scope: "project", message: `Competitor data refresh limit reached for this project (${FETCHES_PER_PROJECT_PER_DAY} per UTC day).` };
 }
 
 export async function loadFetch(db: Db, workspaceId: string, id: string): Promise<FetchRow | null> {
@@ -690,15 +742,26 @@ export async function prune(db: Db, p: ProjectRow, domain: string, currentDomain
       w, p.id, domain, w, p.id, domain, KEEP_FETCH_LOG_PER_DOMAIN,
     ],
   ];
-  // Snapshots of domains that are no longer competitors (the refresh log stays, so daily caps hold).
-  const keep = currentDomains.slice(0, 50);
-  stmts.push([
-    `DELETE FROM competitor_snapshots WHERE workspace_id = ? AND project_id = ?${keep.length ? ` AND domain NOT IN (${keep.map(() => "?").join(",")})` : ""}`,
+  await db.batch(stmts);
+  // Snapshots of domains that are no longer competitors (the refresh log stays, so daily caps hold). Up to
+  // MAX_COMPETITORS x 5 domains are current, more than D1's 100 bound parameters, so the stale domains are found
+  // first (distinct domains with snapshots; bounded) and deleted in chunks.
+  const keep = new Set(currentDomains);
+  const present = await db.all<{ domain: string }>(
+    "SELECT DISTINCT domain FROM competitor_snapshots WHERE workspace_id = ? AND project_id = ? LIMIT 1000",
     w,
     p.id,
-    ...keep,
-  ]);
-  await db.batch(stmts);
+  );
+  const stale = present.map((r) => r.domain).filter((d) => !keep.has(d));
+  for (let i = 0; i < stale.length; i += 90) {
+    const chunk = stale.slice(i, i + 90);
+    await db.run(
+      `DELETE FROM competitor_snapshots WHERE workspace_id = ? AND project_id = ? AND domain IN (${chunk.map(() => "?").join(",")})`,
+      w,
+      p.id,
+      ...chunk,
+    );
+  }
 }
 
 /** Process several queued refreshes, at most `limit` (sequentially; each runs its tasks in parallel). */
@@ -712,8 +775,11 @@ export async function processMany(env: Env, items: Array<{ workspaceId: string; 
   }
 }
 
-/** Cron: fail refreshes stuck 'running' (isolate ended), then process a few queued ones. */
-export async function processQueuedCompetitorFetches(env: Env, now: Date, deps: ProcessDeps = {}): Promise<{ failedStale: number; processed: number }> {
+/**
+ * Cron: fail refreshes stuck 'running' (isolate ended), move deferred domains into the queue as today's caps allow
+ * (drainFetchBacklogs), then process a few queued ones.
+ */
+export async function processQueuedCompetitorFetches(env: Env, now: Date, deps: ProcessDeps = {}): Promise<{ failedStale: number; processed: number; promoted: number }> {
   const db = new Db(env.DB);
   let stale: { changes: number };
   try {
@@ -724,22 +790,168 @@ export async function processQueuedCompetitorFetches(env: Env, now: Date, deps: 
       iso(addSeconds(now, -RUNNING_STALE_SECONDS)),
     );
   } catch (e) {
-    if (isMissingTableError(e)) return { failedStale: 0, processed: 0 };
+    if (isMissingTableError(e)) return { failedStale: 0, processed: 0, promoted: 0 };
     throw e;
   }
+  const promoted = await drainFetchBacklogs(env, now);
+  // Rows promoted by this tick are picked up right away; requests' own rows wait QUEUED_PICKUP_SECONDS for their waitUntil.
   const queued = await db.all<{ id: string; workspace_id: string }>(
-    "SELECT id, workspace_id FROM competitor_fetches WHERE status = 'queued' AND created_at < ? ORDER BY created_at LIMIT ?",
+    "SELECT id, workspace_id FROM competitor_fetches WHERE status = 'queued' AND (created_at < ? OR created_at = ?) ORDER BY created_at LIMIT ?",
     iso(addSeconds(now, -QUEUED_PICKUP_SECONDS)),
+    iso(now),
     CRON_DOMAINS_PER_TICK,
   );
   await processMany(env, queued.map((q) => ({ workspaceId: q.workspace_id, id: q.id })), deps);
-  return { failedStale: stale.changes, processed: queued.length };
+  return { failedStale: stale.changes, processed: queued.length, promoted };
+}
+
+// ------------------------------------------------------------------ backlog (deferred auto-fetch, migration 0021)
+interface BacklogRow {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  domain: string;
+  position: number;
+  requested_by: string | null;
+  created_at: string;
+}
+
+/** Defer domains to the backlog (keeps the earliest position of a domain already waiting). */
+async function deferDomains(db: Db, p: ProjectRow, domains: string[], userId: string | null, now: Date): Promise<number> {
+  if (domains.length === 0) return 0;
+  const last = await db.first<{ m: number | null }>(
+    "SELECT MAX(position) AS m FROM competitor_fetch_backlog WHERE workspace_id = ? AND project_id = ?",
+    p.workspace_id,
+    p.id,
+  );
+  let pos = Number(last?.m ?? -1) + 1;
+  const stmts: Array<[string, ...unknown[]]> = domains.map((d) => [
+    `INSERT OR IGNORE INTO competitor_fetch_backlog (id, workspace_id, project_id, domain, position, requested_by, created_at) VALUES (?,?,?,?,?,?,?)`,
+    newId("cfbk"),
+    p.workspace_id,
+    p.id,
+    d,
+    pos++,
+    userId,
+    iso(now),
+  ]);
+  for (let i = 0; i < stmts.length; i += 50) await db.batch(stmts.slice(i, i + 50));
+  return stmts.length;
+}
+
+/** Domains of the project waiting in the backlog (bounded read; missing table = none). */
+export async function backlogDomains(db: Db, p: ProjectRow, limit = 400): Promise<string[]> {
+  try {
+    const rows = await db.all<{ domain: string }>(
+      "SELECT domain FROM competitor_fetch_backlog WHERE workspace_id = ? AND project_id = ? ORDER BY position, id LIMIT ?",
+      p.workspace_id,
+      p.id,
+      limit,
+    );
+    return rows.map((r) => r.domain);
+  } catch (e) {
+    if (isMissingTableError(e)) return [];
+    throw e;
+  }
+}
+
+async function deleteBacklog(db: Db, p: ProjectRow, ids: string[]): Promise<void> {
+  for (let i = 0; i < ids.length; i += 90) {
+    const chunk = ids.slice(i, i + 90);
+    await db.run(
+      `DELETE FROM competitor_fetch_backlog WHERE workspace_id = ? AND project_id = ? AND id IN (${chunk.map(() => "?").join(",")})`,
+      p.workspace_id,
+      p.id,
+      ...chunk,
+    );
+  }
 }
 
 /**
- * After a project create/update: queue the newly added competitor domains when DataForSEO credentials exist and
- * auto-fetch is on; run up to INLINE_PROCESS_DOMAINS of them via `schedule` (ctx.waitUntil) or inline when no
- * scheduler is available (tests/dev). Never throws (a failure here must not fail the project save).
+ * Move one project's waiting domains into the refresh queue, in backlog order, while today's caps allow.
+ * Domains no longer tracked are dropped; a domain at its own per-domain cap waits for tomorrow; the per-project cap
+ * stops the drain (the rest wait). Auto-fetch off, demo project or no credentials -> the backlog is cleared (nothing
+ * is called; the owner can refresh per competitor later). Returns the queued fetch ids.
+ */
+export async function drainFetchBacklog(env: Env, db: Db, p: ProjectRow, now: Date): Promise<{ queued: string[]; dropped: number; waiting: number }> {
+  const rows = await db.all<BacklogRow>(
+    "SELECT * FROM competitor_fetch_backlog WHERE workspace_id = ? AND project_id = ? ORDER BY position, id LIMIT ?",
+    p.workspace_id,
+    p.id,
+    BACKLOG_READ_PER_PROJECT,
+  );
+  if (rows.length === 0) return { queued: [], dropped: 0, waiting: 0 };
+  const settings = await loadSettings(db, p.workspace_id, p.id);
+  if (p.is_demo === 1 || (settings && settings.auto_fetch === 0) || !(await dataForSeoSource(env, db, p.workspace_id))) {
+    await db.run("DELETE FROM competitor_fetch_backlog WHERE workspace_id = ? AND project_id = ?", p.workspace_id, p.id);
+    return { queued: [], dropped: rows.length, waiting: 0 };
+  }
+  const tracked = new Set(competitorDomains(projectCompetitors(p)).map((d) => d.domain));
+  const done: string[] = [];
+  const queued: string[] = [];
+  let dropped = 0;
+  for (const r of rows) {
+    if (!tracked.has(r.domain)) {
+      done.push(r.id);
+      dropped++;
+      continue;
+    }
+    const res = await enqueueFetch(db, p, r.domain, "competitor_added", r.requested_by, now);
+    if (res.kind === "queued") {
+      queued.push(res.fetch.id);
+      done.push(r.id);
+    } else if (res.kind === "existing") {
+      done.push(r.id);
+    } else if (res.scope === "project") {
+      break; // project cap reached: everything else waits for the next UTC day
+    }
+    // per-domain cap: this domain waits for tomorrow; try the next one
+  }
+  await deleteBacklog(db, p, done);
+  const left = await db.first<{ n: number }>("SELECT COUNT(*) AS n FROM competitor_fetch_backlog WHERE workspace_id = ? AND project_id = ?", p.workspace_id, p.id);
+  return { queued, dropped, waiting: Number(left?.n ?? 0) };
+}
+
+/** Cron: drain the backlog of a few projects (oldest waiting first). */
+export async function drainFetchBacklogs(env: Env, now: Date): Promise<number> {
+  const db = new Db(env.DB);
+  let projects: Array<{ workspace_id: string; project_id: string }>;
+  try {
+    projects = await db.all<{ workspace_id: string; project_id: string }>(
+      `SELECT workspace_id, project_id, MIN(created_at) AS oldest FROM competitor_fetch_backlog
+        GROUP BY workspace_id, project_id ORDER BY oldest LIMIT ?`,
+      BACKLOG_PROJECTS_PER_TICK,
+    );
+  } catch (e) {
+    if (isMissingTableError(e)) return 0;
+    throw e;
+  }
+  let moved = 0;
+  for (const it of projects) {
+    const p = await db.first<ProjectRow>("SELECT * FROM projects WHERE workspace_id = ? AND id = ?", it.workspace_id, it.project_id);
+    if (!p) continue;
+    try {
+      moved += (await drainFetchBacklog(env, db, p, now)).queued.length;
+    } catch (e) {
+      console.error("competitor backlog drain failed", e instanceof Error ? e.message.slice(0, 200) : "unknown");
+    }
+  }
+  return moved;
+}
+
+export interface CompetitorsChangedOptions {
+  /** False: queue nothing (import option "Fetch DataForSEO data for new competitors" unticked). Default true. */
+  fetch?: boolean;
+  /** Preferred order of the new domains (the sheet's row order); others follow in competitor order. */
+  order?: readonly string[];
+}
+
+/**
+ * After a project create/update or an import: queue the newly added competitor domains when DataForSEO
+ * credentials exist, auto-fetch is on and the caller did not opt out. Domains go to the queue in order up to
+ * today's remaining per-project cap; the rest are deferred to the backlog (drained by the cron on later days),
+ * never dropped. Up to INLINE_PROCESS_DOMAINS run via `schedule` (ctx.waitUntil) or inline when no scheduler is
+ * available (tests/dev). Never throws (a failure here must not fail the project save).
  */
 export async function onCompetitorsChanged(
   env: Env,
@@ -750,26 +962,43 @@ export async function onCompetitorsChanged(
   now: Date,
   schedule?: (work: Promise<unknown>) => void,
   deps: ProcessDeps = {},
-): Promise<{ queued: string[] }> {
+  opts: CompetitorsChangedOptions = {},
+): Promise<{ queued: string[]; deferred: string[] }> {
   try {
-    if (p.is_demo === 1) return { queued: [] };
-    const added = addedCompetitorDomains(before, projectCompetitors(p));
-    if (added.length === 0) return { queued: [] };
-    if (!(await dataForSeoSource(env, db, p.workspace_id))) return { queued: [] };
+    if (p.is_demo === 1 || opts.fetch === false) return { queued: [], deferred: [] };
+    const added = addedCompetitorDomains(before, projectCompetitors(p), opts.order ?? []);
+    if (added.length === 0) return { queued: [], deferred: [] };
+    if (!(await dataForSeoSource(env, db, p.workspace_id))) return { queued: [], deferred: [] };
     const settings = await loadSettings(db, p.workspace_id, p.id);
-    if (settings && settings.auto_fetch === 0) return { queued: [] };
+    if (settings && settings.auto_fetch === 0) return { queued: [], deferred: [] };
     const queued: string[] = [];
+    const deferred: string[] = [];
+    let projectCapped = false;
     for (const d of added) {
+      if (projectCapped) {
+        deferred.push(d.domain);
+        continue;
+      }
       const r = await enqueueFetch(db, p, d.domain, "competitor_added", userId, now);
       if (r.kind === "queued") queued.push(r.fetch.id);
+      else if (r.kind === "capped") {
+        deferred.push(d.domain);
+        if (r.scope === "project") projectCapped = true;
+      }
+    }
+    try {
+      await deferDomains(db, p, deferred, userId, now);
+    } catch (e) {
+      if (!isMissingTableError(e)) throw e;
+      console.error("competitor backlog unavailable (migration 0021 pending); deferred domains were not kept");
     }
     const work = processMany(env, queued.slice(0, INLINE_PROCESS_DOMAINS).map((id) => ({ workspaceId: p.workspace_id, id })), deps);
     if (schedule) schedule(work);
     else await work;
-    return { queued };
+    return { queued, deferred };
   } catch (e) {
     if (!isMissingTableError(e)) console.error("competitor auto-fetch failed", e instanceof Error ? e.message.slice(0, 200) : "unknown");
-    return { queued: [] };
+    return { queued: [], deferred: [] };
   }
 }
 
@@ -796,14 +1025,23 @@ interface DomainData {
 async function loadDomainData(db: Db, p: ProjectRow, domains: string[], withLists: boolean): Promise<Map<string, DomainData>> {
   const out = new Map<string, DomainData>(domains.map((d) => [d, { latestFetch: null, dataFetch: null, snapshots: [] }]));
   if (domains.length === 0) return out;
-  const list = domains.slice(0, 50);
-  const marks = list.map(() => "?").join(",");
-  const fetches = await db.all<FetchRow>(
-    `SELECT * FROM competitor_fetches WHERE workspace_id = ? AND project_id = ? AND domain IN (${marks}) ORDER BY created_at DESC, id DESC`,
-    p.workspace_id,
-    p.id,
-    ...list,
-  );
+  // Chunked under D1's 100 bound parameters (up to MAX_COMPETITORS x 5 domains); the refresh log keeps at most
+  // KEEP_FETCH_LOG_PER_DOMAIN rows per domain, so each read is bounded.
+  const fetches: FetchRow[] = [];
+  for (let i = 0; i < domains.length; i += 90) {
+    const list = domains.slice(i, i + 90);
+    fetches.push(
+      ...(await db.all<FetchRow>(
+        `SELECT * FROM competitor_fetches WHERE workspace_id = ? AND project_id = ? AND domain IN (${list.map(() => "?").join(",")})
+          ORDER BY created_at DESC, id DESC LIMIT ?`,
+        p.workspace_id,
+        p.id,
+        ...list,
+        list.length * (KEEP_FETCH_LOG_PER_DOMAIN + 2),
+      )),
+    );
+  }
+  fetches.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
   for (const f of fetches) {
     const d = out.get(f.domain);
     if (!d) continue;
@@ -813,15 +1051,18 @@ async function loadDomainData(db: Db, p: ProjectRow, domains: string[], withList
   const ids = [...out.values()].map((d) => d.dataFetch?.id).filter((x): x is string => !!x);
   if (ids.length) {
     // Lists are only needed on the detail route; the summary reads data_json of ranked_keywords (overview).
-    const rows = await db.all<SnapshotRow>(
-      `SELECT fetch_id, domain, endpoint, status, cost_usd, total_count, item_count,
-              ${withLists ? "data_json" : "CASE WHEN endpoint = 'ranked_keywords' THEN data_json ELSE '{}' END AS data_json"}, error, fetched_at
-         FROM competitor_snapshots WHERE workspace_id = ? AND project_id = ? AND fetch_id IN (${ids.map(() => "?").join(",")})`,
-      p.workspace_id,
-      p.id,
-      ...ids,
-    );
-    for (const r of rows) out.get(r.domain)?.snapshots.push(r);
+    for (let i = 0; i < ids.length; i += 90) {
+      const chunk = ids.slice(i, i + 90);
+      const rows = await db.all<SnapshotRow>(
+        `SELECT fetch_id, domain, endpoint, status, cost_usd, total_count, item_count,
+                ${withLists ? "data_json" : "CASE WHEN endpoint = 'ranked_keywords' THEN data_json ELSE '{}' END AS data_json"}, error, fetched_at
+           FROM competitor_snapshots WHERE workspace_id = ? AND project_id = ? AND fetch_id IN (${chunk.map(() => "?").join(",")})`,
+        p.workspace_id,
+        p.id,
+        ...chunk,
+      );
+      for (const r of rows) out.get(r.domain)?.snapshots.push(r);
+    }
   }
   return out;
 }
@@ -871,6 +1112,7 @@ export async function competitorPanel(env: Env, db: Db, p: ProjectRow, canManage
   const data = migrationPending ? new Map<string, DomainData>() : await loadDomainData(db, p, domains.map((d) => d.domain), false);
   const counts = migrationPending ? { total: 0, byDomain: new Map<string, number>() } : await todayCounts(db, p, now);
   const location = usableLocation(settings, p);
+  const waiting = new Set(migrationPending ? [] : await backlogDomains(db, p));
 
   let state: CompetitorDataPanel["state"] = "ready";
   let message: string | null = null;
@@ -907,6 +1149,7 @@ export async function competitorPanel(env: Env, db: Db, p: ProjectRow, canManage
       fetchesPerProjectPerDay: FETCHES_PER_PROJECT_PER_DAY,
       fetchesToday: counts.total,
       keepSnapshotsPerDomain: KEEP_SNAPSHOTS_PER_DOMAIN,
+      waitingDomains: waiting.size,
     },
     pricing: {
       perTaskUsd: DATAFORSEO_LABS_PRICE.perTaskUsd,
@@ -917,7 +1160,7 @@ export async function competitorPanel(env: Env, db: Db, p: ProjectRow, canManage
     },
     limits: { ...DATAFORSEO_LIMITS },
     ownDomain: ownDomain(p),
-    domains: domains.map((d) => summaryFor(d, data.get(d.domain), counts.byDomain.get(d.domain) ?? 0)),
+    domains: domains.map((d) => ({ ...summaryFor(d, data.get(d.domain), counts.byDomain.get(d.domain) ?? 0), waiting: waiting.has(d.domain) })),
   };
 }
 

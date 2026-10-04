@@ -14,6 +14,7 @@ import { ShareOfVoiceTable } from "./components/ShareOfVoiceTable";
 import { CompetitorDataSection } from "./CompetitorDataPanel";
 import { SheetCompetitorMetrics } from "@web/pages/import/ImportedPanels";
 import { sourceTypeLabel } from "./lib";
+import { MAX_COMPETITORS } from "@shared/competitors";
 
 const GSC_MATCH: Record<SearchQuerySummary["gscMatch"], { label: string; tone: BadgeTone; hint: string }> = {
   ranking: { label: "Already ranking", tone: "success", hint: "Reinforce the existing page" },
@@ -38,8 +39,8 @@ export function CompetitorsPage() {
       />
 
       <Card
-        title="Tracked competitors"
-        description="From project settings. Aliases and domains are used for deterministic mention and citation detection."
+        title={`Tracked competitors (${project.competitors.length} of ${MAX_COMPETITORS})`}
+        description="From project settings or your sheet import. Aliases and domains are used for deterministic mention and citation detection."
         actions={
           <Link to={projectPath(projectId, "settings")} className="rounded text-xs text-sky-700 underline focus-visible:outline-2 focus-visible:outline-sky-600 dark:text-sky-400">
             Edit
@@ -47,7 +48,9 @@ export function CompetitorsPage() {
         }
       >
         {project.competitors.length === 0 ? (
-          <EmptyState title="No competitors configured.">Add up to five competitors in project settings to track share of voice.</EmptyState>
+          <EmptyState title="No competitors configured.">
+            Add up to {MAX_COMPETITORS} competitors in project settings, or import your sheet's competitor tab on the Import page, to track share of voice.
+          </EmptyState>
         ) : (
           <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {project.competitors.map((c) => (

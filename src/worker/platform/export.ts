@@ -49,6 +49,8 @@ export const EXPORT_TABLES = [
   "competitor_data_settings",
   "competitor_fetches",
   "competitor_snapshots",
+  // Competitor auto-fetch backlog (migration 0021, [A39]): new domains waiting for a later day's refresh cap.
+  "competitor_fetch_backlog",
   // Import (Google Sheets / CSV), migration 0015: history, sheet reference records, provenance, sync settings.
   "imports",
   "import_records",

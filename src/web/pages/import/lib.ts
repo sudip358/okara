@@ -255,3 +255,33 @@ export function sheetsErrorMessage(code: string | null): string | null {
   };
   return m[code] ?? `Google Sheets connection failed (${code.slice(0, 40)}).`;
 }
+
+// ------------------------------------------------------------------ competitors [A39]
+/** Whether "Fetch DataForSEO data for new competitors" is ticked: the owner's choice, else the plan's default (on for <= 10 new). */
+export function fetchCompetitorDataChecked(options: ImportOptions, plan: ImportPlan | null): boolean {
+  if (typeof options.fetchCompetitorData === "boolean") return options.fetchCompetitorData;
+  return plan?.competitorFetch?.defaultOn ?? true;
+}
+
+/** Options with the suggested fix for `key` (a likely-typo host) accepted or not. */
+export function withDomainFix(options: ImportOptions, key: string, accepted: boolean): ImportOptions {
+  const cur = new Set(options.acceptDomainFixes ?? []);
+  if (accepted) cur.add(key);
+  else cur.delete(key);
+  const next: ImportOptions = { ...options };
+  if (cur.size) next.acceptDomainFixes = [...cur];
+  else delete next.acceptDomainFixes;
+  return next;
+}
+
+/** Caption under the fetch option: the default rule, or why nothing is fetched. */
+export function competitorFetchCaption(plan: ImportPlan): string | null {
+  const f = plan.competitorFetch;
+  if (!f) return null;
+  if (f.state !== "ready") return f.message;
+  if (f.newDomains === 0) return "No new competitor domains in this import: nothing to fetch.";
+  const rule = `Default: on for up to ${f.perDay} new domains, off above (you can tick it).`;
+  return f.willFetch
+    ? `${rule} Fetched in sheet order, at most ${f.perDay} per project per UTC day; the rest wait for the next days. Each competitor also has its own Refresh button.`
+    : `${rule} Nothing is fetched or billed now; use Refresh per competitor on the Competitors page later.`;
+}
