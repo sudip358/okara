@@ -8,8 +8,9 @@
  * rules apply unchanged: owner-only routes stay owner-only (checked in prepare AND again in execute, because the
  * role could change between proposal and confirmation).
  *
- * Deliberately NOT here (the chat answers with navigate instead): credential create/update/delete or key reveal,
- * custom provider changes, member/role changes, workspace/project delete, sign-in allowlist, OAuth connects.
+ * Deliberately NOT here: credential and provider changes live in tools-models.ts and Integrations admin writes in
+ * tools-admin-settings.ts [A35] (secure-field flow); still navigate-only: key reveal,
+ * member/role changes, workspace/project delete, sign-in allowlist, OAuth connects.
  */
 import { z } from "zod";
 import { SYNC_FREQUENCIES } from "@shared/import";

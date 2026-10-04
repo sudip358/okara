@@ -3,7 +3,7 @@
  * markdown-lite tree (paragraphs, bullet/numbered lists, bold, inline code, links) and rendered as React text,
  * never as HTML. Links are kept only for in-app routes of the current project or http(s) URLs.
  */
-import type { ChatAction, ChatMessage, ChatStep, ChatStepKind } from "@shared/types";
+import type { ChatAction, ChatMessage, ChatSecretField, ChatStep, ChatStepKind } from "@shared/types";
 
 // ------------------------------------------------------------------ markdown-lite
 export type Inline =
@@ -224,4 +224,38 @@ export function starterPrompts(competitorDomain?: string | null): string[] {
     `What's the search volume for '${STARTER_KEYWORD_EXAMPLE}'?`,
     ...STARTER_PROMPTS.slice(2),
   ];
+}
+
+// ------------------------------------------------------------------ secure field [A35]
+/**
+ * The only routes a secure-field card may send typed secrets to: the existing credential routes of a workspace.
+ * Anything else (another path, method or a body that already carries a secret field) is refused client-side, so
+ * even a malformed card can never post a key elsewhere.
+ */
+const SECRET_ROUTES: Array<[ChatSecretField["request"]["method"], RegExp]> = [
+  ["PUT", /^\/workspaces\/[a-z0-9_]{1,100}\/credentials\/(typesafe|gemini|perplexity|openai_geo|anthropic_geo|writer)$/],
+  ["PUT", /^\/workspaces\/[a-z0-9_]{1,100}\/dataforseo$/],
+  ["PUT", /^\/workspaces\/[a-z0-9_]{1,100}\/maton$/],
+  ["POST", /^\/workspaces\/[a-z0-9_]{1,100}\/custom-providers$/],
+  ["PATCH", /^\/workspaces\/[a-z0-9_]{1,100}\/custom-providers\/[a-z0-9_]{1,100}$/],
+];
+
+export function secretRequestAllowed(f: ChatSecretField | null | undefined): boolean {
+  if (!f || !f.request || typeof f.request.path !== "string") return false;
+  if (!SECRET_ROUTES.some(([m, re]) => m === f.request.method && re.test(f.request.path))) return false;
+  const body = f.request.body ?? {};
+  return !Object.keys(body).some((k) => ["apiKey", "login", "password", "keepKeyForNewHost"].includes(k)) && f.fields.length > 0 && f.fields.length <= 2;
+}
+
+/** Route body: the card's non-secret fields plus the typed values (trimmed, as the routes trim them). */
+export function secretRequestBody(f: ChatSecretField, values: Record<string, string>): Record<string, unknown> {
+  const body: Record<string, unknown> = { ...f.request.body };
+  for (const field of f.fields) body[field.name] = (values[field.name] ?? "").trim();
+  return body;
+}
+
+/** Last 4 characters of the hint field, as the routes store it; null when empty. */
+export function secretKeyHint(f: ChatSecretField, values: Record<string, string>): string | null {
+  const v = (values[f.hintFrom] ?? "").trim();
+  return v ? v.slice(-4) : null;
 }

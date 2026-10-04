@@ -1168,7 +1168,7 @@ only; every query filters by `workspace_id` + `project_id`. POSTs go through the
 | GET | `/projects/:pid/chat/sessions/:sid` | `ChatSessionDetail` (messages with steps, actions) |
 | DELETE | `/projects/:pid/chat/sessions/:sid` | `{deleted: true}`; 409 `chat_busy` while a turn runs |
 | POST | `/projects/:pid/chat/sessions/:sid/messages` body `{content}` (1-4,000 characters) | `ChatTurnResult`; `?stream=1` streams ndjson `ChatStreamEvent` lines (`started`, `step`, `status`, `done` with the same `ChatTurnResult`, or `error`) |
-| POST | `/projects/:pid/chat/sessions/:sid/actions/:aid/confirm` | `ChatTurnResult` (`?stream=1` likewise): executes the pending action once, then the agent continues |
+| POST | `/projects/:pid/chat/sessions/:sid/actions/:aid/confirm` | body empty, or `{secret: {ok, keyHint}}` for a secure-field action ([A35]; nothing else accepted). `ChatTurnResult` (`?stream=1` likewise): executes the pending action once, then the agent continues |
 | POST | `/projects/:pid/chat/sessions/:sid/actions/:aid/cancel` | `ChatTurnResult`: the action is cancelled and the agent is told so |
 
 Errors before a turn starts are JSON: 400 (empty/oversized message), 404, 409 `chat_busy` (a turn is running in
@@ -1262,11 +1262,41 @@ key hint, encrypted column, OAuth token or state row, session or verification to
 | `set_page_type` | action | PATCH `/pages/:pageId` | |
 | `cancel_run` | action | POST `/runs/:id/cancel` | pending / running only |
 
-Not available from chat (the assistant answers with `navigate` to Integrations or Settings): credential create /
-update / delete / test, key reveal, custom provider changes, member or role changes, workspace or project delete,
-the sign-in allowlist, Google OAuth connects / disconnects and property selection, CSV / sheet import wizards
-(dry-run, commit, undo), manual GEO answer import, the redirect map, AI prompt suggestions, decision feedback,
-DataForSEO location settings, verification checks and the project JSON export.
+**Models, credentials and owner admin (amends [A33]; docs/build-kit.md [A35], 2026-10-04; code
+`src/worker/chat/{tools-models,tools-admin-settings,route-bridge,secrets,secret-fields}.ts`).** Every change runs
+the existing route handler in-process as the signed-in user (`route-bridge.ts`: same handler, owner check,
+validation, demo refusals and rate-limit keys as the page; no browser request, so no CSRF; the user's own confirm
+POST already passed it). Action rows are owner-only in chat (checked at proposal and again at execution; the route
+checks again).
+
+| Tool | Kind | Mirrors | Notes |
+|---|---|---|---|
+| `models` | read (member) | GET `/workspaces/:wid/{credentials,custom-providers,dataforseo,maton}`, `/projects/:pid/{integrations,gsc/maton}` | writer (`source` default / `custom:<id>`, active host + model, Ask Okara model), custom providers (id, role writer/geo, label, host, base URL, model, last test), engines (configured, key source, state, model, model source, workspace model, `modelSelectable`), DataForSEO, Maton apps, Search Console / Sheets. No key, key hint, encrypted column or token |
+| `provider_models` | read (owner) | POST `/workspaces/:wid/custom-providers/models` `{providerId}`, POST `/credentials/:provider/models` `{}` | live Fetch models (10/min per user, shared); `contains`, `limit` |
+| `integration_options` | read | GET `/projects/:pid/gsc/properties`, `/gsc/maton/sites`, `/workspaces/:wid/maton`, `/projects/:pid/competitors/dataforseo/locations` | `view` gsc_properties / maton_gsc_sites / maton_connections / dataforseo_locations |
+| `manage_models` | action (owner) | PUT `/writer-source`; PATCH `/custom-providers/:id` (`model`; `baseUrl` + `keepKeyForNewHost: true`); PUT `/credentials/:provider/model`; DELETE `/custom-providers/:id`; POST `/custom-providers/:id/test`; secure field: POST `/custom-providers`, PATCH `/custom-providers/:id` (`baseUrl` + new key) | `op` set_writer / set_custom_model / set_engine_model / update_base_url / add_provider / remove_provider / test_provider. Base URLs pass `validateCustomBaseUrl` at proposal (https, public hostname, no IP / port / query / credentials / own origin). A model id must be in the provider's live list when the list is complete (otherwise the card says it was not verified). update_base_url: same host needs `keepSavedKey: true`; a new host takes `keepSavedKey: true` (card says the saved key will be sent there) or a new key in the secure field |
+| `manage_credentials` | action (owner; test of a built-in / DataForSEO / custom key: member, as the route) | secure field: PUT `/credentials/:provider`, PUT `/dataforseo` (login + password), PUT `/maton`, PATCH `/custom-providers/:id`; DELETE `/credentials/:provider`, `/dataforseo`, `/maton`; POST `.../test`, `/custom-providers/:id/test` | `op` set_key / remove_key / test; `target` typesafe, gemini, perplexity, openai_geo, anthropic_geo, writer, dataforseo, maton, `custom:<id>` |
+| `admin_settings` | action (owner) | PUT `/projects/:pid/context/:kind`, PUT `/competitors/dataforseo/settings`, POST `/verification/check`, POST `/decisions/:id/feedback`, PUT `/projects/:pid/gsc/source`, PUT `/gsc/property`, PUT `/workspaces/:wid/maton/connections/:app` | `op` context_doc (full content; facts kept unless given) / dataforseo_settings / verification_check / decision_feedback / gsc_source / gsc_property / maton_connection |
+
+**Secrets never pass through the chat.** No tool schema has a key field (strict schemas reject `apiKey`, `key`,
+`password`, ...). Before validation, a tool call whose arguments hold a key-like value (known prefixes such as
+`sk-`, `AIza`, `pplx-`, `ghp_`, JWTs, Google OAuth tokens; a long random token after key / token / password; a long
+mixed-case random token outside a URL) is refused: no pending action, step arguments `[withheld: looked like a
+secret]`, the model is told to use the secure field, and the kept assistant round is masked. A user message that
+looks like it contains a key is stored, titled and sent to the model with each key replaced by
+`[key removed — use the secure field]`. An action that needs a key returns `ChatAction.secretField`
+(`{label, fields: [{name: apiKey | login | password, label}], request: {method, path, body}, hintFrom, note}`, only
+while pending): the card renders password inputs (autocomplete off, uncontrolled, cleared once the request is built),
+sends the typed values plus the non-secret `body` DIRECTLY to `request` (the web only allows the credential routes
+above), and then confirms with `POST .../actions/:aid/confirm` body `{secret: {ok, keyHint}}` (`keyHint` 1-4
+characters). The confirm route accepts nothing else (400 for any other field, never echoed); a secure-field action
+confirmed without `secret` is `400 secret_required`; `execute()` only verifies that the route stored a key with that
+hint after the proposal (else `failed`). The action result shows the hint, e.g. "Key saved for Google Gemini (…wxyz)".
+
+Not available from chat (the assistant answers with `navigate` to Integrations or Settings): key reveal, Google
+OAuth connects / disconnects (browser redirect), member or role changes, workspace or project delete, the sign-in
+allowlist (an environment variable), CSV / sheet import wizards (dry-run, commit, undo), manual GEO answer import,
+the redirect map, AI prompt suggestions and the project JSON export.
 
 **Confirmation gate (server-enforced).** The loop never executes an action: it validates it (`prepare`), stores
 a `chat_actions` row `pending`, marks the step `awaiting_confirmation`, saves the paused transcript on the

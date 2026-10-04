@@ -43,6 +43,8 @@ import { DATAFORSEO_CHAT_TOOLS } from "./tools-dataforseo";
 import { ADMIN_READ_TOOLS } from "./tools-admin";
 import { MATON_CHAT_TOOLS } from "./tools-maton";
 import { ADMIN_ACTION_TOOLS } from "./tools-admin-actions";
+import { MODEL_ACTION_TOOLS, MODEL_CHAT_TOOLS } from "./tools-models";
+import { ADMIN_SETTINGS_ACTION_TOOLS, ADMIN_SETTINGS_READ_TOOLS } from "./tools-admin-settings";
 
 // ------------------------------------------------------------------ limits
 /** Max characters of one tool result handed to the model. */
@@ -1146,10 +1148,14 @@ export const CHAT_TOOLS: ChatTool[] = [
   draftCheck,
   ...ADMIN_READ_TOOLS,
   ...MATON_CHAT_TOOLS,
+  ...MODEL_CHAT_TOOLS,
+  ...ADMIN_SETTINGS_READ_TOOLS,
   runAgentNow,
   updateRecommendationStatus,
   approveCompetitorPageTool,
   ...ADMIN_ACTION_TOOLS,
+  ...MODEL_ACTION_TOOLS,
+  ...ADMIN_SETTINGS_ACTION_TOOLS,
   navigate,
   exportCsv,
 ] as ChatTool[];

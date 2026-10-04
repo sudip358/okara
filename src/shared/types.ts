@@ -1584,6 +1584,29 @@ export interface ChatAction {
   result: string | null;
   createdAt: string;
   decidedAt: string | null;
+  /**
+   * [A35] Set while a credential action is pending: the confirmation card shows password inputs and, on Confirm,
+   * the browser sends the values DIRECTLY to `request` (an existing credential route), then confirms the chat
+   * action with only {ok, keyHint}. The values never enter the chat, the model or any chat table.
+   */
+  secretField?: ChatSecretField | null;
+}
+
+/** A secure-input confirmation card (see ChatAction.secretField). Values typed into it never reach the chat. */
+export interface ChatSecretField {
+  /** Heading, e.g. "Google Gemini API key". */
+  label: string;
+  fields: Array<{ name: "apiKey" | "login" | "password"; label: string }>;
+  /** The existing credential route the browser calls (same origin, CSRF-protected); non-secret body fields only. */
+  request: { method: "PUT" | "POST" | "PATCH"; path: string; body: Record<string, string | boolean> };
+  /** The field whose last 4 characters are the key hint (as the Integrations page shows it). */
+  hintFrom: "apiKey" | "password";
+  note: string;
+}
+
+/** Body of POST .../actions/:aid/confirm for an action with a secretField (never the key itself). */
+export interface ChatConfirmBody {
+  secret?: { ok: boolean; keyHint?: string | null };
 }
 
 export interface ChatSessionSummary {

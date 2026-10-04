@@ -9,7 +9,8 @@
  *   GET    /projects/:pid/chat/sessions/:sid                           -> ChatSessionDetail
  *   DELETE /projects/:pid/chat/sessions/:sid                           -> {deleted: true}
  *   POST   /projects/:pid/chat/sessions/:sid/messages  {content}       -> ChatTurnResult (?stream=1: ndjson ChatStreamEvent lines)
- *   POST   /projects/:pid/chat/sessions/:sid/actions/:aid/confirm      -> ChatTurnResult (?stream=1 likewise)
+ *   POST   /projects/:pid/chat/sessions/:sid/actions/:aid/confirm      -> ChatTurnResult (?stream=1 likewise); body empty or
+ *                                                                     {secret: {ok, keyHint}} for a secure-field action [A35]
  *   POST   /projects/:pid/chat/sessions/:sid/actions/:aid/cancel       -> ChatTurnResult (?stream=1 likewise)
  *
  * Errors before a turn starts are JSON: 400, 404, 409 chat_busy | chat_full, 412 setup_required, 429 rate_limited.
@@ -37,6 +38,14 @@ export const CHAT_NEW_SESSION_RATE_LIMIT = { limit: 30, windowSeconds: 600 } as 
 export const CHAT_MAX_BODY_BYTES = 64 * 1024;
 
 const messageBody = z.object({ content: z.string().min(1).max(CHAT_MAX_MESSAGE_CHARS) }).strict();
+/**
+ * [A35] Confirm body: empty, or the secure-field report {secret: {ok, keyHint}} (last 4 characters only). Any other
+ * field (e.g. apiKey) is refused: keys go to the credential routes, never to the chat.
+ */
+export const confirmBody = z
+  .object({ secret: z.object({ ok: z.boolean(), keyHint: z.string().regex(/^[\x21-\x7e]{1,4}$/).nullable().optional() }).strict().optional() })
+  .strict();
+export const CHAT_CONFIRM_MAX_BODY_BYTES = 512;
 
 // ------------------------------------------------------------------ test hooks
 let toolHooks: ChatToolHooks | undefined;
@@ -153,7 +162,24 @@ for (const decision of ["confirm", "cancel"] as const) {
   chatRoutes.post(`/projects/:pid/chat/sessions/:sid/actions/:aid/${decision}`, async (c) => {
     const d = await deps(c);
     await limited(d.db, `chat_action:${d.user.id}`, CHAT_ACTION_RATE_LIMIT, d.now);
-    const prepared = await prepareDecision(d, c.req.param("sid")!, c.req.param("aid")!, decision);
+    let secret: { ok: boolean; keyHint: string | null } | null = null;
+    if (decision === "confirm") {
+      const raw = await c.req.text();
+      if (raw.length > CHAT_CONFIRM_MAX_BODY_BYTES) throw badRequest("Confirm takes only {secret: {ok, keyHint}}; never send a key to the chat.");
+      if (raw.trim()) {
+        let json: unknown;
+        try {
+          json = JSON.parse(raw);
+        } catch {
+          throw badRequest("Request body must be JSON.");
+        }
+        // Never echo the body (it might hold a key sent by mistake).
+        const parsed = confirmBody.safeParse(json);
+        if (!parsed.success) throw badRequest("Confirm takes only {secret: {ok, keyHint}}; never send a key to the chat.");
+        if (parsed.data.secret) secret = { ok: parsed.data.secret.ok, keyHint: parsed.data.secret.keyHint ?? null };
+      }
+    }
+    const prepared = await prepareDecision(d, c.req.param("sid")!, c.req.param("aid")!, decision, secret);
     return respond(c, d, prepared);
   });
 }

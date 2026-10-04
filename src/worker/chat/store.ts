@@ -9,6 +9,7 @@ import { notFound } from "../lib/errors";
 import { newId } from "../lib/ids";
 import { iso } from "../lib/time";
 import type { ProjectRow } from "../platform/access";
+import { secretFieldFor } from "./secret-fields";
 
 /** Newest sessions kept per (project, user); older ones are deleted when a session is created. */
 export const CHAT_SESSIONS_KEPT = 50;
@@ -92,18 +93,23 @@ export const toMessage = (r: MessageRow): ChatMessage => ({
   createdAt: r.created_at,
 });
 
-export const toAction = (r: ActionRow): ChatAction => ({
-  id: r.id,
-  messageId: r.message_id,
-  name: r.name,
-  title: r.title,
-  detail: r.detail,
-  args: parseJson<Record<string, unknown>>(r.args_json, {}),
-  status: r.status,
-  result: r.result_json ? (parseJson<{ summary?: string }>(r.result_json, {}).summary ?? null) : null,
-  createdAt: r.created_at,
-  decidedAt: r.decided_at,
-});
+export const toAction = (r: ActionRow): ChatAction => {
+  const args = parseJson<Record<string, unknown>>(r.args_json, {});
+  return {
+    id: r.id,
+    messageId: r.message_id,
+    name: r.name,
+    title: r.title,
+    detail: r.detail,
+    args,
+    status: r.status,
+    result: r.result_json ? (parseJson<{ summary?: string }>(r.result_json, {}).summary ?? null) : null,
+    createdAt: r.created_at,
+    decidedAt: r.decided_at,
+    // [A35] Only while it can still be confirmed: the card's secure field (never a value).
+    secretField: r.status === "pending" ? secretFieldFor(r.name, args, r.workspace_id) : null,
+  };
+};
 
 export async function createSession(db: Db, o: Owner, now: Date): Promise<SessionRow> {
   const id = newId("chs");

@@ -40,6 +40,8 @@ import {
 } from "./store";
 import { getTool, isActionTool, resultForModel, toolErrorMessage, type ChatToolHooks, type ToolContext } from "./tools";
 import type { ChatModel, ToolResultItem } from "./types";
+import { secretFieldFor } from "./secret-fields";
+import { redactSecrets } from "./secrets";
 
 export interface ChatDeps {
   env: Env;
@@ -161,9 +163,11 @@ async function guarded(d: ChatDeps, s: SessionRow, messageId: string, prefix: st
 
 // ------------------------------------------------------------------ send
 export async function prepareSend(d: ChatDeps, sessionId: string, rawText: string): Promise<PreparedTurn> {
-  const text = rawText.replace(/\r\n/g, "\n").trim();
-  if (!text) throw new HttpError(400, "bad_request", "Message is empty.");
-  if (text.length > CHAT_MAX_MESSAGE_CHARS) throw new HttpError(400, "bad_request", `Message is longer than ${CHAT_MAX_MESSAGE_CHARS} characters.`);
+  const typed = rawText.replace(/\r\n/g, "\n").trim();
+  if (!typed) throw new HttpError(400, "bad_request", "Message is empty.");
+  if (typed.length > CHAT_MAX_MESSAGE_CHARS) throw new HttpError(400, "bad_request", `Message is longer than ${CHAT_MAX_MESSAGE_CHARS} characters.`);
+  // [A35] A pasted API key is masked before anything is stored or sent to the model: both see the placeholder.
+  const text = redactSecrets(typed).text;
   const s = await requireSession(d.db, owner(d), sessionId);
   if (s.message_count + 2 > CHAT_MAX_MESSAGES_PER_SESSION) throw new HttpError(409, "chat_full", "This chat is full. Start a new chat.");
   const model = await readyModel(d);
@@ -205,9 +209,18 @@ export async function prepareSend(d: ChatDeps, sessionId: string, rawText: strin
 }
 
 // ------------------------------------------------------------------ confirm / cancel
-export async function prepareDecision(d: ChatDeps, sessionId: string, actionId: string, decision: "confirm" | "cancel"): Promise<PreparedTurn> {
+export type SecretReport = { ok: boolean; keyHint: string | null } | null;
+
+export async function prepareDecision(d: ChatDeps, sessionId: string, actionId: string, decision: "confirm" | "cancel", secret: SecretReport = null): Promise<PreparedTurn> {
   const s = await requireSession(d.db, owner(d), sessionId);
   const action = await getAction(d.db, s, actionId);
+  // [A35] Secure-field actions are confirmed only with the browser's {ok, keyHint} report (the key itself went to
+  // the credential route); every other action is confirmed without one.
+  if (decision === "confirm" && action.status === "pending") {
+    const needs = secretFieldFor(action.name, JSON.parse(action.args_json || "{}") as Record<string, unknown>, action.workspace_id) !== null;
+    if (needs && !secret) throw new HttpError(400, "secret_required", "Type the key into the secure field on the card, then confirm.");
+    if (!needs && secret) throw new HttpError(400, "bad_request", "This action does not take a secure field.");
+  }
   const settled = (): PreparedTurn => ({
     async run(emit = () => {}) {
       // Already decided (double click, retry, or expired): report the current state, never execute again.
@@ -244,7 +257,7 @@ export async function prepareDecision(d: ChatDeps, sessionId: string, actionId: 
         msg.content,
         () => steps,
         async () => {
-          const actionResult = await executeDecision(d, action, decision);
+          const actionResult = await executeDecision(d, action, decision, secret);
           steps = steps.map((st) =>
             st.actionId === action.id ? { ...st, status: actionResult.status, result: actionResult.summary.slice(0, 300), navigate: actionResult.navigate ?? null } : st,
           );
@@ -295,7 +308,7 @@ interface DecisionResult {
 }
 
 /** Runs the confirmed action (the only place an action tool's execute() is called). */
-async function executeDecision(d: ChatDeps, action: ActionRow, decision: "confirm" | "cancel"): Promise<DecisionResult> {
+async function executeDecision(d: ChatDeps, action: ActionRow, decision: "confirm" | "cancel", secret: SecretReport): Promise<DecisionResult> {
   if (decision === "cancel") {
     return { status: "cancelled", summary: "Cancelled by the user", forModel: JSON.stringify({ ok: false, cancelled: true, message: "The user cancelled this action. Do not propose it again unless they ask." }) };
   }
@@ -313,7 +326,7 @@ async function executeDecision(d: ChatDeps, action: ActionRow, decision: "confir
     return { status: "failed", summary: "Invalid arguments", forModel: JSON.stringify({ ok: false, error: toolErrorMessage(parsed.error) }) };
   }
   try {
-    const out = await tool.execute(toolContext(d), parsed.data);
+    const out = await tool.execute(toolContext(d), parsed.data, { proposedAt: action.created_at, secret });
     await finishAs("executed", out.summary, out.data);
     return { status: "executed", summary: out.summary, navigate: out.navigate ?? null, forModel: resultForModel({ ok: true, executed: true, data: out.data }) };
   } catch (e) {

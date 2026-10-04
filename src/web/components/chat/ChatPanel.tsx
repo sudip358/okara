@@ -4,15 +4,15 @@
  * as collapsible groups ("Read data · 3 steps"); state-changing actions show a confirmation card and run only
  * when the user presses Confirm (enforced server-side). Model output renders as markdown-lite text, never HTML.
  */
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Link, useNavigate } from "react-router";
-import type { ChatAction, ChatMessage, ChatSessionDetail, ChatSessionSummary, ChatStatus, ChatStep, ChatStreamEvent } from "@shared/types";
+import type { ChatAction, ChatConfirmBody, ChatMessage, ChatSessionDetail, ChatSessionSummary, ChatStatus, ChatStep, ChatStreamEvent } from "@shared/types";
 import { api, apiStream, errorMessage, isRateLimited } from "@web/lib/api";
 import { formatRelative } from "@web/lib/format";
 import { projectPath } from "@web/lib/project-context";
 import { Badge, Spinner, buttonClass, cx } from "@web/components/ui";
-import { groupSteps, mergeActions, mergeMessages, parseMarkdownLite, progressText, safeFilename, starterPrompts, STEP_STATUS_LABEL, toCsv, upsertStep, type Block, type Inline } from "./lib";
+import { groupSteps, mergeActions, mergeMessages, parseMarkdownLite, progressText, safeFilename, secretKeyHint, secretRequestAllowed, secretRequestBody, starterPrompts, STEP_STATUS_LABEL, toCsv, upsertStep, type Block, type Inline } from "./lib";
 
 const store = {
   get(key: string): string | null {
@@ -181,7 +181,112 @@ function Outputs({ steps, onNavigate }: { steps: ChatStep[]; onNavigate: (path: 
   );
 }
 
-function ConfirmCard({ action, busy, onDecide }: { action: ChatAction; busy: boolean; onDecide: (id: string, d: "confirm" | "cancel") => void }) {
+type Decide = (id: string, d: "confirm" | "cancel", body?: ChatConfirmBody) => void;
+
+/**
+ * [A35] Secure-field confirmation: the typed key goes from these inputs straight to the credential route (the same
+ * request the Integrations page makes); the chat is then confirmed with {ok, keyHint} only. Uncontrolled inputs
+ * (no React state holds the value), cleared as soon as the request is built, autocomplete off, never echoed.
+ */
+function SecretConfirm({ action, busy, onDecide }: { action: ChatAction; busy: boolean; onDecide: Decide }) {
+  const f = action.secretField!;
+  const uid = useId();
+  const inputs = useRef<Record<string, HTMLInputElement | null>>({});
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedHint, setSavedHint] = useState<string | null>(null);
+  const allowed = secretRequestAllowed(f);
+  const clear = () => {
+    for (const el of Object.values(inputs.current)) if (el) el.value = "";
+  };
+  useEffect(() => () => clear(), []);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!allowed || saving || busy) return;
+    const values: Record<string, string> = {};
+    for (const field of f.fields) values[field.name] = inputs.current[field.name]?.value ?? "";
+    if (f.fields.some((field) => !values[field.name]!.trim())) {
+      setError("Fill in every field.");
+      return;
+    }
+    const hint = secretKeyHint(f, values);
+    const body = secretRequestBody(f, values);
+    clear();
+    for (const k of Object.keys(values)) values[k] = "";
+    setSaving(true);
+    setError(null);
+    try {
+      await api(f.request.path, { method: f.request.method, body });
+      setSavedHint(hint);
+      onDecide(action.id, "confirm", { secret: { ok: true, keyHint: hint } });
+    } catch (err) {
+      setError(isRateLimited(err) ? "Too many key changes. Wait a minute and try again." : errorMessage(err));
+    } finally {
+      for (const k of Object.keys(body)) if (f.fields.some((field) => field.name === k)) body[k] = "";
+      setSaving(false);
+    }
+  };
+
+  if (!allowed) {
+    return <p className="mt-2 text-xs text-red-700 dark:text-red-300">This card cannot send a key here. Cancel it and use the Integrations page.</p>;
+  }
+  return (
+    <form className="mt-2.5 space-y-2" onSubmit={submit} autoComplete="off" aria-label={f.label}>
+      <p className="text-xs font-medium text-zinc-800 dark:text-zinc-200">{f.label}</p>
+      {f.fields.map((field) => (
+        <div key={field.name} className="min-w-0">
+          <label htmlFor={`${uid}-${field.name}`} className="block text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+            {field.label}
+          </label>
+          <input
+            id={`${uid}-${field.name}`}
+            ref={(el) => {
+              inputs.current[field.name] = el;
+            }}
+            type="password"
+            name={`okara-secret-${field.name}`}
+            autoComplete="off"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            data-1p-ignore="true"
+            data-lpignore="true"
+            disabled={saving || busy || savedHint !== null}
+            className="mt-0.5 block w-full min-w-0 rounded-md border border-zinc-300 bg-white px-2 py-1.5 font-mono text-sm text-zinc-900 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+          />
+        </div>
+      ))}
+      <p className="text-[11px] text-zinc-600 dark:text-zinc-400">{f.note}</p>
+      {error && (
+        <p role="alert" className="text-xs text-red-700 dark:text-red-300">
+          {error}
+        </p>
+      )}
+      {savedHint ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <p role="status" className="text-xs text-emerald-800 dark:text-emerald-300">
+            Saved (key ending …{savedHint}).
+          </p>
+          <button type="button" className={buttonClass("secondary", "sm")} disabled={busy} onClick={() => onDecide(action.id, "confirm", { secret: { ok: true, keyHint: savedHint } })}>
+            Finish in chat
+          </button>
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          <button type="submit" className={buttonClass("primary", "sm")} disabled={busy || saving}>
+            {saving ? "Saving…" : "Save securely and confirm"}
+          </button>
+          <button type="button" className={buttonClass("secondary", "sm")} disabled={busy || saving} onClick={() => onDecide(action.id, "cancel")}>
+            Cancel
+          </button>
+        </div>
+      )}
+    </form>
+  );
+}
+
+function ConfirmCard({ action, busy, onDecide }: { action: ChatAction; busy: boolean; onDecide: Decide }) {
   const pending = action.status === "pending";
   return (
     <div
@@ -191,7 +296,9 @@ function ConfirmCard({ action, busy, onDecide }: { action: ChatAction; busy: boo
     >
       <p className="font-semibold text-zinc-900 dark:text-zinc-50">{action.title}</p>
       {action.detail && <p className="mt-1 break-words text-xs text-zinc-700 [overflow-wrap:anywhere] dark:text-zinc-300">{action.detail}</p>}
-      {pending ? (
+      {pending && action.secretField ? (
+        <SecretConfirm action={action} busy={busy} onDecide={onDecide} />
+      ) : pending ? (
         <div className="mt-2.5 flex gap-2">
           <button type="button" className={buttonClass("primary", "sm")} disabled={busy} onClick={() => onDecide(action.id, "confirm")}>
             Confirm
@@ -243,7 +350,7 @@ export function AssistantMessage({
   actions: ChatAction[];
   projectId: string;
   busy: boolean;
-  onDecide: (id: string, d: "confirm" | "cancel") => void;
+  onDecide: Decide;
   onNavigate: (path: string) => void;
 }) {
   const mine = actions.filter((a) => message.steps.some((s) => s.actionId === a.id));
@@ -418,14 +525,14 @@ function useChat(projectId: string, enabled: boolean) {
   );
 
   const decide = useCallback(
-    async (actionId: string, decision: "confirm" | "cancel") => {
+    async (actionId: string, decision: "confirm" | "cancel", body?: ChatConfirmBody) => {
       const sid = state.sessionId;
       if (!sid || busy) return;
       setBusy(true);
       setError(null);
       setState((s) => ({ ...s, actions: s.actions.map((a) => (a.id === actionId ? { ...a, status: decision === "confirm" ? "executing" : a.status } : a)) }));
       try {
-        const ok = await stream(`/projects/${encodeURIComponent(projectId)}/chat/sessions/${encodeURIComponent(sid)}/actions/${encodeURIComponent(actionId)}/${decision}?stream=1`, undefined, null);
+        const ok = await stream(`/projects/${encodeURIComponent(projectId)}/chat/sessions/${encodeURIComponent(sid)}/actions/${encodeURIComponent(actionId)}/${decision}?stream=1`, body, null);
         if (!ok) await openSession(sid);
       } catch (e) {
         setError(errorMessage(e));
@@ -667,7 +774,7 @@ export function ChatPanel({
                   <p className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-sm bg-zinc-900 px-3 py-2 text-sm text-white [overflow-wrap:anywhere] dark:bg-zinc-100 dark:text-zinc-900">{m.content}</p>
                 </div>
               ) : (
-                <AssistantMessage key={m.id} message={m} actions={chat.state.actions} projectId={projectId} busy={chat.busy} onDecide={(id, d) => void chat.decide(id, d)} onNavigate={goTo} />
+                <AssistantMessage key={m.id} message={m} actions={chat.state.actions} projectId={projectId} busy={chat.busy} onDecide={(id, d, body) => void chat.decide(id, d, body)} onNavigate={goTo} />
               ),
             )
           )}

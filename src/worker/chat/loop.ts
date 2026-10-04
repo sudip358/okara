@@ -14,6 +14,7 @@ import { BudgetExceededError } from "../lib/errors";
 import { ProviderHttpError } from "../writing/http";
 import { OutboundBlockedError } from "../runs/runtime";
 import { getTool, isActionTool, resultForModel, summarizeArgs, toolErrorMessage, toolSpecs, type ActionTool, type ToolContext } from "./tools";
+import { keyLikeIn, redactSecrets, scrubKeyLike, SECRET_REFUSAL } from "./secrets";
 import { ChatModelError, type ChatModel, type HistoryItem, type ToolCall, type ToolResultItem, type TurnItem } from "./types";
 
 export const CHAT_MAX_TOOL_ROUNDS = 8;
@@ -100,14 +101,17 @@ export async function runAgentLoop(deps: LoopDeps, start: { turn: TurnItem[]; ro
       return { kind: "error", code, message, rounds, text: finalText(texts) };
     }
     rounds++;
+    const assistantAt = turn.length;
     turn.push({ role: "assistant", provider: deps.model.provider, raw: round.raw });
-    if (round.text.trim()) texts.push(round.text);
+    // [A35] A key-like string the model wrote is masked before it is shown or stored.
+    if (round.text.trim()) texts.push(redactSecrets(round.text, { generic: false }).text);
     if (round.toolCalls.length === 0) {
       if (round.stop === "other") continue; // e.g. pause_turn: re-send with the assistant turn appended
       return { kind: "complete", rounds, text: finalText(texts) || "I could not produce an answer." };
     }
 
     const results: ToolResultItem[] = [];
+    let secretRefused = false;
     let paused: { actionId: string; callId: string; name: string } | null = null;
     for (const call of round.toolCalls) {
       const tool = getTool(call.name);
@@ -116,6 +120,14 @@ export async function runAgentLoop(deps: LoopDeps, start: { turn: TurnItem[]; ro
         results.push({ id: call.id, name: call.name, content: JSON.stringify({ ok: false, error: message }), isError: true });
         await deps.onStep({ id, kind, tool: call.name.slice(0, 80), args: summarizeArgs(call.input), result: message.slice(0, 300), status: "error" });
       };
+      // [A35] Secrets never go through tool input: refuse (no args in the step, no pending action) and mask the
+      // values in the kept transcript.
+      if (keyLikeIn(call.input).length) {
+        secretRefused = true;
+        results.push({ id: call.id, name: call.name, content: JSON.stringify({ ok: false, error: SECRET_REFUSAL }), isError: true });
+        await deps.onStep({ id, kind: tool?.kind ?? "read", tool: call.name.slice(0, 80), args: "[withheld: looked like a secret]", result: "Refused: a key-like value was in the arguments. Use the secure field.", status: "error" });
+        continue;
+      }
       if (!tool) {
         await fail(`Unknown tool "${call.name.slice(0, 60)}".`);
         continue;
@@ -124,6 +136,7 @@ export async function runAgentLoop(deps: LoopDeps, start: { turn: TurnItem[]; ro
         await fail("Arguments were not valid JSON.");
         continue;
       }
+
       const parsed = tool.schema.safeParse(call.input ?? {});
       if (!parsed.success) {
         await fail(toolErrorMessage(parsed.error));
@@ -163,6 +176,7 @@ export async function runAgentLoop(deps: LoopDeps, start: { turn: TurnItem[]; ro
       }
     }
 
+    if (secretRefused) turn[assistantAt] = { role: "assistant", provider: deps.model.provider, raw: scrubKeyLike(round.raw) };
     if (paused) {
       return {
         kind: "paused",

@@ -66,7 +66,15 @@ export interface ActionTool<S extends z.ZodType = z.ZodType> extends ToolBase<S>
   /** Validate and describe; throws ToolError when the action cannot be proposed. Never changes state. */
   prepare(ctx: ToolContext, input: z.infer<S>): Promise<{ title: string; detail: string }>;
   /** Runs only after the user confirmed (service.ts). */
-  execute(ctx: ToolContext, input: z.infer<S>): Promise<ToolOutput>;
+  execute(ctx: ToolContext, input: z.infer<S>, extra?: ExecuteExtra): Promise<ToolOutput>;
+}
+
+/** [A35] Confirmation details for actions with a secure field (secret-fields.ts): never the key itself. */
+export interface ExecuteExtra {
+  /** When the action was proposed (chat_actions.created_at). */
+  proposedAt: string;
+  /** The browser's report after it sent the typed key to the credential route itself. */
+  secret: { ok: boolean; keyHint: string | null } | null;
 }
 export type ChatTool = ReadTool | ActionTool;
 
