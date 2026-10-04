@@ -7,6 +7,8 @@
  *   PUT  /projects/:pid/geo/prompts            -> GeoPromptSet (new version); brand-blind 400 details
  *                                                 { violations: [{ index, text, matched: string[] }] }
  *   POST /projects/:pid/geo/prompts/generate   -> { suggestions: [{ text, stage, rationale }], dropped, writer }
+ *   GET  /projects/:pid/geo/prompts/from-gsc   -> GscQuestionsResponse (?includeBrand=1) [A37]; read-only, no provider call
+ *   POST /projects/:pid/geo/prompts/from-gsc   -> GscQuestionsAddResult { set, added, skipped } [A37]; unapproved prompts
  *   GET  /projects/:pid/geo/results            -> GeoResults
  *   GET  /geo/observations/:id                 -> GeoObservationDetail
  *   GET  /projects/:pid/geo/displacements      -> DisplacementSummary[]   (?measurement=api|manual_import)
@@ -24,6 +26,7 @@ import { writerConfigStatus } from "../providers/writer";
 import { contentPillars, generatePromptSuggestions, getActivePromptSet, MAX_PROMPT_LENGTH, MAX_PROMPTS_PER_SET, savePromptSet } from "../geo/prompts";
 import { buildDisplacementSummary, buildGeoResults, buildObservationDetail, buildSearchQuerySummary } from "../geo/results";
 import { importManualObservation, manualImportSchema } from "../geo/manual-import";
+import { addGscQuestionPrompts, buildGscQuestions, GSC_QUESTION_MAX_ADD } from "../geo/gsc-questions";
 
 export const geoRoutes = new Hono<AppEnv>();
 
@@ -65,6 +68,31 @@ geoRoutes.put("/projects/:pid/geo/prompts", async (c) => {
   const project = await requireProject(db, user.id, c.req.param("pid"));
   const input = await body(c, promptPutSchema);
   return c.json({ data: await savePromptSet(db, project, input.prompts, c.get("now")) });
+});
+
+const fromGscSchema = z.object({
+  queries: z.array(z.string().trim().min(1).max(MAX_PROMPT_LENGTH)).min(1).max(GSC_QUESTION_MAX_ADD),
+  setId: z.string().max(80).nullish(),
+  includeBrand: z.boolean().optional(),
+});
+
+/** [A37] Question-style queries from the stored Search Console sync (deterministic, free). Any project member. */
+geoRoutes.get("/projects/:pid/geo/prompts/from-gsc", async (c) => {
+  const user = requireUser(c);
+  const db = c.get("db");
+  const project = await requireProject(db, user.id, c.req.param("pid"));
+  const ib = c.req.query("includeBrand");
+  if (ib !== undefined && ib !== "0" && ib !== "1" && ib !== "true" && ib !== "false") throw badRequest("includeBrand must be 0 or 1.");
+  return c.json({ data: await buildGscQuestions(db, project, { includeBrand: ib === "1" || ib === "true" }) });
+});
+
+/** [A37] Add selected question queries as UNAPPROVED prompts (same permissions and checks as PUT /geo/prompts). */
+geoRoutes.post("/projects/:pid/geo/prompts/from-gsc", async (c) => {
+  const user = requireUser(c);
+  const db = c.get("db");
+  const project = await requireProject(db, user.id, c.req.param("pid"));
+  const input = await body(c, fromGscSchema);
+  return c.json({ data: await addGscQuestionPrompts(db, project, { queries: input.queries, setId: input.setId, includeBrand: input.includeBrand }, c.get("now")) }, 201);
 });
 
 geoRoutes.post("/projects/:pid/geo/prompts/generate", async (c) => {

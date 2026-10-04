@@ -20,12 +20,13 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | POST | /workspaces/:wid/credentials/:provider/models | platform-auth | owner; body `{apiKey?}`; `ProviderModelList` from the provider's documented list endpoint (see "Workspace model selection"); `:provider` is `gemini`, `perplexity`, `openai_geo` or `anthropic_geo` (`typesafe`: 400 `model_not_selectable`) |
 | PUT | /workspaces/:wid/credentials/:provider/model | platform-auth | owner; body `{model: string \| null}`; the workspace's model for that provider (`null` = back to the operator default); returns provider status; `typesafe`: 400 `model_not_selectable` |
 | GET | /workspaces/:wid/custom-providers | platform-auth | `CustomProvidersResponse` (member; never keys, only `keyHint`). See "Custom providers" |
-| POST | /workspaces/:wid/custom-providers | platform-auth | owner; body `CustomProviderInput` `{label?, baseUrl, model, apiKey, useAsWriter?}`; 201 `CustomProvidersResponse`; 409 over 5 per workspace |
+| POST | /workspaces/:wid/custom-providers | platform-auth | owner; body `CustomProviderInput` `{label?, baseUrl, model, apiKey, useAsWriter?, useAsChat?, role?}`; 201 `CustomProvidersResponse`; 409 over 5 writers / 2 GEO engines / 3 chat models per workspace |
 | PATCH | /workspaces/:wid/custom-providers/:id | platform-auth | owner; body `CustomProviderPatchInput` `{label?, baseUrl?, model?, apiKey?, keepKeyForNewHost?}` (key optional = keep; a base URL on a new host needs a new `apiKey` or `keepKeyForNewHost: true`, else 400 `key_required_for_new_host`); every change is logged (see "Base URL changes"); `CustomProvidersResponse` |
 | DELETE | /workspaces/:wid/custom-providers/:id | platform-auth | owner; `CustomProvidersResponse` (the writer reverts to the default when it was selected; its change log is removed too) |
 | POST | /workspaces/:wid/custom-providers/:id/test | platform-auth | member; `GET {base}/models` with the saved key; `{ok, detail, modelListed}` (recorded as last test) |
 | POST | /workspaces/:wid/custom-providers/models | platform-auth | owner; body `{baseUrl, apiKey}` or `{providerId}`; `CustomProviderModelList` |
-| PUT | /workspaces/:wid/writer-source | platform-auth | owner; body `{source: "default" \| "custom:<id>"}`; `CustomProvidersResponse` |
+| PUT | /workspaces/:wid/writer-source | platform-auth | owner; body `{source: "default" \| "custom:<id>"}` (role `writer` rows only); `CustomProvidersResponse` |
+| PUT | /workspaces/:wid/chat-model-source | platform-auth | owner; body `{source: "writer" \| "custom:<id>"}` (role `chat` rows only; [A36]); `CustomProvidersResponse`. See "Ask Okara chat model" |
 | GET | /workspaces/:wid/dataforseo | competitor-data | member; `DataForSeoCredentialStatus` (`src/shared/competitor-data.ts`; never the login or password, only the password's last 4). See "Competitor data (DataForSEO)" |
 | PUT | /workspaces/:wid/dataforseo | competitor-data | owner; body `{login, password}` (API login/password, 1–200 printable ASCII, login without `:`); stored AES-GCM encrypted (migration 0014); status |
 | DELETE | /workspaces/:wid/dataforseo | competitor-data | owner; `{ok:true}` |
@@ -97,6 +98,8 @@ access with `requireProject(db, user.id, projectId)`; every workspace-scoped rou
 | GET | /projects/:pid/geo/prompts | geo-analysis | `GeoPromptSet` (active) |
 | PUT | /projects/:pid/geo/prompts | geo-analysis | body `{prompts:[{text,promptType,stage,approved}]}`; new version |
 | POST | /projects/:pid/geo/prompts/generate | geo-analysis | writer-generated brand-blind suggestions (unapproved) |
+| GET | /projects/:pid/geo/prompts/from-gsc | geo-analysis | member; read-only, no provider call; `?includeBrand=1`; `GscQuestionsResponse` (question-style queries from the stored Search Console sync, [A37]). See "GEO prompts from Search Console" |
+| POST | /projects/:pid/geo/prompts/from-gsc | geo-analysis | member (same as PUT /geo/prompts); body `{queries: string[1..25], setId?: string \| null, includeBrand?}`; 201 `GscQuestionsAddResult` `{set, added, skipped}`; adds UNAPPROVED prompts in a new version |
 | GET | /projects/:pid/geo/results | geo-analysis | `GeoResults` |
 | GET | /geo/observations/:id | geo-analysis | `GeoObservationDetail` |
 | GET | /projects/:pid/geo/displacements | geo-analysis | `DisplacementSummary[]` |
@@ -293,6 +296,39 @@ Routes: `src/worker/routes/credentials.ts`; rules: `src/worker/platform/provider
 - Export: `tables.workspace_provider_models` (`provider`, `model`, `updated_at`). Rows cascade with the
   workspace.
 
+## Ask Okara chat model (custom OpenAI-compatible providers with role `chat`) [A36]
+
+Ask Okara has its own model setting, independent of the writer (owner request 2026-10-04). Migration 0019 rebuilds
+`workspace_custom_providers` (every existing row kept as is) so `role` may also be `'chat'`, and adds `is_chat`
+(1 = the selected chat model; at most one per workspace, partial unique index).
+
+- Chat model source: `"writer"` (default; no selected chat row) = Ask Okara uses the workspace writer exactly as
+  before (custom writer, else `WRITER_PROVIDER` / `WRITER_MODEL` with the workspace or operator writer key);
+  `"custom:<id>"` = a role `chat` provider answers the chat. `GET .../custom-providers` returns `chatSource`,
+  `maxChatProviders` (3), `chatDataSent` and, per row, `isChat`.
+- Add: `POST /workspaces/:wid/custom-providers` with `role: "chat"` (base URL, key, model; same validation as
+  writers: `validateCustomBaseUrl` SSRF rules, key stored AES-GCM encrypted, only `keyHint` returned). It becomes the
+  chat model unless `useAsChat: false` (`useAsChat` with another role: 400). At most 3 chat rows (409), counted
+  separately from writers and GEO engines. PATCH (label, base URL with `keepKeyForNewHost` on a new host, model,
+  key), DELETE (the chat returns to the writer model when the deleted row was selected), test (`detail` names "the
+  first Ask Okara message" as the final check) and Fetch models work as for writers. 412 `setup_required` before
+  migration 0019.
+- Select: `PUT /workspaces/:wid/chat-model-source` `{source}` (owner; members 403, non-members 404). A row of another
+  role is 400 `details: {field: "source", reason: "not_chat"}`; a chat row given to `PUT .../writer-source` is 400
+  `not_writer`. The writer is never changed by the chat source and vice versa.
+- Resolution (`src/worker/chat/model.ts`): a selected chat row is re-read and re-validated before every turn
+  (`resolveCustomProviderRow`: URL, host, model and key in one statement); requests go only to its host
+  (`{base}/chat/completions` with function tools; the text-tools fallback applies) with its key and saved model id.
+  Selected but unusable (URL no longer accepted, model invalid, key not decryptable) -> `setup_required` with the
+  reason; never a fallback to the writer. Spend: a workspace key, so the workspace's own writer-token budget view and
+  `provider_calls` (`purpose` chat.turn, cost unknown), as for a custom writer.
+- `GET /projects/:pid/chat/status` adds `source: "writer" | "custom"`. The chat panel header reads
+  "Model: <id> (writer | chat model) · change in Integrations" and links to `#ask-okara-model`.
+- Not built: a `builtin:<anthropic|openai>` source. The workspace's Anthropic / OpenAI keys are GEO-engine keys
+  (`anthropic_geo`, `openai_geo`) whose disclosed data use is "approved GEO prompt text only" and whose budgets and
+  models are GEO lanes; reusing them for the chat would send project data under a different consent. Owners can
+  add the same vendor as a chat model with its OpenAI-compatible base URL instead.
+
 ## Custom GEO engines (custom OpenAI-compatible providers with role `geo`)
 
 The custom provider routes below also manage custom GEO engines: `POST /workspaces/:wid/custom-providers` with
@@ -351,6 +387,59 @@ The custom provider routes below also manage custom GEO engines: `POST /workspac
   recommendations like any grounded answer; answers without sources are not (`geo/proposals.ts`).
 - Competitor pages: only stored citations can be approved, and a custom lane stores citations only for
   grounded answers.
+
+## GEO prompts from Search Console (amends docs/build-kit.md [A37], 2026-10-04; types in `src/shared/gsc-questions.ts`)
+
+A deterministic, free prompt source next to manual entry, `POST /geo/prompts/generate` (writer, paid) and the sheet
+import: question-style queries people already typed into Google for the site, read from the project's STORED Search
+Console sync (`src/worker/geo/gsc-questions.ts`, `GSC_QUESTION_RULES_VERSION` = `gsc-questions-en-2026-10-04.1`). No
+provider call, no Jev, no writer; prompts are the queries as typed.
+
+`GET /projects/:pid/geo/prompts/from-gsc` (any member; `?includeBrand=1` keeps self-brand queries; other values 400):
+
+- Source: the latest usable sync (`completed` or `partial`), current-window query rows read in keyset pages of 2,000
+  (at most 50,000 rows; every statement binds 5 parameters). Rows are summed per `normalizeDemandQuery`; position =
+  impression-weighted mean (approximation; `null` for CSV imports); landing page = the page with the most impressions
+  for the query (`null` without page rows).
+- Rules (English only; other project languages → `state: "disabled"`): at least 3 words and one of `wh_start`
+  (how / what / which / why / where / when / who first), `wh_word` (one of them later), `aux_start` (does / do / is /
+  are / should first, or "can" + pronoun / determiner), `best`, `top` (first word or followed by a number), `vs`
+  (vs / versus), `difference_between`, `ideas`, `guide`, `review` (review / reviews), `alternatives` (alternatives,
+  "alternative to"), `compare` (compare / comparison). Search operators / URLs and texts over 500 characters are
+  skipped.
+- Self-brand queries (seo/gsc/brand.ts) are left out unless `includeBrand`; any query naming a tracked brand, alias,
+  competitor or domain (the prompt sets' brand-blind rule) is a `reputation` candidate, else `discovery`.
+- Near-duplicates (same sorted word set without a / an / the) merge into the highest-impression query (`variants`).
+- Excluded: queries already in the active set (prompt key or word set) and queries added from Search Console earlier
+  and then removed from the set by the owner (`counts.removedEarlier`; never re-suggested).
+- Ranked by impressions, clicks, query; `candidates` capped at 50 (`counts.eligible` = all after exclusions).
+- Prompt text: trimmed, spaces collapsed, first letter capitalized, "?" for `wh_start` / `aux_start`.
+- Response: `state` (`ready` | `setup_required` (no usable sync; message points to Integrations) | `disabled` |
+  `demo`), `message`, `methodVersion`, `sync{id, source, syncedAt, window, status, truncated}`, `labels` (first:
+  "Search Console, stored sync <date>, window <start>..<end>"), `candidates[{key, text, promptType, rules, evidence,
+  variants}]` (`evidence{source: "gsc", query, impressions, clicks, position, landingPage, window, syncId, syncedAt,
+  syncSource}`), `counts{rowsRead, queries, questionQueries, brandExcluded, alreadyInSet, removedEarlier,
+  mergedDuplicates, eligible}`, `cap`, `includeBrand`, `promptSet{id, version, size, room, max}` or null, `added`
+  (prompts of the active set that came from Search Console, with their evidence).
+
+`POST /projects/:pid/geo/prompts/from-gsc` (any member, like `PUT /geo/prompts`): body `{queries, setId?, includeBrand?}`.
+`queries` are candidate keys (or the queries); they are matched against a fresh computation over ALL eligible
+candidates, never trusted as text. 412 `setup_required` without a usable sync; 400 for a disabled language, an empty
+or > 25 list, when none can be added (`details.skipped[{query, reason}]`: already in the set, not a question query,
+duplicate) or when the set would exceed 25 prompts (`details{room, requested, max}`); 409 when `setId` is not the
+active set (null = "no set yet"). Accepted queries are appended to the active set's prompts (kept with their approval
+state) as UNAPPROVED prompts via `savePromptSet` (brand-blind check, duplicates, 25 cap) in a new version labelled
+"Added from Search Console <date>". `geo_prompts` has no source column, so provenance is stored like imported
+prompts, without a migration: `import_records` rows with `destination = 'gsc_prompts'` (sheet imports use
+`geo_prompts`), `record_key` = prompt key, `status 'in_set'`, `source_key 'gsc:<syncId>'`, `data_json`
+`{evidence, promptType, rules, methodVersion, setVersion}`. 201 `{set, added[{text, promptType, evidence}], skipped}`.
+
+UI: GEO prompts page card "From Search Console" (count "N new question queries from Search Console" and the stored
+sync, then a table with checkboxes, impressions, clicks, position, landing page; "Add selected as prompts", disabled
+while the page has unsaved edits; setup state links to Integrations); each prompt added this way shows a "From Search
+Console" note. Live GEO 12 "Question queries from Search Console" lists the top 8 with "↗ Review on GEO prompts"
+(no run button; refetched when the shown run's `seo.gsc_sync` ends). Service functions `buildGscQuestions` and
+`addGscQuestionPrompts` are exported for a later Ask Okara tool (not wired yet).
 
 ## Competitor data (DataForSEO)
 
@@ -1271,10 +1360,10 @@ checks again).
 
 | Tool | Kind | Mirrors | Notes |
 |---|---|---|---|
-| `models` | read (member) | GET `/workspaces/:wid/{credentials,custom-providers,dataforseo,maton}`, `/projects/:pid/{integrations,gsc/maton}` | writer (`source` default / `custom:<id>`, active host + model, Ask Okara model), custom providers (id, role writer/geo, label, host, base URL, model, last test), engines (configured, key source, state, model, model source, workspace model, `modelSelectable`), DataForSEO, Maton apps, Search Console / Sheets. No key, key hint, encrypted column or token |
+| `models` | read (member) | GET `/workspaces/:wid/{credentials,custom-providers,dataforseo,maton}`, `/projects/:pid/{integrations,gsc/maton}` | writer (`source` default / `custom:<id>`, active host + model), `askOkara` ([A36]: `source` writer / `custom:<id>`, ready, provider, model, host), custom providers (id, role writer/geo/chat, `isChat`, label, host, base URL, model, last test), engines (configured, key source, state, model, model source, workspace model, `modelSelectable`), DataForSEO, Maton apps, Search Console / Sheets. No key, key hint, encrypted column or token |
 | `provider_models` | read (owner) | POST `/workspaces/:wid/custom-providers/models` `{providerId}`, POST `/credentials/:provider/models` `{}` | live Fetch models (10/min per user, shared); `contains`, `limit` |
 | `integration_options` | read | GET `/projects/:pid/gsc/properties`, `/gsc/maton/sites`, `/workspaces/:wid/maton`, `/projects/:pid/competitors/dataforseo/locations` | `view` gsc_properties / maton_gsc_sites / maton_connections / dataforseo_locations |
-| `manage_models` | action (owner) | PUT `/writer-source`; PATCH `/custom-providers/:id` (`model`; `baseUrl` + `keepKeyForNewHost: true`); PUT `/credentials/:provider/model`; DELETE `/custom-providers/:id`; POST `/custom-providers/:id/test`; secure field: POST `/custom-providers`, PATCH `/custom-providers/:id` (`baseUrl` + new key) | `op` set_writer / set_custom_model / set_engine_model / update_base_url / add_provider / remove_provider / test_provider. Base URLs pass `validateCustomBaseUrl` at proposal (https, public hostname, no IP / port / query / credentials / own origin). A model id must be in the provider's live list when the list is complete (otherwise the card says it was not verified). update_base_url: same host needs `keepSavedKey: true`; a new host takes `keepSavedKey: true` (card says the saved key will be sent there) or a new key in the secure field |
+| `manage_models` | action (owner) | PUT `/writer-source`; PUT `/chat-model-source` ([A36]); PATCH `/custom-providers/:id` (`model`; `baseUrl` + `keepKeyForNewHost: true`); PUT `/credentials/:provider/model`; DELETE `/custom-providers/:id`; POST `/custom-providers/:id/test`; secure field: POST `/custom-providers`, PATCH `/custom-providers/:id` (`baseUrl` + new key) | `op` set_writer / set_chat_source (`writer` \| `custom:<id>` of a role chat row) / set_custom_model / set_engine_model / update_base_url / add_provider (`role` writer / geo / chat; `useAsWriter` / `useAsChat`) / remove_provider / test_provider. set_custom_model and update_base_url work on chat rows like writer rows. Base URLs pass `validateCustomBaseUrl` at proposal (https, public hostname, no IP / port / query / credentials / own origin). A model id must be in the provider's live list when the list is complete (otherwise the card says it was not verified). update_base_url: same host needs `keepSavedKey: true`; a new host takes `keepSavedKey: true` (card says the saved key will be sent there) or a new key in the secure field |
 | `manage_credentials` | action (owner; test of a built-in / DataForSEO / custom key: member, as the route) | secure field: PUT `/credentials/:provider`, PUT `/dataforseo` (login + password), PUT `/maton`, PATCH `/custom-providers/:id`; DELETE `/credentials/:provider`, `/dataforseo`, `/maton`; POST `.../test`, `/custom-providers/:id/test` | `op` set_key / remove_key / test; `target` typesafe, gemini, perplexity, openai_geo, anthropic_geo, writer, dataforseo, maton, `custom:<id>` |
 | `admin_settings` | action (owner) | PUT `/projects/:pid/context/:kind`, PUT `/competitors/dataforseo/settings`, POST `/verification/check`, POST `/decisions/:id/feedback`, PUT `/projects/:pid/gsc/source`, PUT `/gsc/property`, PUT `/workspaces/:wid/maton/connections/:app` | `op` context_doc (full content; facts kept unless given) / dataforseo_settings / verification_check / decision_feedback / gsc_source / gsc_property / maton_connection |
 

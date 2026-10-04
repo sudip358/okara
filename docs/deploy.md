@@ -93,6 +93,11 @@ need more than 10 ms of CPU per step, so agent runs will fail on the free plan. 
      `projects.gsc_source`, `imports.transport`, `import_syncs.last_transport`). No secret or var is needed: each
      workspace owner pastes their own key (encrypted with `TOKEN_ENCRYPTION_KEY_V1`). Until it is applied, saving a
      key answers 412 and everything else keeps working on direct Google OAuth.
+   - **Ask Okara chat model** (Integrations → Ask Okara chat model; [A36]): apply migration
+     `0019_custom_provider_chat_role.sql` (`npm run db:migrate:remote`). It rebuilds `workspace_custom_providers`
+     (copies every column and row, keeps ids and key envelopes; adds role `chat` and `is_chat`), so apply it in a
+     quiet moment. No secret or var is needed. Until it is applied, Ask Okara keeps using the writer and adding a
+     chat model answers 412.
    - **Partial (section) runs** (Live view "▶ Run …" buttons): apply migration `0016_run_scope.sql`
      (`npm run db:migrate:remote`; adds `agent_runs.scope_json`). Until it is applied, full runs keep working and
      a partial run request fails.

@@ -40,6 +40,7 @@ import { useLiveMore } from "./more/data";
 import { GEO_CONTAINERS } from "./more/registry";
 import { BrandsContainer, CitedDomainsContainer, EngineQueriesContainer, PromptHistoryContainer } from "./more/GeoContainers";
 import { BudgetContainer, SheetsContainer } from "./more/SharedContainers";
+import { GscQuestionsContainer } from "./more/GscQuestionsContainer";
 
 export interface GeoBoardProps {
   projectId: string;
@@ -289,6 +290,8 @@ export const GeoBoard = memo(function GeoBoard(p: GeoBoardProps) {
     { key: "prompt-history", label: "09 History", cls: "xl:col-span-6 xl:h-[420px]", el: <PromptHistoryContainer projectId={p.projectId} reduced={p.reduced} /> },
     { key: "sheet-prompts", label: "10 Sheet questions", cls: "xl:col-span-6 xl:h-[400px]", el: <SheetsContainer projectId={p.projectId} reduced={p.reduced} mode="geo" /> },
     { key: "budget", label: "11 Budget", cls: "xl:col-span-6 xl:h-[400px]", el: <BudgetContainer projectId={p.projectId} reduced={p.reduced} mode="geo" /> },
+    // [A37] Search Console question queries, the companion of 10 (sheet questions); 12 so 10 and 11 keep their numbers.
+    { key: "gsc-questions", label: "12 GSC questions", cls: "xl:col-span-6 xl:h-[400px]", el: <GscQuestionsContainer projectId={p.projectId} reduced={p.reduced} /> },
   ];
   const extras = allExtras.filter((x) => !more.hidden.has(x.key));
   const lazyDef = (key: string) => GEO_CONTAINERS.find((c) => c.key === key && c.more) ?? null;

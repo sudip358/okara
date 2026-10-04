@@ -11,7 +11,7 @@ export type LiveModeKey = "seo" | "geo";
 
 export interface ContainerDef {
   key: string;
-  /** "01".."20"; empty for the GEO engine columns (a group, not a numbered panel). */
+  /** "01".."20" (GEO "01".."12"); empty for the GEO engine columns (a group, not a numbered panel). */
   num: string;
   title: string;
   /** Phone-width tab label. */
@@ -62,6 +62,8 @@ export const GEO_CONTAINERS: readonly ContainerDef[] = [
   { key: "prompt-history", num: "09", title: "Prompt history", tab: "09 History", accent: "sky", more: true },
   { key: "sheet-prompts", num: "10", title: "AI questions from your sheet", tab: "10 Sheet questions", accent: "zinc", more: true },
   { key: "budget", num: "11", title: "Budget and quotas today", tab: "11 Budget", accent: "zinc", more: true },
+  // [A37] Companion of 10 (sheet questions); appended as 12 so 10 and 11 keep their numbers.
+  { key: "gsc-questions", num: "12", title: "Question queries from Search Console", tab: "12 GSC questions", accent: "sky", more: true },
 ];
 
 export const containersOf = (mode: LiveModeKey): readonly ContainerDef[] => (mode === "seo" ? SEO_CONTAINERS : GEO_CONTAINERS);

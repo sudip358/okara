@@ -121,6 +121,9 @@ const optCol = col.nullish().transform((v) => v ?? null);
 const promptsMapping = z.object({ question: col, done: optCol, notes: z.array(col).max(50).optional() }).strict();
 const competitorsMapping = z.object({ domain: col, notes: optCol, assignedTo: optCol, metrics: z.array(col).max(50).optional() }).strict();
 const linksMapping = z.object({ source: col, target: col, anchor: optCol, date: optCol, method: optCol, hub: optCol, status: optCol }).strict();
+const backlinksMapping = z
+  .object({ liveUrl: col, target: col, anchor: optCol, target2: optCol, anchor2: optCol, vendor: optCol, type: optCol, date: optCol, da: optCol, traffic: optCol, price: optCol })
+  .strict();
 const docMapping = z.object({ columns: z.array(col).max(100).optional(), sortBy: optCol, title: z.string().trim().max(120).nullish() }).strict();
 
 const sourceSchema = z.discriminatedUnion("kind", [
@@ -147,7 +150,16 @@ const importBody = z
   .strict();
 
 function parseMapping(destination: ImportDestination, raw: unknown): ImportMapping {
-  const schema = destination === "geo_prompts" ? promptsMapping : destination === "competitors" ? competitorsMapping : destination === "implemented_links" ? linksMapping : docMapping;
+  const schema =
+    destination === "geo_prompts"
+      ? promptsMapping
+      : destination === "competitors"
+        ? competitorsMapping
+        : destination === "implemented_links"
+          ? linksMapping
+          : destination === "backlinks"
+            ? backlinksMapping
+            : docMapping;
   const r = (schema as z.ZodType<ImportMapping>).safeParse(raw ?? {});
   if (!r.success) throw badRequest("Invalid column mapping.", r.error.issues.slice(0, 10).map((i) => ({ path: `mapping.${i.path.join(".")}`, message: i.message })));
   return r.data;
@@ -245,7 +257,7 @@ importRoutes.post("/projects/:pid/import/commit", async (c) => {
   const options = input.options as ImportOptions;
   if (input.keepInSync) {
     if (input.source.kind !== "sheets") throw badRequest("Keep in sync needs the Google Sheets source (a CSV is a one-time copy).");
-    if (!SYNCABLE_DESTINATIONS.includes(input.destination)) throw badRequest("Keep in sync is available for competitors, GEO prompts and placed links.");
+    if (!SYNCABLE_DESTINATIONS.includes(input.destination)) throw badRequest("Keep in sync is available for competitors, GEO prompts, placed links and backlinks.");
     if (!validFrequency(input.keepInSync.frequencyHours)) throw badRequest(`frequencyHours must be one of ${SYNC_FREQUENCIES.join(", ")}.`);
   }
   const loaded = await loadTable(c.env, db, row, input.source as ImportSourceInput, input.destination, sourceDeps());

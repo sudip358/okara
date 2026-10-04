@@ -48,16 +48,19 @@ export function ChatModelCard({ workspaceId, writer }: { workspaceId: string; wr
     if (location.hash === `#${CHAT_MODEL_ANCHOR}`) sectionRef.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
   }, [location.hash]);
 
-  const apply = (next: CustomProvidersResponse, info?: SavedInfo) => {
-    const wasNew = editing === "new";
+  const formOpen = data?.canManage === true && (editing !== null || providers.length === 0);
+  const editingProvider = editing && editing !== "new" ? (providers.find((p) => p.id === editing) ?? null) : null;
+  /** A saved card's change (select, remove, change model, quick URL update). */
+  const apply = (next: CustomProvidersResponse) => list.setData(next);
+  /** The add / edit form saved: Save & test runs Test on a new chat model; an edit re-tests when its URL or key changed. */
+  const formSaved = (next: CustomProvidersResponse, info?: SavedInfo) => {
+    const before = new Set(providers.map((p) => p.id));
     list.setData(next);
     setEditing(null);
     setPrefillUrl(undefined);
-    // Save & test: a new chat model is tested right away; an edit re-tests when its URL or key changed.
-    setRetestId(wasNew ? (activeChatProvider(next)?.id ?? null) : (info?.retestId ?? null));
+    const added = chatProviders(next).find((p) => !before.has(p.id));
+    setRetestId(editingProvider ? (info?.retestId ?? null) : (added?.id ?? null));
   };
-  const formOpen = data?.canManage === true && (editing !== null || providers.length === 0);
-  const editingProvider = editing && editing !== "new" ? (providers.find((p) => p.id === editing) ?? null) : null;
   const ordered = [...providers].sort((a, b) => Number(b.isChat === true) - Number(a.isChat === true));
 
   return (
@@ -189,7 +192,7 @@ export function ChatModelCard({ workspaceId, writer }: { workspaceId: string; wr
                 role="chat"
                 initial={editingProvider}
                 initialBaseUrl={editingProvider ? prefillUrl : undefined}
-                onSaved={apply}
+                onSaved={formSaved}
                 onCancel={
                   providers.length > 0
                     ? () => {

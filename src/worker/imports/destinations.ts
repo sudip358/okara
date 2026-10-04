@@ -13,6 +13,10 @@
  *                      removed from the sheet are marked "removed from sheet" and no longer tracked.
  *   implemented_links  each (source, target, anchor) -> a link already placed; the suggester treats the pair as
  *                      implemented and the Internal links page checks it against the latest crawl. Append only.
+ *   backlinks          each (live URL, target) pair of a built-links tab (up to two per row: Anchor 1/Target and
+ *                      Anchor 2/Target 2) -> a monitored backlink (backlinks table; MAX_BACKLINKS_PER_PROJECT active
+ *                      rows). The live URL must be a public http(s) URL off your site; the target must be on your site.
+ *                      Sync: pairs removed from the sheet are marked inactive (check history kept), never deleted.
  *   context_doc /      the tab -> an "imported" context document (capped plain-text table, labelled with source,
  *   reference          tab and import date). Re-import with identical rows writes no new version.
  */
@@ -27,9 +31,11 @@ import {
   columnIndex,
   countsSentence,
   linkKey,
+  linkUrlKey,
   numericCell,
   positionHeaderName,
   promptKey,
+  type BacklinksMapping,
   type CompetitorsMapping,
   type DocMapping,
   type ImportCounts,
@@ -55,6 +61,18 @@ import { getActivePromptSet, MAX_PROMPT_LENGTH, MAX_PROMPTS_PER_SET, savePromptS
 import { onCompetitorsChanged, ownDomain, projectCompetitors } from "../competitors/dataforseo";
 import { targetDomain } from "../providers/dataforseo";
 import type { LoadedTable } from "./source";
+import { MAX_BACKLINKS_PER_PROJECT } from "@shared/backlinks";
+import { assertPublicExternalUrl } from "../seo/ssrf";
+import {
+  deactivateBacklinkStmt,
+  insertBacklinkStmt,
+  loadBacklinkIndex,
+  sameSheetData,
+  sheetSnapshot,
+  updateBacklinkSheetStmt,
+  type BacklinkDbRow,
+  type BacklinkSheetData,
+} from "../backlinks/store";
 
 // ------------------------------------------------------------------ context + shared types
 export interface ImportCtx {
@@ -88,7 +106,8 @@ export interface RecordRow {
 export interface ChangeRow {
   key: string;
   action: "added" | "updated" | "removed";
-  prev: RecordRow | null;
+  /** Previous state for undo: an import_records row, or a backlink's sheet snapshot (backlinks destination). */
+  prev: RecordRow | Record<string, unknown> | null;
   refId?: string | null;
 }
 
@@ -688,6 +707,178 @@ export async function prepareLinks(ctx: ImportCtx, loaded: LoadedTable, mapping:
   };
 }
 
+// ------------------------------------------------------------------ backlinks (built links to monitor)
+/** A public http(s) article URL off the project's site (scheme added when missing); null otherwise. */
+export function backlinkLiveUrlOf(p: ProjectRow, raw: string): { url: string | null; reason: string | null } {
+  const s = raw.trim();
+  if (!s) return { url: null, reason: "no live URL" };
+  if (/\s/.test(s)) return { url: null, reason: "the live URL is not a URL" };
+  let u: URL;
+  try {
+    u = assertPublicExternalUrl(/^[a-z][a-z0-9+.-]*:/i.test(s) ? s : `https://${s}`);
+  } catch {
+    return { url: null, reason: "the live URL must be a public http(s) URL (no IP addresses, local names, credentials or ports)" };
+  }
+  if (!u.hostname.includes(".")) return { url: null, reason: "the live URL is not a URL" };
+  if (targetDomain(u.hostname) === projectLinkHost(p)) return { url: null, reason: "the live URL is on your own site" };
+  return { url: u.toString(), reason: null };
+}
+
+export async function prepareBacklinks(ctx: ImportCtx, loaded: LoadedTable, mapping: BacklinksMapping, options: ImportOptions): Promise<Prepared> {
+  const { db, project } = ctx;
+  const t = loaded.table;
+  const li = requireColumn(loaded, mapping.liveUrl, "live URL");
+  const ti = requireColumn(loaded, mapping.target, "target URL");
+  const col = {
+    anchor: optColumn(loaded, mapping.anchor),
+    target2: optColumn(loaded, mapping.target2),
+    anchor2: optColumn(loaded, mapping.anchor2),
+    vendor: optColumn(loaded, mapping.vendor),
+    type: optColumn(loaded, mapping.type),
+    date: optColumn(loaded, mapping.date),
+    da: optColumn(loaded, mapping.da),
+    traffic: optColumn(loaded, mapping.traffic),
+    price: optColumn(loaded, mapping.price),
+  };
+  const excluded = excludedSet(options);
+  const existing = await loadBacklinkIndex(db, project);
+  const host = projectLinkHost(project);
+  const b = new PlanBuilder();
+  const seen = new Set<string>();
+  interface Write {
+    key: string;
+    data: BacklinkSheetData;
+    rec: BacklinkDbRow | null;
+  }
+  const adds: Write[] = [];
+  const updates: Write[] = [];
+  const notAdded: Write[] = [];
+  const cell = (row: readonly string[], i: number, n: number) => (i >= 0 ? clip((row[i] ?? "").replace(/\s+/g, " ").trim(), n) || null : null);
+  const numCell = (row: readonly string[], i: number) => (i >= 0 ? numericCell((row[i] ?? "").trim()) : null);
+  for (let r = 0; r < t.rows.length; r++) {
+    const row = t.rows[r]!;
+    const rowNo = t.rowNumbers[r] ?? null;
+    const rawLive = (row[li] ?? "").trim();
+    const pairs: Array<{ ti: number; ai: number; first: boolean }> = [{ ti, ai: col.anchor, first: true }];
+    if (col.target2 >= 0) pairs.push({ ti: col.target2, ai: col.anchor2, first: false });
+    if (!rawLive && pairs.every((pp) => !(row[pp.ti] ?? "").trim())) continue;
+    const live = backlinkLiveUrlOf(project, rawLive);
+    for (const pair of pairs) {
+      const rawT = (row[pair.ti] ?? "").trim();
+      if (!rawT && !pair.first) continue;
+      const anchor = cell(row, pair.ai, 200);
+      const label = `${clip(rawLive || "(no live URL)", 140)} → ${clip(rawT || "(no target)", 140)}${anchor ? ` ("${clip(anchor, 60)}")` : ""}`;
+      if (!live.url) {
+        b.push(`${rawLive}>${rawT}`.toLowerCase().slice(0, 500), label, "skip", live.reason, rowNo);
+        continue;
+      }
+      if (!rawT) {
+        b.push(`${rawLive}>`.toLowerCase().slice(0, 500), label, "skip", "no target URL", rowNo);
+        continue;
+      }
+      const target = siteUrlOf(project, rawT);
+      if (!target) {
+        b.push(`${rawLive}>${rawT}`.toLowerCase().slice(0, 500), label, "skip", `the target must be a URL on ${host}`, rowNo);
+        continue;
+      }
+      const liveKey = linkUrlKey(live.url);
+      const targetKey = linkUrlKey(target);
+      const key = `${liveKey}>${targetKey}`.slice(0, 1000);
+      if (seen.has(key)) {
+        b.push(key, label, "skip", "duplicate (live URL, target) pair in the sheet", rowNo);
+        continue;
+      }
+      seen.add(key);
+      if (excluded.has(key)) {
+        b.push(key, label, "skip", "unchecked by you", rowNo);
+        continue;
+      }
+      const data: BacklinkSheetData = {
+        liveUrl: live.url.slice(0, 2000),
+        liveUrlKey: liveKey.slice(0, 2000),
+        liveHost: new URL(live.url).hostname.replace(/^www\./, ""),
+        targetUrl: target.slice(0, 2000),
+        targetUrlKey: targetKey.slice(0, 2000),
+        anchorExpected: anchor,
+        vendor: cell(row, col.vendor, 120),
+        linkType: cell(row, col.type, 80),
+        placedDate: cell(row, col.date, 40),
+        da: numCell(row, col.da),
+        traffic: numCell(row, col.traffic),
+        priceText: cell(row, col.price, 40),
+        sourceRow: rowNo,
+      };
+      const rec = existing.get(key) ?? null;
+      if (rec) {
+        if (Number(rec.active) === 1 && sameSheetData(rec, data)) {
+          b.push(key, label, "unchanged", "already monitored", rowNo);
+          continue;
+        }
+        updates.push({ key, data, rec });
+        b.push(key, label, "update", Number(rec.active) === 1 ? "sheet values updated" : "back in the sheet: monitored again", rowNo);
+        continue;
+      }
+      adds.push({ key, data, rec: null });
+    }
+  }
+
+  // Removals (sync): monitored pairs from this tab that left the sheet are marked inactive, never deleted.
+  const removals: BacklinkDbRow[] = [];
+  if (ctx.removeMissing) {
+    for (const rec of existing.values()) {
+      if (rec.source_key !== loaded.source.sourceKey || seen.has(rec.pair_key) || Number(rec.active) !== 1) continue;
+      removals.push(rec);
+      b.push(rec.pair_key, `${clip(rec.live_url, 140)} → ${clip(rec.target_url, 140)}`, "remove", "no longer in the sheet: kept as inactive (check history kept)", null);
+    }
+  }
+  const reactivated = updates.filter((u) => Number(u.rec?.active) !== 1).length;
+  let active = [...existing.values()].filter((r) => Number(r.active) === 1).length - removals.length + reactivated;
+  const accepted: Write[] = [];
+  for (const a of adds) {
+    const label = `${clip(a.data.liveUrl, 140)} → ${clip(a.data.targetUrl, 140)}${a.data.anchorExpected ? ` ("${clip(a.data.anchorExpected, 60)}")` : ""}`;
+    if (active < MAX_BACKLINKS_PER_PROJECT) {
+      accepted.push(a);
+      active++;
+      b.push(a.key, label, "add", null, a.data.sourceRow);
+    } else {
+      notAdded.push(a);
+      b.push(a.key, label, "not_added", `at most ${MAX_BACKLINKS_PER_PROJECT.toLocaleString("en-US")} backlinks are monitored per project`, a.data.sourceRow);
+    }
+  }
+  const summary = [countsSentence({ ...b.counts }, { one: "backlink", many: "backlinks" }), ...b.skipLines()];
+  if (accepted.length) summary.push("New backlinks are checked in the next weekly check, or right away with “Run backlink check” on the Backlinks page.");
+  const notes = [
+    `Each (live URL, target) pair is one monitored backlink; a row with Anchor 2 / Target 2 gives two. Vendor, type, date, DA, traffic and price are ${IMPORT_LABEL_SHEET}.`,
+    "Okara fetches each live article (public pages only, robots.txt respected, at most 1 request per second per host) and checks whether it links to your target and whether that link is dofollow, nofollow, sponsored or ugc.",
+  ];
+  return {
+    plan: basePlan("backlinks", loaded, b, summary, notes),
+    noop: accepted.length === 0 && updates.length === 0 && removals.length === 0,
+    async apply(importId) {
+      const changes: ChangeRow[] = [];
+      const lines: string[] = [];
+      const stmts: Array<[string, ...unknown[]]> = [];
+      for (const a of accepted) {
+        stmts.push(insertBacklinkStmt(project, newId("bl"), a.key, a.data, importId, loaded.source.sourceKey, ctx.now));
+        changes.push({ key: a.key, action: "added", prev: null });
+        lines.push(`+ ${clip(a.data.liveUrl, 120)} → ${clip(a.data.targetUrl, 120)}`);
+      }
+      for (const u of updates) {
+        stmts.push(updateBacklinkSheetStmt(project, u.rec!.id, u.data, importId, loaded.source.sourceKey, ctx.now));
+        changes.push({ key: u.key, action: "updated", prev: sheetSnapshot(u.rec!) });
+        if (Number(u.rec!.active) !== 1) lines.push(`~ ${clip(u.data.liveUrl, 120)} (monitored again)`);
+      }
+      for (const r of removals) {
+        stmts.push(deactivateBacklinkStmt(project, r.id, ctx.now));
+        changes.push({ key: r.pair_key, action: "removed", prev: sheetSnapshot(r) });
+        lines.push(`− ${clip(r.live_url, 120)} → ${clip(r.target_url, 120)} (inactive)`);
+      }
+      await runBatches(db, stmts);
+      return { changes, lines };
+    },
+  };
+}
+
 // ------------------------------------------------------------------ context documents
 const docCell = (s: string) => clip(s.replace(/[\r\n\t]+/g, " ").replace(/\|/g, "/").replace(/\s+/g, " ").trim(), CONTEXT_DOC_CELL_CHARS);
 
@@ -788,6 +979,8 @@ export async function prepare(ctx: ImportCtx, loaded: LoadedTable, destination: 
       return prepareCompetitors(ctx, loaded, mapping as CompetitorsMapping, options);
     case "implemented_links":
       return prepareLinks(ctx, loaded, mapping as LinksMapping, options);
+    case "backlinks":
+      return prepareBacklinks(ctx, loaded, mapping as BacklinksMapping, options);
     case "context_doc":
     case "reference":
       return prepareDoc(ctx, loaded, mapping as DocMapping, destination);

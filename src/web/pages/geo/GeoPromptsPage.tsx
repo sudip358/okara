@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router";
 import type { GeoPromptSet, Project } from "@shared/types";
+import type { GscQuestionsResponse } from "@shared/gsc-questions";
 import { ApiError, api, errorMessage, isSetupRequired } from "@web/lib/api";
 import { formatDateTime } from "@web/lib/format";
 import { useApi } from "@web/lib/hooks";
@@ -21,6 +22,8 @@ import {
   StateBanner,
   inputClass,
 } from "@web/components/ui";
+import { GscQuestionsPanel, PromptGscNote } from "./GscQuestionsPanel";
+import { addedFor } from "./gsc-questions-lib";
 import { MAX_PROMPTS, detailMessages, newDraftKey, normalizeSuggestions, toDraft, type DraftPrompt, type Suggestion } from "./lib";
 
 /** Client-side hint only; the server enforces the brand-blind rule. */
@@ -52,6 +55,9 @@ export function GeoPromptsPage() {
   const base = `/projects/${encodeURIComponent(projectId)}`;
   const { data, error, loading, reload, setData } = useApi<GeoPromptSet | null>(projectId ? `${base}/geo/prompts` : null);
   const sheetNotes = usePromptNotes(projectId);
+  // [A37] Question queries from the stored Search Console sync (refetched whenever the active set changes).
+  const [includeBrand, setIncludeBrand] = useState(false);
+  const gsc = useApi<GscQuestionsResponse>(projectId ? `${base}/geo/prompts/from-gsc${includeBrand ? "?includeBrand=1" : ""}` : null, [data?.id ?? null]);
 
   const original = useMemo(() => (data?.prompts ?? []).slice().sort((a, b) => a.position - b.position).map(toDraft), [data]);
   const [drafts, setDrafts] = useState<DraftPrompt[]>([]);
@@ -166,6 +172,22 @@ export function GeoPromptsPage() {
         </ul>
       </Card>
 
+      <GscQuestionsPanel
+        projectId={projectId}
+        data={gsc.data}
+        error={gsc.error}
+        loading={gsc.loading}
+        onReload={gsc.reload}
+        includeBrand={includeBrand}
+        onIncludeBrand={setIncludeBrand}
+        setId={data?.id ?? null}
+        dirty={dirty}
+        onAdded={(set) => {
+          setData(set);
+          setSaved(null);
+        }}
+      />
+
       <Card
         title={`Prompts (${drafts.length} of ${MAX_PROMPTS})`}
         description={`${discoveryCount} discovery · ${drafts.length - discoveryCount} reputation · ${approvedCount} approved`}
@@ -221,6 +243,7 @@ export function GeoPromptsPage() {
                         placeholder="e.g. Which lighting stores offer solid brass fixtures with UL listing?"
                       />
                       <PromptSheetNote note={noteFor(sheetNotes, d.text)} />
+                      <PromptGscNote note={addedFor(gsc.data?.added, d.text)} />
                       {named.length > 0 && (
                         <p id={`p-warn-${d.key}`} className="text-xs text-amber-800 dark:text-amber-300">
                           This discovery prompt appears to name {named.join(", ")}. Make it brand-blind or change the type to reputation.

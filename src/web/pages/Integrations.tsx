@@ -27,6 +27,7 @@ import {
 } from "@web/components/ui";
 import { WriterProviderRow } from "./integrations/CustomWriter";
 import { CustomGeoEngines } from "./integrations/CustomGeo";
+import { ChatModelCard } from "./integrations/ChatModel";
 import { ProviderModelRow } from "./integrations/ProviderModel";
 import { GEO_ENGINE_PROVIDERS, isModelSelectable } from "./integrations/model-lib";
 import { DataForSeoCard } from "./integrations/DataForSeo";
@@ -410,7 +411,8 @@ function ProviderKeysCard({ workspaceId, fallback, onChange }: { workspaceId: st
                 title: "Jev and writer",
                 note: null,
                 rows: providers.filter((p) => !GEO_ENGINE_PROVIDERS.includes(p.provider)),
-                extra: null,
+                // [A36] Ask Okara's own model (default: the writer).
+                extra: <ChatModelCard workspaceId={workspaceId} writer={providers.find((p) => p.provider === "writer") ?? null} />,
               },
             ] as const
           ).map((group) => (

@@ -37,14 +37,15 @@ export const IMPORT_LABEL_SHEET = "from your sheet, not measured by Okara";
 export const IMPORT_LABEL_THIRD_PARTY = "from your sheet (third-party tool)";
 
 // ------------------------------------------------------------------ contract types
-export type ImportDestination = "geo_prompts" | "competitors" | "implemented_links" | "context_doc" | "reference";
-export const IMPORT_DESTINATIONS: readonly ImportDestination[] = ["geo_prompts", "competitors", "implemented_links", "context_doc", "reference"];
-export const SYNCABLE_DESTINATIONS: readonly ImportDestination[] = ["geo_prompts", "competitors", "implemented_links"];
+export type ImportDestination = "geo_prompts" | "competitors" | "implemented_links" | "context_doc" | "reference" | "backlinks";
+export const IMPORT_DESTINATIONS: readonly ImportDestination[] = ["geo_prompts", "competitors", "implemented_links", "backlinks", "context_doc", "reference"];
+export const SYNCABLE_DESTINATIONS: readonly ImportDestination[] = ["geo_prompts", "competitors", "implemented_links", "backlinks"];
 
 export const DESTINATION_LABELS: Record<ImportDestination, string> = {
   geo_prompts: "GEO prompts",
   competitors: "Competitors",
   implemented_links: "Internal links already placed",
+  backlinks: "Backlinks to monitor (built links)",
   context_doc: "Imported research (context document)",
   reference: "Reference only (Okara measures this itself)",
 };
@@ -72,6 +73,24 @@ export interface LinksMapping {
   hub?: string | null;
   status?: string | null;
 }
+/**
+ * Backlink monitor (built links sheet, e.g. the "Built Links" tab): one row holds the live article URL and up to two
+ * (anchor, target) pairs; every pair becomes one monitored backlink. Vendor / type / date / DA / traffic / price are
+ * the owner's own sheet values, kept as labels ("from your sheet").
+ */
+export interface BacklinksMapping {
+  liveUrl: string;
+  target: string;
+  anchor?: string | null;
+  target2?: string | null;
+  anchor2?: string | null;
+  vendor?: string | null;
+  type?: string | null;
+  date?: string | null;
+  da?: string | null;
+  traffic?: string | null;
+  price?: string | null;
+}
 export interface DocMapping {
   /** Columns kept in the document (all when empty). */
   columns?: string[];
@@ -79,7 +98,7 @@ export interface DocMapping {
   sortBy?: string | null;
   title?: string | null;
 }
-export type ImportMapping = PromptsMapping | CompetitorsMapping | LinksMapping | DocMapping;
+export type ImportMapping = PromptsMapping | CompetitorsMapping | LinksMapping | BacklinksMapping | DocMapping;
 
 export interface ImportOptions {
   /** GEO prompts: save imported prompts approved (they run in the next GEO run) or pending approval. */
@@ -446,6 +465,14 @@ const find = (headers: readonly string[], ...patterns: RegExp[]): string | null 
  *   anything else                              -> imported research (context document)
  */
 export function suggestDestination(tabName: string, headers: readonly string[]): DestinationSuggestion {
+  const backlinks = suggestBacklinksMapping(headers);
+  if (backlinks) {
+    return {
+      destination: "backlinks",
+      mapping: backlinks,
+      reason: `"${backlinks.liveUrl}" and "${backlinks.target}" columns look like built backlinks: each live article is checked for its link to your site (dofollow / nofollow).`,
+    };
+  }
   const source = find(headers, /^source( article| page)? url$/, /^source$/, /^from url$/);
   const target = find(headers, /^target( page)? url$/, /^target$/, /^to url$/);
   if (source && target) {
@@ -483,6 +510,39 @@ export function suggestDestination(tabName: string, headers: readonly string[]):
   return { destination: "context_doc", mapping: { columns: [...headers], title: tabName }, reason: "Research or plan tab: stored as an imported research document the agents can read as evidence." };
 }
 
+/**
+ * Backlinks column mapping from a header row ("Built Links": <vendor> | Type | Date | Live URL | Anchor 1 | Target |
+ * Anchor 2 | Target 2 | DA | Traffic | Price). Needs a live-URL column and a target column; null otherwise. The vendor
+ * column is a "Vendor"/"Provider"/"Agency" header, else the FIRST column when its header is blank ("Column 1" after
+ * toTable) or a number (e.g. "3"), as in the master sheet.
+ */
+export function suggestBacklinksMapping(headers: readonly string[]): BacklinksMapping | null {
+  const liveUrl = find(headers, /^live( article| page| post| link)?( url| link)?$/, /^(article|published|placement|guest post) url$/, /^url live$/);
+  if (!liveUrl) return null;
+  const rest = headers.filter((h) => h !== liveUrl);
+  const target = find(rest, /^target( 1)?$/, /^target( 1)? (url|page|link)$/, /^(our|landing) (url|page)$/);
+  if (!target) return null;
+  const target2 = find(rest.filter((h) => h !== target), /^target 2$/, /^target 2 (url|page|link)$/);
+  const anchor = find(rest, /^anchor( 1)?$/, /^anchor( 1)? text$/);
+  const anchor2 = find(rest.filter((h) => h !== anchor), /^anchor 2$/, /^anchor 2 text$/);
+  const first = headers[0] ?? "";
+  const vendorNamed = find(rest, /^(vendor|provider|agency|seller|supplier|source)$/);
+  const vendor = vendorNamed ?? (first !== liveUrl && (/^column 1$/i.test(first) || /^\d+$/.test(first.trim())) ? first : null);
+  return {
+    liveUrl,
+    target,
+    anchor,
+    target2,
+    anchor2,
+    vendor,
+    type: find(rest, /^(type|link type|placement type)$/),
+    date: find(rest, /^(date|date placed|live date|published|published date|date live)$/),
+    da: find(rest, /^(da|dr|domain authority|domain rating)$/),
+    traffic: find(rest, /^(traffic|organic traffic|monthly traffic)$/),
+    price: find(rest, /^(price|cost|fee)$/),
+  };
+}
+
 /** Required columns of a mapping (used to detect a changed header row on sync). */
 export function requiredColumns(destination: ImportDestination, mapping: ImportMapping): string[] {
   switch (destination) {
@@ -492,6 +552,8 @@ export function requiredColumns(destination: ImportDestination, mapping: ImportM
       return [(mapping as CompetitorsMapping).domain];
     case "implemented_links":
       return [(mapping as LinksMapping).source, (mapping as LinksMapping).target];
+    case "backlinks":
+      return [(mapping as BacklinksMapping).liveUrl, (mapping as BacklinksMapping).target];
     default:
       return [];
   }

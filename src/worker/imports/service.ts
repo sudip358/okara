@@ -39,6 +39,7 @@ import { targetDomain } from "../providers/dataforseo";
 import { COMPETITOR_ADDED, clip, prepare, runBatches, type ChangeRow, type ImportCtx, type RecordRow } from "./destinations";
 import type { LoadedTable } from "./source";
 import { sheetsStatusWithMaton } from "./sheets-maton";
+import { undoBacklinkImport } from "../backlinks/store";
 
 export interface ImportRow {
   id: string;
@@ -260,6 +261,7 @@ export async function undoImport(env: Env, db: Db, project: ProjectRow, importId
   // Project-level effects first (they read the current state).
   if (imp.destination === "geo_prompts") lines.push(...(await undoPrompts(db, project, imp, changes, now)));
   if (imp.destination === "competitors") lines.push(...(await undoCompetitors(db, project, changes, now)));
+  if (imp.destination === "backlinks") lines.push(...(await undoBacklinkImport(db, project, imp.id, changes)));
   if (dest === "context_doc") {
     await db.run(
       "DELETE FROM context_documents WHERE workspace_id = ? AND project_id = ? AND kind = 'imported' AND import_id = ?",

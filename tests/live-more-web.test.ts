@@ -520,6 +520,7 @@ describe("Containers menu", () => {
       "09 Prompt history",
       "10 AI questions from your sheet",
       "11 Budget and quotas today",
+      "12 Question queries from Search Console", // [A37]
     ]);
   });
 });
@@ -574,7 +575,7 @@ describe("boards", () => {
       },
     };
     const html = render(h(ra.PanelActionsContext.Provider, { value: moreGeoActions(env()) }, h(GeoBoard, props)));
-    const order = ["heatmap", "recs", "engine-queries", "brands", "cited-domains", "prompt-history", "sheet-prompts", "budget"].map((k) => html.indexOf(`data-panel="${k}"`));
+    const order = ["heatmap", "recs", "engine-queries", "brands", "cited-domains", "prompt-history", "sheet-prompts", "budget", "gsc-questions"].map((k) => html.indexOf(`data-panel="${k}"`));
     expect(order.every((i) => i > 0)).toBe(true);
     expect(order).toEqual(order.slice().sort((x, y) => x - y));
     expect(html).toContain('data-action="geo-batch-queries"');

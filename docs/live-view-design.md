@@ -1058,6 +1058,15 @@ are not stored, so "ranks worse" cannot be computed without another paid call. N
 score, traffic or forecast anywhere; differences are measured between two stored windows and always show both
 values.
 
+**GEO 12 Question queries from Search Console (amendment 2026-10-04, docs/build-kit.md [A37]).** The companion
+of GEO 10 (sheet questions), appended as 12 so 10 and 11 keep their numbers. It reads
+`GET /projects/:pid/geo/prompts/from-gsc` (read-only, no provider call) on mount and when the shown run's
+`seo.gsc_sync` step ends; it lists the top 8 question-style queries not yet in the prompt set (prompt text,
+impressions, position, landing page at wider widths), the count of all of them as the counter, the caption "From
+your latest Search Console sync (<date>), not part of this run", and "↗ Review on GEO prompts" (the page's "From
+Search Console" card, where they are added unapproved). No run button. Setup state (no stored sync) links to
+Integrations; non-English projects show the server's "not available" message.
+
 ## 18. Internal-link containers (amendment 2026-10-03, docs/build-kit.md [A32])
 
 Owner request on `/projects/:pid/live` (SEO mode): containers built on the internal links workbench ([A30]), each with

@@ -11,6 +11,7 @@ import type { ChatAction, ChatConfirmBody, ChatMessage, ChatSessionDetail, ChatS
 import { api, apiStream, errorMessage, isRateLimited } from "@web/lib/api";
 import { formatRelative } from "@web/lib/format";
 import { projectPath } from "@web/lib/project-context";
+import { CHAT_MODEL_ANCHOR } from "@web/pages/integrations/custom-writer-lib";
 import { Badge, Spinner, buttonClass, cx } from "@web/components/ui";
 import { groupSteps, mergeActions, mergeMessages, parseMarkdownLite, progressText, safeFilename, secretKeyHint, secretRequestAllowed, secretRequestBody, starterPrompts, STEP_STATUS_LABEL, toCsv, upsertStep, type Block, type Inline } from "./lib";
 
@@ -645,9 +646,13 @@ export function ChatPanel({
             Ask Okara <Badge tone="info" className="ml-1 align-middle">beta</Badge>
           </h2>
           {chat.status?.model && (
-            <p className="truncate text-[11px] text-zinc-500 dark:text-zinc-400" title="Ask Okara uses the writer model selected on the Integrations page">
-              Model: {chat.status.model.model} ·{" "}
-              <Link className="underline" to={projectPath(projectId, "integrations")} onClick={() => onMinimize()}>
+            <p
+              className="truncate text-[11px] text-zinc-500 dark:text-zinc-400"
+              title={chat.status.source === "custom" ? "Ask Okara uses its own chat model, chosen on the Integrations page" : "Ask Okara uses the writer model (choose a separate chat model on the Integrations page)"}
+            >
+              Model: {chat.status.model.model}
+              {chat.status.source === "custom" ? " (chat model)" : " (writer)"} ·{" "}
+              <Link className="underline" to={`${projectPath(projectId, "integrations")}#${CHAT_MODEL_ANCHOR}`} onClick={() => onMinimize()}>
                 change in Integrations
               </Link>
             </p>
@@ -740,8 +745,10 @@ export function ChatPanel({
             <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-800 dark:bg-amber-950/40">
               <p className="font-semibold">Setup required</p>
               <p className="mt-1 break-words text-zinc-700 dark:text-zinc-300">{chat.status.message ?? "No chat model is configured."}</p>
-              <p className="mt-1 text-zinc-700 dark:text-zinc-300">The writer model must support tool calling (Anthropic, or an OpenAI-compatible endpoint with tools).</p>
-              <Link className={cx(buttonClass("secondary", "sm"), "mt-2")} to={projectPath(projectId, "integrations")} onClick={() => onMinimize()}>
+              <p className="mt-1 text-zinc-700 dark:text-zinc-300">
+                The chat model (the writer, or a separate chat model) must support tool calling (Anthropic, or an OpenAI-compatible endpoint with tools).
+              </p>
+              <Link className={cx(buttonClass("secondary", "sm"), "mt-2")} to={`${projectPath(projectId, "integrations")}#${CHAT_MODEL_ANCHOR}`} onClick={() => onMinimize()}>
                 Open Integrations
               </Link>
             </div>

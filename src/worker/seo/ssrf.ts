@@ -553,3 +553,141 @@ export async function approvedExternalFetch(fetchImpl: typeof fetch, url: string
     if (timer) clearTimeout(timer);
   }
 }
+
+// ---------------------------------------------------------------------------------------------- owner-listed backlink pages [A38]
+
+/**
+ * Validate a public third-party URL that the OWNER listed in their own backlinks sheet/CSV (never a URL taken from
+ * model output or from page content other than redirect Location headers). Owner-approved exception to the
+ * verified-host rule, docs/build-kit.md [A38]:
+ *  - http or https only; no userinfo; default port only;
+ *  - public hostnames only: every IP literal is refused (not only private ranges: decimal/octal/hex IPv4, IPv6,
+ *    v4-mapped, metadata addresses), as are local names (localhost, single-label, .local/.internal/...).
+ * Returns the parsed URL (hash stripped, host lowercased) or throws CrawlFetchError('blocked_url').
+ */
+export function assertPublicExternalUrl(input: string | URL): URL {
+  let url: URL;
+  try {
+    url = new URL(String(input));
+  } catch {
+    throw new CrawlFetchError("blocked_url", "Invalid URL.");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new CrawlFetchError("blocked_url", "Only http(s) URLs are fetched.");
+  if (url.username || url.password) throw new CrawlFetchError("blocked_url", "URLs with credentials are refused.");
+  if (url.port !== "") throw new CrawlFetchError("blocked_url", "Non-default ports are refused.");
+  const host = normalizeHost(url.hostname);
+  if (!host || classifyHost(host).kind !== "name") throw new CrawlFetchError("blocked_url", "IP-address hosts are refused.");
+  if (parseIPv4Loose(host) !== null) throw new CrawlFetchError("blocked_url", "IP-address hosts are refused.");
+  if (isLocalName(host)) throw new CrawlFetchError("blocked_url", "Local hostnames are refused.");
+  url.hostname = host;
+  url.hash = "";
+  return url;
+}
+
+export interface PublicFetchOptions extends Omit<GuardedFetchOptions, "verifiedHost"> {
+  /**
+   * Called with every URL right before it is requested (the first URL and each validated redirect hop), e.g. to
+   * check that host's robots.txt, wait for per-host politeness and count the request against a per-invocation fetch
+   * budget. Throwing aborts the fetch and the error propagates unchanged.
+   */
+  beforeRequest?: (url: URL, hop: number) => Promise<void>;
+  /** Called with each followed redirect hop (also when a later hop fails), so callers can report the chain. */
+  onRedirect?: (hop: { status: number; to: string }) => void;
+}
+
+/**
+ * Fetch an owner-listed public page (or its robots.txt) with the crawler's guard: manual redirects (each hop
+ * re-validated with assertPublicExternalUrl, so a Location pointing at a private, metadata or IP-literal host is
+ * refused at that hop; hosts may change, e.g. an article moved to another domain), hop cap, one timeout over
+ * connect + headers + body, streamed byte cap, content-type allowlist. Used only by the backlink monitor
+ * (src/worker/backlinks/check.ts), which checks robots.txt per host through beforeRequest.
+ */
+export async function publicExternalFetch(fetchImpl: typeof fetch, url: string, opts: PublicFetchOptions): Promise<GuardedResponse> {
+  const maxRedirects = opts.maxRedirects ?? 5;
+  const kind = opts.kind ?? "html";
+  const controller = new AbortController();
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const abortPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      reject(new CrawlFetchError("timeout", `Timed out after ${opts.timeoutMs} ms.`));
+    }, opts.timeoutMs);
+  });
+  abortPromise.catch(() => undefined);
+
+  try {
+    let current = assertPublicExternalUrl(url);
+    const redirects: Array<{ status: number; to: string }> = [];
+    for (let hop = 0; ; hop++) {
+      if (opts.beforeRequest) await opts.beforeRequest(current, hop);
+      let res: Response;
+      try {
+        res = await Promise.race([
+          fetchImpl(current.toString(), {
+            method: "GET",
+            redirect: "manual",
+            signal: controller.signal,
+            headers: {
+              ...(opts.userAgent ? { "User-Agent": opts.userAgent } : {}),
+              Accept: CONTENT_TYPES[kind].join(", ") + ";q=1.0, */*;q=0.1",
+            },
+          }),
+          abortPromise,
+        ]);
+      } catch (e) {
+        if (e instanceof CrawlFetchError) throw e;
+        if (timedOut) throw new CrawlFetchError("timeout", `Timed out after ${opts.timeoutMs} ms.`);
+        throw new CrawlFetchError("error", "Network error.");
+      }
+
+      if (REDIRECTS.has(res.status)) {
+        const loc = res.headers.get("location");
+        await cancelBody(res);
+        if (!loc) throw new CrawlFetchError("error", `Redirect ${res.status} without Location.`);
+        let next: URL;
+        try {
+          next = assertPublicExternalUrl(new URL(loc, current));
+        } catch (e) {
+          throw new CrawlFetchError("redirect_offsite", `Redirect hop ${hop + 1} refused: ${(e as Error).message}`);
+        }
+        const step = { status: res.status, to: next.toString() };
+        redirects.push(step);
+        opts.onRedirect?.(step);
+        if (hop + 1 > maxRedirects) throw new CrawlFetchError("too_many_redirects", `More than ${maxRedirects} redirects.`);
+        current = next;
+        continue;
+      }
+
+      const contentType = res.headers.get("content-type");
+      const base: Omit<GuardedResponse, "body" | "bytes" | "truncated"> = {
+        url,
+        finalUrl: current.toString(),
+        status: res.status,
+        contentType,
+        headers: res.headers,
+        redirects,
+      };
+      if (res.status < 200 || res.status >= 300) {
+        await cancelBody(res);
+        return { ...base, body: "", bytes: 0, truncated: false };
+      }
+      const mt = mediaType(contentType);
+      const typeOk = CONTENT_TYPES[kind].includes(mt) || (opts.lenientContentType && (mt === "" || mt.startsWith("text/")));
+      if (!typeOk) {
+        await cancelBody(res);
+        throw new CrawlFetchError("non_html", `Content type ${mt || "(none)"} is not fetched.`);
+      }
+      const declared = Number(res.headers.get("content-length"));
+      if (Number.isFinite(declared) && declared > opts.maxBytes && !opts.truncateAtCap) {
+        await cancelBody(res);
+        throw new CrawlFetchError("too_large", `Declared size ${declared} exceeds ${opts.maxBytes} bytes.`);
+      }
+      const { text, bytes, truncated } = await readCapped(res, opts.maxBytes, abortPromise, opts.truncateAtCap ?? false);
+      return { ...base, body: text, bytes, truncated };
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
