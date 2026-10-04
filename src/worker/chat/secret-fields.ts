@@ -54,12 +54,16 @@ export function secretFieldFor(name: string, args: Record<string, unknown>, work
   }
   if (name === "manage_models") {
     if (args.op === "add_provider" && typeof args.baseUrl === "string" && typeof args.model === "string") {
-      const role = args.role === "geo" ? "geo" : "writer";
+      const role = args.role === "geo" ? "geo" : args.role === "chat" ? "chat" : "writer";
       const body: Record<string, string | boolean> = { baseUrl: args.baseUrl, model: args.model };
       if (typeof args.label === "string" && args.label.trim()) body.label = args.label;
       if (role === "geo") body.role = "geo";
-      else body.useAsWriter = args.useAsWriter !== false;
-      return apiKeyField(role === "geo" ? "API key for the new custom GEO engine" : "API key for the new custom writer", { method: "POST", path: `${ws}/custom-providers`, body });
+      else if (role === "chat") {
+        body.role = "chat";
+        body.useAsChat = args.useAsChat !== false;
+      } else body.useAsWriter = args.useAsWriter !== false;
+      const label = role === "geo" ? "API key for the new custom GEO engine" : role === "chat" ? "API key for the new Ask Okara chat model" : "API key for the new custom writer";
+      return apiKeyField(label, { method: "POST", path: `${ws}/custom-providers`, body });
     }
     if (args.op === "update_base_url" && args.keepSavedKey !== true && typeof args.providerId === "string" && typeof args.baseUrl === "string") {
       const body: Record<string, string | boolean> = { baseUrl: args.baseUrl };

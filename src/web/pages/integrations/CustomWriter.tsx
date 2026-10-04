@@ -12,6 +12,7 @@
  */
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type {
+  ChatModelSource,
   CustomProviderInput,
   CustomProviderModelList,
   CustomProviderPatchInput,
@@ -354,17 +355,23 @@ export function SavedProviderItem({
   const use = useMutation(() =>
     api<CustomProvidersResponse>(`/workspaces/${encodeURIComponent(workspaceId)}/writer-source`, { method: "PUT", body: { source: `custom:${p.id}` satisfies WriterSource } }),
   );
+  const useChat = useMutation(() =>
+    api<CustomProvidersResponse>(`/workspaces/${encodeURIComponent(workspaceId)}/chat-model-source`, { method: "PUT", body: { source: `custom:${p.id}` satisfies ChatModelSource } }),
+  );
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [changingModel, setChangingModel] = useState(false);
   const isGeo = p.role === "geo";
+  const isChatRole = p.role === "chat";
+  const active = p.isWriter || p.isChat === true;
 
   return (
-    <div className={cx("rounded-lg border p-3", p.isWriter ? "border-emerald-300 dark:border-emerald-800" : "border-zinc-200 dark:border-zinc-800")}>
+    <div className={cx("rounded-lg border p-3", active ? "border-emerald-300 dark:border-emerald-800" : "border-zinc-200 dark:border-zinc-800")}>
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="break-words text-sm font-semibold">
             {p.label}
             {p.isWriter && <span className="ml-2 text-xs font-medium text-emerald-800 dark:text-emerald-300">Active writer</span>}
+            {p.isChat === true && <span className="ml-2 text-xs font-medium text-emerald-800 dark:text-emerald-300">Ask Okara model</span>}
             {isGeo && <span className="ml-2 text-xs font-medium text-amber-800 dark:text-amber-300">{CUSTOM_GEO_NOTE}</span>}
           </p>
           <dl className="mt-1 space-y-0.5 text-xs">
@@ -439,7 +446,20 @@ export function SavedProviderItem({
           </Button>
           {canManage && (
             <>
-              {!p.isWriter && !isGeo && (
+              {isChatRole && p.isChat !== true && (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  loading={useChat.loading}
+                  onClick={async () => {
+                    const next = await useChat.run();
+                    if (next) apply(next);
+                  }}
+                >
+                  Use for Ask Okara
+                </Button>
+              )}
+              {!p.isWriter && !isGeo && !isChatRole && (
                 <Button
                   size="sm"
                   variant="primary"
@@ -470,7 +490,9 @@ export function SavedProviderItem({
                   <span className="text-xs">
                     {p.isWriter
                       ? "Remove it? The writer switches back to the default."
-                      : isGeo
+                      : p.isChat === true
+                        ? "Remove it? Ask Okara switches back to the writer model."
+                        : isGeo
                         ? "Remove this GEO engine? Its earlier answers stay in your results."
                         : "Remove it?"}
                   </span>
@@ -508,7 +530,7 @@ export function SavedProviderItem({
             </Button>
           </span>
         )}
-        {[test.error, del.error, use.error].map((e, i) =>
+        {[test.error, del.error, use.error, useChat.error].map((e, i) =>
           e !== null ? (
             <span key={i} className={cx("block", errorText)}>
               {errorMessage(e)}
@@ -700,7 +722,7 @@ export function CustomProviderForm({
   initialBaseUrl?: string;
   onSaved: (next: CustomProvidersResponse, info?: SavedInfo) => void;
   onCancel?: () => void;
-  /** "geo": add a custom GEO engine lane (never the writer). */
+  /** "geo": add a custom GEO engine lane (never the writer); "chat": Ask Okara's own chat model. */
   role?: CustomProviderRole;
 }) {
   const id = useId();
@@ -750,7 +772,7 @@ export function CustomProviderForm({
     <form
       noValidate
       className="space-y-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800"
-      aria-label={initial ? `Edit ${initial.label}` : role === "geo" ? "Add a custom GEO engine" : "Add a custom provider"}
+      aria-label={initial ? `Edit ${initial.label}` : role === "geo" ? "Add a custom GEO engine" : role === "chat" ? "Add an Ask Okara chat model" : "Add a custom provider"}
       onSubmit={async (e) => {
         e.preventDefault();
         setClientError(null);
@@ -770,7 +792,9 @@ export function CustomProviderForm({
         }
       }}
     >
-      <p className="text-sm font-medium">{initial ? `Edit ${initial.label}` : role === "geo" ? "Custom GEO engine (OpenAI-compatible)" : "Custom provider (OpenAI-compatible)"}</p>
+      <p className="text-sm font-medium">
+        {initial ? `Edit ${initial.label}` : role === "geo" ? "Custom GEO engine (OpenAI-compatible)" : role === "chat" ? "Custom chat model (OpenAI-compatible)" : "Custom provider (OpenAI-compatible)"}
+      </p>
       <div className="grid gap-3 sm:grid-cols-2">
         <TextField
           id={`${id}-url`}
@@ -837,7 +861,7 @@ export function CustomProviderForm({
       </div>
       <div className="flex flex-wrap gap-2">
         <Button type="submit" variant="primary" loading={save.loading} disabled={!gate.canSave}>
-          {initial ? "Save changes" : role === "geo" ? "Save custom GEO engine" : "Save and use as writer"}
+          {initial ? "Save changes" : role === "geo" ? "Save custom GEO engine" : role === "chat" ? "Save & test" : "Save and use as writer"}
         </Button>
         {onCancel && (
           <Button variant="ghost" onClick={onCancel}>

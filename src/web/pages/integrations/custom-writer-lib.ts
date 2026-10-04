@@ -180,13 +180,38 @@ export function editPatchBody(opts: {
   return { ...body, ...keepKeyFlag(opts.initial.host, opts.baseUrl, opts.apiKey, opts.confirmedHost) };
 }
 
-/** POST body of the add form (writer: selected as the writer; geo: a custom GEO engine lane). */
+/** POST body of the add form (writer: selected as the writer; geo: a custom GEO engine lane; chat: selected as Ask Okara's model). */
 export function newProviderBody(opts: { role: CustomProviderRole; baseUrl: string; apiKey: string; model: string; label: string }): CustomProviderInput {
   const body: CustomProviderInput = { baseUrl: opts.baseUrl.trim(), apiKey: opts.apiKey.trim(), model: opts.model.trim() };
   if (opts.label.trim()) body.label = opts.label.trim();
   if (opts.role === "geo") body.role = "geo";
-  else body.useAsWriter = true;
+  else if (opts.role === "chat") {
+    body.role = "chat";
+    body.useAsChat = true;
+  } else body.useAsWriter = true;
   return body;
+}
+
+// ------------------------------------------------------------------ Ask Okara chat model [A36]
+
+/** Anchor of the "Ask Okara chat model" card on the Integrations page (the chat panel header links to it). */
+export const CHAT_MODEL_ANCHOR = "ask-okara-model";
+
+/** The workspace's Ask Okara chat providers (role "chat"). */
+export function chatProviders(data: CustomProvidersResponse | null | undefined): CustomProviderStatus[] {
+  return (data?.providers ?? []).filter((p) => p.role === "chat");
+}
+
+/** The selected Ask Okara chat provider, or null when the chat uses the writer. */
+export function activeChatProvider(data: CustomProvidersResponse | null | undefined): CustomProviderStatus | null {
+  return chatProviders(data).find((p) => p.isChat === true) ?? null;
+}
+
+/** The writer's model as the "Same as writer" option names it: the custom writer's model, else the default writer's. */
+export function writerModelLabel(data: CustomProvidersResponse | null | undefined, defaultModel: string | null | undefined): string | null {
+  const custom = activeCustomWriter(data);
+  if (custom) return `${custom.model} (${custom.host})`;
+  return defaultModel ?? null;
 }
 
 /**

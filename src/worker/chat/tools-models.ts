@@ -5,6 +5,7 @@
  *  - `models` (read, any member): every integrated model in one view: the writer (default operator writer or a
  *    custom writer), custom providers (writer / GEO lanes), built-in engines (configured?, key source, selected
  *    model), DataForSEO, Maton apps, Search Console / Sheets connections. Never a key, key hint or token.
+ *    [A36] Also Ask Okara's own chat model (`askOkara`: source "writer" | "custom:<id>", the role 'chat' providers).
  *  - `provider_models` (read, owner): live "Fetch models" through the existing routes (same rate limits).
  *  - `manage_models` / `manage_credentials` (actions, confirm-gated): every change goes through the existing route
  *    in-process (route-bridge.ts): owner check, validation (validateCustomBaseUrl SSRF rules, keepKeyForNewHost,
@@ -17,7 +18,7 @@
  */
 import { z } from "zod";
 import type { CustomProviderModelList, ProviderModelList } from "@shared/types";
-import { listCustomProviders, cleanModelId, validateCustomBaseUrl, MAX_CUSTOM_GEO_ENGINES, MAX_CUSTOM_PROVIDERS, type CustomProviderRow, type CustomProviderTestResult } from "../platform/custom-providers";
+import { listCustomProviders, cleanModelId, validateCustomBaseUrl, MAX_CUSTOM_CHAT_PROVIDERS, MAX_CUSTOM_GEO_ENGINES, MAX_CUSTOM_PROVIDERS, type CustomProviderRow, type CustomProviderTestResult } from "../platform/custom-providers";
 import { dataForSeoRow, operatorDataForSeo } from "../platform/dataforseo-credentials";
 import { matonWorkspaceStatus, MATON_CREDENTIAL } from "../platform/maton-credentials";
 import { normalizeModelId, MODEL_ID_FORMAT } from "../platform/provider-models";
@@ -58,6 +59,11 @@ async function customRow(ctx: ToolContext, id: string): Promise<CustomProviderRo
   return row;
 }
 
+/** True when Ask Okara follows the writer (no chat model of its own selected). */
+async function chatFollowsWriter(ctx: ToolContext): Promise<boolean> {
+  return !(await customRows(ctx)).some((r) => r.is_chat === 1 && r.role === "chat");
+}
+
 const ws = (ctx: ToolContext) => `/workspaces/${encodeURIComponent(scoped(ctx)[0])}`;
 
 // ------------------------------------------------------------------ models (read)
@@ -75,7 +81,8 @@ async function modelsView(ctx: ToolContext) {
   const sheets = await sheetsStatus(ctx.env, ctx.db, ctx.project).catch(() => null);
   const env = writerConfigStatus(ctx.env);
   const writerKey = providers.find((p) => p.provider === "writer");
-  const customWriter = custom.find((r) => r.is_writer === 1);
+  const customWriter = custom.find((r) => r.is_writer === 1 && r.role === "writer");
+  const customChat = custom.find((r) => r.is_chat === 1 && r.role === "chat");
   const lastTest = (r: { last_tested_at: string | null; last_test_ok: number | null; last_test_detail: string | null }) => ({
     lastTestedAt: r.last_tested_at,
     lastTestOk: r.last_test_ok === null ? null : r.last_test_ok === 1,
@@ -95,10 +102,18 @@ async function modelsView(ctx: ToolContext) {
             configured: env.configured && (writerKey?.source ?? "none") !== "none",
             missing: env.missing.slice(0, 5),
           },
-      askOkara: { ready: chat.ready, provider: chat.provider, model: chat.model, note: "Ask Okara uses the workspace writer." },
     },
-    customProviders: custom.map((r) => ({ id: r.id, role: r.role ?? "writer", label: clip(r.label, 60), host: r.host, baseUrl: clip(r.base_url, 200), model: clip(r.model, 120), isWriter: r.is_writer === 1, ...lastTest(r) })),
-    limits: { customWriters: MAX_CUSTOM_PROVIDERS, customGeoEngines: MAX_CUSTOM_GEO_ENGINES },
+    askOkara: {
+      source: customChat ? `custom:${customChat.id}` : "writer",
+      ready: chat.ready,
+      provider: chat.provider,
+      model: chat.model,
+      host: chat.host,
+      message: clip(chat.message, 200),
+      note: customChat ? "Ask Okara uses its own chat model (role chat), not the writer." : "Ask Okara uses the workspace writer (set_chat_source to choose a chat model).",
+    },
+    customProviders: custom.map((r) => ({ id: r.id, role: r.role ?? "writer", label: clip(r.label, 60), host: r.host, baseUrl: clip(r.base_url, 200), model: clip(r.model, 120), isWriter: r.is_writer === 1, isChat: r.is_chat === 1, ...lastTest(r) })),
+    limits: { customWriters: MAX_CUSTOM_PROVIDERS, customGeoEngines: MAX_CUSTOM_GEO_ENGINES, customChatModels: MAX_CUSTOM_CHAT_PROVIDERS },
     engines: providers
       .filter((p) => p.provider !== "writer")
       .map((p) => ({
@@ -134,7 +149,7 @@ async function modelsView(ctx: ToolContext) {
       searchConsole: { state: gsc.state, property: gsc.property, connectedAt: gsc.connectedAt, source: gscSource?.source ?? "direct", effective: gscSource?.effective ?? null, matonAvailable: gscSource?.matonAvailable ?? false },
       sheets: sheets ? { state: sheets.state, connectedAt: sheets.connectedAt } : null,
     },
-    note: "Keys are never shown. Changes: manage_models (writer source, models, base URLs, custom providers) and manage_credentials (keys, via the secure field on the confirmation card). Owner only.",
+    note: "Keys are never shown. Changes: manage_models (writer / chat source, models, base URLs, custom providers) and manage_credentials (keys, via the secure field on the confirmation card). Owner only.",
   };
 }
 
@@ -144,11 +159,11 @@ export const modelsTool: ReadTool<typeof modelsSchema> = {
   name: "models",
   kind: "read",
   description:
-    "Every integrated model, no keys: writer (default or custom; Ask Okara uses it), custom providers (ids, host, model, role), built-in engines (key source, model), DataForSEO, Maton, Search Console/Sheets.",
+    "Every integrated model, no keys: writer (default or custom), Ask Okara's chat model (writer or its own), custom providers (ids, host, model, role), built-in engines (key source, model), DataForSEO, Maton, Search Console/Sheets.",
   schema: modelsSchema,
   async run(ctx) {
     const data = await modelsView(ctx);
-    return { data: compact(data, { maxItems: 20, maxStr: 300 }), summary: `Models: writer ${data.writer.source}, ${data.customProviders.length} custom provider(s), ${data.engines.filter((e) => e.configured).length} engine(s) configured`, navigate: integrations(ctx) };
+    return { data: compact(data, { maxItems: 20, maxStr: 300 }), summary: `Models: writer ${data.writer.source}, chat ${data.askOkara.source}, ${data.customProviders.length} custom provider(s), ${data.engines.filter((e) => e.configured).length} engine(s) configured`, navigate: integrations(ctx) };
   },
 };
 
@@ -192,16 +207,17 @@ export const providerModelsTool: ReadTool<typeof providerModelsSchema> = {
 // ------------------------------------------------------------------ manage_models (action)
 const manageModelsSchema = z
   .object({
-    op: z.enum(["set_writer", "set_custom_model", "set_engine_model", "update_base_url", "add_provider", "remove_provider", "test_provider"]),
-    source: z.string().trim().regex(/^(default|custom:[a-z0-9_]{1,100})$/).optional().describe("set_writer: default | custom:<id>"),
+    op: z.enum(["set_writer", "set_chat_source", "set_custom_model", "set_engine_model", "update_base_url", "add_provider", "remove_provider", "test_provider"]),
+    source: z.string().trim().regex(/^(default|writer|custom:[a-z0-9_]{1,100})$/).optional().describe("set_writer: default|custom:<id>; set_chat_source: writer|custom:<id>"),
     providerId: PROVIDER_ID.optional(),
     engine: z.enum(ENGINES).optional(),
     model: z.union([z.string().trim().min(1).max(200), z.null()]).optional(),
     baseUrl: z.string().trim().min(8).max(500).optional().describe("OpenAI-compatible https base URL"),
     keepSavedKey: z.boolean().optional().describe("true = send the saved key to the new host; else a new key via the secure field"),
     label: z.string().trim().min(1).max(80).optional(),
-    role: z.enum(["writer", "geo"]).optional(),
+    role: z.enum(["writer", "geo", "chat"]).optional(),
     useAsWriter: z.boolean().optional(),
+    useAsChat: z.boolean().optional(),
   })
   .strict();
 type ManageModelsInput = z.infer<typeof manageModelsSchema>;
@@ -245,7 +261,7 @@ export const manageModels: ActionTool<typeof manageModelsSchema> = {
   name: "manage_models",
   kind: "action",
   description:
-    "Propose a model change (owner, confirm): set_writer(source); set_custom_model(providerId, model); set_engine_model(engine, model|null=default); update_base_url(providerId, baseUrl, keepSavedKey, model?); add_provider(role writer|geo, baseUrl, model, label?, useAsWriter?); remove_provider; test_provider. Keys only via the card's secure field.",
+    "Propose a model change (owner, confirm): set_writer(source); set_chat_source(writer|custom:<id> of a role chat provider); set_custom_model(providerId, model); set_engine_model(engine, model|null=default); update_base_url(providerId, baseUrl, keepSavedKey, model?); add_provider(role writer|geo|chat, baseUrl, model, label?, useAsWriter?/useAsChat?); remove_provider; test_provider. Keys only via the secure field.",
   schema: manageModelsSchema,
   async prepare(ctx, input) {
     if (input.op !== "test_provider") await requireOwnerTool(ctx, "change models and providers");
@@ -254,11 +270,23 @@ export const manageModels: ActionTool<typeof manageModelsSchema> = {
         const source = need(input.source, "set_writer needs source: default or custom:<id>.");
         if (source === "default") {
           const env = writerConfigStatus(ctx.env);
-          return { title: "Use the default writer?", detail: `Drafts and Ask Okara will use the operator writer${env.model ? ` (${env.provider}, ${env.model})` : ""}. Custom providers are kept. This chat continues with the new writer on your next message.` };
+          const follows = await chatFollowsWriter(ctx);
+          return { title: "Use the default writer?", detail: `Drafts${follows ? " and Ask Okara" : ""} will use the operator writer${env.model ? ` (${env.provider}, ${env.model})` : ""}. Custom providers are kept.${follows ? " This chat continues with the new writer on your next message." : " Ask Okara keeps its own chat model."}` };
         }
+        if (source === "writer") throw new ToolError('set_writer takes source "default" or "custom:<id>".');
         const row = await customRow(ctx, source.slice(7));
         if (row.role === "geo") throw new ToolError("That custom provider is a GEO engine, not a writer; add it as a writer to use it for drafting.");
-        return { title: `Use ${clip(row.label, 60)} as the writer?`, detail: `Drafts and Ask Okara will use ${row.host} with model ${clip(row.model, 100)}. This chat continues with the new writer on your next message.` };
+        if (row.role === "chat") throw new ToolError("That custom provider is Ask Okara's chat model, not a writer; use set_chat_source for the chat, or add it as a writer.");
+        const follows = await chatFollowsWriter(ctx);
+        return { title: `Use ${clip(row.label, 60)} as the writer?`, detail: `Drafts${follows ? " and Ask Okara" : ""} will use ${row.host} with model ${clip(row.model, 100)}.${follows ? " This chat continues with the new writer on your next message." : " Ask Okara keeps its own chat model."}` };
+      }
+      case "set_chat_source": {
+        const source = need(input.source, "set_chat_source needs source: writer or custom:<id>.");
+        if (source === "default") throw new ToolError('set_chat_source takes source "writer" or "custom:<id>".');
+        if (source === "writer") return { title: "Use the writer model for Ask Okara?", detail: "Ask Okara will use the workspace writer again. Chat providers are kept. This chat continues with it on your next message." };
+        const row = await customRow(ctx, source.slice(7));
+        if (row.role !== "chat") throw new ToolError("That custom provider is not an Ask Okara chat model; add one with add_provider role chat (its key goes in the secure field).");
+        return { title: `Use ${clip(row.label, 60)} for Ask Okara?`, detail: `Ask Okara will use ${row.host} with model ${clip(row.model, 100)} (it must support tool calling). The writer is unchanged. This chat continues with it on your next message.` };
       }
       case "set_custom_model": {
         const row = await customRow(ctx, need(input.providerId, "set_custom_model needs providerId."));
@@ -298,17 +326,29 @@ export const manageModels: ActionTool<typeof manageModelsSchema> = {
         const check = baseUrlCheck(ctx, need(input.baseUrl, "add_provider needs baseUrl."));
         const model = cleanModelId(need(input.model, "add_provider needs model."));
         if (!model) throw new ToolError("Invalid model id (1-200 characters, no control characters).");
+        if (input.useAsChat !== undefined && role !== "chat") throw new ToolError("useAsChat applies to role chat only.");
         const count = (await customRows(ctx)).filter((r) => (r.role ?? "writer") === role).length;
-        const cap = role === "geo" ? MAX_CUSTOM_GEO_ENGINES : MAX_CUSTOM_PROVIDERS;
-        if (count >= cap) throw new ToolError(`This workspace already has ${count} custom ${role === "geo" ? "GEO engines" : "providers"} (max ${cap}); remove one first.`);
+        const cap = role === "geo" ? MAX_CUSTOM_GEO_ENGINES : role === "chat" ? MAX_CUSTOM_CHAT_PROVIDERS : MAX_CUSTOM_PROVIDERS;
+        const kind = role === "geo" ? "GEO engine" : role === "chat" ? "Ask Okara chat model" : "writer";
+        if (count >= cap) throw new ToolError(`This workspace already has ${count} custom ${role === "geo" ? "GEO engines" : role === "chat" ? "Ask Okara chat models" : "providers"} (max ${cap}); remove one first.`);
+        const effect =
+          role === "writer"
+            ? input.useAsWriter === false
+              ? " · not selected as the writer"
+              : ` · becomes the writer (drafts${await chatFollowsWriter(ctx) ? " and Ask Okara" : ""})`
+            : role === "chat"
+              ? input.useAsChat === false
+                ? " · not selected for Ask Okara"
+                : " · becomes Ask Okara's model (the writer is unchanged; the model must support tool calling)"
+              : "";
         return {
-          title: `Add ${clip(input.label ?? check.host, 60)} as a custom ${role === "geo" ? "GEO engine" : "writer"}?`,
-          detail: `${check.baseUrl} · model ${clip(model, 80)}${role === "writer" ? (input.useAsWriter === false ? " · not selected as the writer" : " · becomes the writer (drafts and Ask Okara)") : ""}. Type its API key in the secure field below; it goes straight to Okara's server, never to the chat.`,
+          title: `Add ${clip(input.label ?? check.host, 60)} as a custom ${kind}?`,
+          detail: `${check.baseUrl} · model ${clip(model, 80)}${effect}. Type its API key in the secure field below; it goes straight to Okara's server, never to the chat.`,
         };
       }
       case "remove_provider": {
         const row = await customRow(ctx, need(input.providerId, "remove_provider needs providerId."));
-        return { title: `Remove custom provider ${clip(row.label, 60)}?`, detail: `${row.host} · ${clip(row.model, 80)}. Its saved key is deleted.${row.is_writer === 1 ? " It is the current writer: the writer reverts to the default." : ""}` };
+        return { title: `Remove custom provider ${clip(row.label, 60)}?`, detail: `${row.host} · ${clip(row.model, 80)}. Its saved key is deleted.${row.is_writer === 1 ? " It is the current writer: the writer reverts to the default." : ""}${row.is_chat === 1 ? " It is Ask Okara's chat model: the chat goes back to the writer model." : ""}` };
       }
       case "test_provider": {
         const row = await customRow(ctx, need(input.providerId, "test_provider needs providerId."));
@@ -324,6 +364,10 @@ export const manageModels: ActionTool<typeof manageModelsSchema> = {
       case "set_writer": {
         const r = await callRoute<{ writerSource: string }>(ctx, "PUT", `${base}/writer-source`, { source: input.source });
         return { data: { writerSource: r.writerSource }, summary: `Writer source: ${r.writerSource}`, navigate: nav };
+      }
+      case "set_chat_source": {
+        const r = await callRoute<{ chatSource?: string }>(ctx, "PUT", `${base}/chat-model-source`, { source: input.source });
+        return { data: { chatSource: r.chatSource ?? "writer" }, summary: `Ask Okara model source: ${r.chatSource ?? "writer"}`, navigate: nav };
       }
       case "set_custom_model": {
         await callRoute(ctx, "PATCH", `${base}/custom-providers/${encodeURIComponent(input.providerId!)}`, { model: input.model });
@@ -373,7 +417,7 @@ export const manageModels: ActionTool<typeof manageModelsSchema> = {
           "the new custom provider",
         );
         const row = await customRow(ctx, id!);
-        return { data: { providerId: row.id, role: row.role ?? "writer", label: row.label, host: row.host, model: row.model, isWriter: row.is_writer === 1 }, summary: `Added ${clip(row.label, 60)} (${row.host}, key …${hint})`, navigate: nav };
+        return { data: { providerId: row.id, role: row.role ?? "writer", label: row.label, host: row.host, model: row.model, isWriter: row.is_writer === 1, isChat: row.is_chat === 1 }, summary: `Added ${clip(row.label, 60)} (${row.host}, key …${hint})`, navigate: nav };
       }
       case "remove_provider": {
         await callRoute(ctx, "DELETE", `${base}/custom-providers/${encodeURIComponent(input.providerId!)}`);
