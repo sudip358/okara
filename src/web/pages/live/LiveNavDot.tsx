@@ -3,15 +3,18 @@
  * text. Reads the shared /activity/current store (one poller per project, shared with the Live view).
  * Kept tiny: the sidebar imports it eagerly; the Live view itself is lazy-loaded.
  */
+import { runIsActive } from "@web/components/activity/lib";
 import { useCurrentRuns } from "./current-store";
 
 const CSS =
   "@keyframes lv-nav-ping{0%{transform:scale(1);opacity:.6}80%,100%{transform:scale(2.4);opacity:0}}" +
   "@media (prefers-reduced-motion:no-preference){.lv-nav-ping{animation:lv-nav-ping 2s cubic-bezier(0,0,.2,1) infinite}}";
 
-export function LiveNavDot({ projectId }: { projectId: string }) {
-  const { anyActive } = useCurrentRuns(projectId);
-  if (!anyActive) return null;
+/** `agent` limits the dot to that agent's runs (the separate Live SEO / Live GEO entries). */
+export function LiveNavDot({ projectId, agent }: { projectId: string; agent?: "seo" | "geo" }) {
+  const { anyActive, runs } = useCurrentRuns(projectId);
+  const active = agent ? (runs ?? []).some((r) => r.agent === agent && runIsActive(r.status)) : anyActive;
+  if (!active) return null;
   return (
     <>
       <style>{CSS}</style>

@@ -11,7 +11,8 @@ import { Badge, DemoBanner, EmptyState, ErrorState, LoadingState, buttonClass, c
 
 const NAV: Array<{ to: string; label: string; end?: boolean; group?: string }> = [
   { to: "", label: "Overview", end: true },
-  { to: "live", label: "Live" },
+  { to: "live", label: "Live SEO", end: true },
+  { to: "live/geo", label: "Live GEO" },
   { to: "checklists", label: "Checklists" },
   { to: "seo", label: "SEO audit", group: "SEO" },
   { to: "internal-links", label: "Internal links" },
@@ -101,7 +102,8 @@ export function ProjectLayout() {
                     }
                   >
                     {item.label}
-                    {item.to === "live" && <LiveNavDot projectId={projectId} />}
+                    {item.to === "live" && <LiveNavDot projectId={projectId} agent="seo" />}
+                    {item.to === "live/geo" && <LiveNavDot projectId={projectId} agent="geo" />}
                   </NavLink>
                 </li>
               ))}

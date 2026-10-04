@@ -9,7 +9,7 @@
  * - Demo projects replay their seeded runs, labelled "Demo data - simulated run".
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent } from "react";
-import { useSearchParams } from "react-router";
+import { useNavigate, useSearchParams } from "react-router";
 import type { EngineBoardResponse, RunSummary } from "@shared/types";
 import { scopeLabel } from "@shared/run-scope";
 import { engineName } from "@web/pages/geo/board/lib";
@@ -134,12 +134,32 @@ function useReplayClock(times: number[], bounds: { t0: number; tEnd: number } | 
   return [clock, setClock] as const;
 }
 
+/** The SEO Live tab (/projects/:id/live). */
 export function LivePage() {
+  return <LiveView tab="seo" />;
+}
+
+/** The GEO Live tab (/projects/:id/live/geo): its own sidebar entry; always shows GEO runs. */
+export function LiveGeoPage() {
+  return <LiveView tab="geo" />;
+}
+
+/** Path of a Live tab, keeping an optional run id. */
+export const liveTabPath = (projectId: string, tab: "seo" | "geo", runId?: string | null) =>
+  projectPath(projectId, `${tab === "geo" ? "live/geo" : "live"}${runId ? `?run=${encodeURIComponent(runId)}` : ""}`);
+
+function LiveView({ tab }: { tab: "seo" | "geo" }) {
   const { project, projectId } = useProject();
   const [params, setParams] = useSearchParams();
+  const navigate = useNavigate();
   const reduced = useReducedMotion();
   const requested = params.get("run");
-  const modeParam = params.get("mode") === "geo" ? "geo" : params.get("mode") === "seo" ? "seo" : null;
+  // Old links (?mode=geo on the SEO tab) move to the GEO tab.
+  const legacyMode = params.get("mode");
+  useEffect(() => {
+    if (tab === "seo" && legacyMode === "geo") navigate(liveTabPath(projectId, "geo", requested), { replace: true });
+  }, [tab, legacyMode, projectId, requested, navigate]);
+  const modeParam: "seo" | "geo" = tab;
   const current = useCurrentRuns(projectId);
   const needList = !!modeParam && !requested && current.runs !== null && !current.runs.some((r) => r.agent === modeParam);
   const list = useRunList(projectId, needList);
@@ -305,8 +325,9 @@ export function LivePage() {
     current.reload();
     runsForQuota.reload();
     bump("budget");
-    // Switch to the started run: the view shows it LIVE while it is pending/running.
-    setParams({ run: run.id });
+    // Switch to the started run: the view shows it LIVE while it is pending/running (on its own agent's tab).
+    if (run.agent === tab) setParams({ run: run.id });
+    else navigate(liveTabPath(projectId, run.agent, run.id));
   };
   const onToolDone = (what: ReloadKey) => {
     if (what === "buyer") seoData.buyer.reload();
@@ -473,9 +494,14 @@ export function LivePage() {
     ...(demo ? [DEMO_LABEL] : []),
   ].filter((l) => !(activity && demo && l.trim().toLowerCase() === DEMO_LABEL.toLowerCase()));
   const onSelectAgent = (a: "seo" | "geo") => {
-    if (a === agent && !requested) return;
-    setParams({ mode: a });
+    if (a === tab && !requested) return;
+    navigate(liveTabPath(projectId, a));
   };
+  // A ?run= link to the other agent's run opens it on that agent's tab.
+  const runAgent = activity?.run.agent ?? null;
+  useEffect(() => {
+    if (runAgent && requested && runAgent !== tab) navigate(liveTabPath(projectId, runAgent, requested), { replace: true });
+  }, [runAgent, requested, tab, projectId, navigate]);
 
   // ------------------------------------------------------------------ body
   const replayControls =
@@ -634,7 +660,7 @@ export function LivePage() {
             {replaying && activeOther && (
               <p role="status" className="flex flex-wrap items-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200">
                 A run is live now ·
-                <button type="button" className="font-semibold underline" onClick={() => setParams({ run: activeOther.id })}>
+                <button type="button" className="font-semibold underline" onClick={() => (activeOther.agent === tab ? setParams({ run: activeOther.id }) : navigate(liveTabPath(projectId, activeOther.agent, activeOther.id)))}>
                   Watch live
                 </button>
               </p>

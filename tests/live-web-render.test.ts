@@ -877,11 +877,15 @@ describe("source rules", () => {
     expect(before).not.toMatch(/animation:/);
     expect(css).toContain("@media (prefers-reduced-motion:reduce)");
   });
-  it("route, nav entry and the Activity link are wired", () => {
-    expect(readFileSync(new URL("../src/web/App.tsx", import.meta.url), "utf8")).toContain('{ path: "live", lazy: page(() => import("./pages/live/LivePage"), "LivePage") }');
+  it("routes, separate Live SEO / Live GEO nav entries and the Activity link are wired", () => {
+    const appSrc = readFileSync(new URL("../src/web/App.tsx", import.meta.url), "utf8");
+    expect(appSrc).toContain('{ path: "live", lazy: page(() => import("./pages/live/LivePage"), "LivePage") }');
+    expect(appSrc).toContain('{ path: "live/geo", lazy: page(() => import("./pages/live/LivePage"), "LiveGeoPage") }');
     const layout = readFileSync(new URL("../src/web/layouts/ProjectLayout.tsx", import.meta.url), "utf8");
-    expect(layout).toContain('{ to: "live", label: "Live" }');
-    expect(layout).toContain("<LiveNavDot projectId={projectId} />");
+    expect(layout).toContain('{ to: "live", label: "Live SEO", end: true }');
+    expect(layout).toContain('{ to: "live/geo", label: "Live GEO" }');
+    expect(layout).toContain('<LiveNavDot projectId={projectId} agent="seo" />');
+    expect(layout).toContain('<LiveNavDot projectId={projectId} agent="geo" />');
     expect(readFileSync(new URL("../src/web/components/activity/ActivityView.tsx", import.meta.url), "utf8")).toContain("Open live view");
   });
 });
