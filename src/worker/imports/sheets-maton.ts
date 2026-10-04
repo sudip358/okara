@@ -12,8 +12,10 @@ import type { Env } from "../env";
 import type { Db } from "../lib/db";
 import { createCallRecorder } from "../runs/calls";
 import { MatonApiError, MatonPolicyError, sheetsGetSpreadsheet, sheetsGetValues, type MatonDeps } from "../platform/maton";
-import { matonTransport, type MatonTransport } from "../platform/maton-credentials";
-import { a1Range, createSheetsClient, parseSpreadsheet, parseValueRange, SheetsApiError, SPREADSHEET_FIELDS, type SheetsClient } from "./sheets";
+import { matonAvailability, matonTransport, type MatonTransport } from "../platform/maton-credentials";
+import type { ProjectRow } from "../platform/access";
+import type { SheetsConnectionStatus } from "@shared/import";
+import { a1Range, createSheetsClient, parseSpreadsheet, parseValueRange, SheetsApiError, sheetsStatus, SPREADSHEET_FIELDS, type SheetsClient } from "./sheets";
 
 export const MATON_SHEETS_PURPOSE = "import_sheets";
 
@@ -87,3 +89,25 @@ export async function resolveSheetsClient(env: Env, db: Db, project: { id: strin
 
 /** "direct" | "maton" for a client (absent transport = direct). */
 export const transportOf = (c: SheetsClient): "direct" | "maton" => c.transport?.kind ?? "direct";
+
+/**
+ * Import page connection status with the Maton fallback: the direct status when it is ready (or a demo); otherwise
+ * "ready via Maton" when the workspace has a Maton key with an active google-sheets connection.
+ */
+export async function sheetsStatusWithMaton(env: Env, db: Db, p: ProjectRow): Promise<SheetsConnectionStatus> {
+  const direct = await sheetsStatus(env, db, p);
+  if (direct.state === "demo") return direct;
+  const avail = await matonAvailability(db, p.workspace_id, "google-sheets");
+  const maton = { available: avail !== null, label: avail?.label ?? null };
+  if (direct.state === "ready" || !avail) return { ...direct, via: direct.state === "ready" ? "direct" : undefined, maton };
+  return {
+    ...direct,
+    state: "ready",
+    via: "maton",
+    maton,
+    notes: [
+      `Connected via Maton (${avail.label}): read-only spreadsheet metadata and values through the workspace's Maton.ai key. Connecting Google Sheets directly takes precedence.`,
+      ...direct.notes.slice(1),
+    ],
+  };
+}

@@ -203,7 +203,7 @@ export const STARTER_PROMPTS = [
   "Which queries lost clicks vs last month?",
   "Which pages lost clicks in the last 28 days?",
   "Why isn't Gemini citing us?",
-  "What should I fix first?",
+  "What should I fix first this week?",
   "Run the GEO agent now",
 ] as const;
 

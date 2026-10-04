@@ -30,6 +30,7 @@ import { CustomGeoEngines } from "./integrations/CustomGeo";
 import { ProviderModelRow } from "./integrations/ProviderModel";
 import { GEO_ENGINE_PROVIDERS, isModelSelectable } from "./integrations/model-lib";
 import { DataForSeoCard } from "./integrations/DataForSeo";
+import { GscMatonSource, MatonCard } from "./integrations/Maton";
 
 type ProviderStatus = IntegrationsStatus["providers"][number];
 
@@ -129,6 +130,7 @@ export function IntegrationsPage() {
           />
           <ProviderKeysCard workspaceId={project.workspaceId} fallback={integrations.data.providers} onChange={integrations.reload} />
           <DataForSeoCard workspaceId={project.workspaceId} />
+          <MatonCard workspaceId={project.workspaceId} />
         </>
       ) : null}
     </div>
@@ -280,7 +282,7 @@ function GscCard({
     <Card
       title="Google Search Console"
       description="Read-only (webmasters.readonly). Requested separately from sign-in."
-      actions={<StateBadge state={connected ? gsc.state : "not_connected"} />}
+      actions={<StateBadge state={connected || gsc.via === "maton" ? gsc.state : "not_connected"} />}
     >
       <div className="space-y-3">
         {gsc.lastError && <StateBanner state="error" message={gsc.lastError} />}
@@ -292,6 +294,7 @@ function GscCard({
             <a href={`/api/projects/${pid}/gsc/connect`} className={buttonClass("primary")}>
               Connect Google Search Console
             </a>
+            <GscMatonSource projectId={projectId} onChange={onChange} />
           </>
         ) : (
           <>

@@ -79,8 +79,16 @@ if (P) {
 
   step = "checklist-manual";
   await page.goto(`${BASE}${P}/checklists`, { waitUntil: "networkidle" });
-  const done = page.getByLabel(/mark as done/i).first();
-  if (await done.count()) {
+  // The demo project is reused across runs: take the first manual item not yet marked done.
+  const boxes = page.getByLabel(/mark as done/i);
+  let done = null;
+  for (let i = 0; i < (await boxes.count()); i++) {
+    if (!(await boxes.nth(i).isChecked())) {
+      done = boxes.nth(i);
+      break;
+    }
+  }
+  if (done) {
     await done.check();
     const form = done.locator("xpath=ancestor::form[1]");
     const [resp] = await Promise.all([waitFor((r) => r.url().includes("/checklists/") && r.request().method() === "PUT", 10000), form.getByRole("button").last().click()]);

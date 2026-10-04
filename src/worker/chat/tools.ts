@@ -8,6 +8,9 @@
  *    pauses; they run only through POST .../actions/:id/confirm (src/worker/chat/service.ts).
  *  - output tools: prepare an in-app link or a CSV for the UI (no state change, nothing fetched); the user
  *    clicks to open or download.
+ * Admin tools [A33] (tools-admin.ts reads, tools-admin-actions.ts confirm-gated actions) cover the rest of the
+ * product: SEO audit, link workbench, Live insights, GEO data, imports, project admin (usage, limits, integrations
+ * status without keys, members), run detail; and the UI's own writes via the routes' service functions.
  * No tool fetches a URL the model supplies (approve_competitor_page only accepts a URL already stored as a
  * citation for this project, and runs only after confirmation). Text from pages and AI answers is returned as
  * data inside the JSON and is never treated as instructions (see prompt.ts).
@@ -37,6 +40,9 @@ import type { ToolSpec } from "./types";
 import { ToolError, clip, pct, projectRoute, ratioValue, round1, scoped, type ActionTool, type ChatTool, type ReadTool, type ToolContext } from "./tool-base";
 import { GSC_CHAT_TOOLS, storedSyncLabel } from "./tools-gsc";
 import { DATAFORSEO_CHAT_TOOLS } from "./tools-dataforseo";
+import { ADMIN_READ_TOOLS } from "./tools-admin";
+import { MATON_CHAT_TOOLS } from "./tools-maton";
+import { ADMIN_ACTION_TOOLS } from "./tools-admin-actions";
 
 // ------------------------------------------------------------------ limits
 /** Max characters of one tool result handed to the model. */
@@ -706,13 +712,14 @@ const checklistSchema = z
   .object({
     kind: z.enum(["seo", "geo", "page"]).describe("Project SEO or GEO checklist, or the on-page checklist of one page."),
     pageId: z.string().trim().min(1).max(100).optional().describe("Required for kind=page."),
+    include: z.enum(["open", "all"]).optional().describe("open (default) = not met or partial items; all = every item with its status and whether it is manual."),
   })
   .refine((v) => (v.kind === "page") === Boolean(v.pageId), { message: "pageId is required for kind=page and only for it." });
 
 const checklistStatus: ReadTool<typeof checklistSchema> = {
   name: "checklist_status",
   kind: "read",
-  description: "SEO, GEO or per-page readiness checklist: counts by status and the items not met or partial, with what was measured and the guidance.",
+  description: "SEO, GEO or per-page readiness checklist: counts by status and the items not met or partial (or all items), with what was measured, the guidance, and which items are manual (tickable with update_checklist_item).",
   schema: checklistSchema,
   async run(ctx, input) {
     if (input.kind === "page") {
@@ -720,14 +727,14 @@ const checklistStatus: ReadTool<typeof checklistSchema> = {
       if (!exists) throw new ToolError("No crawled page with that id in this project. Use list_pages.");
     }
     const c = input.kind === "page" ? await getPageChecklist(ctx.env, ctx.db, ctx.project, input.pageId!, ctx.now) : await getProjectChecklist(ctx.env, ctx.db, ctx.project, input.kind, ctx.now);
-    const open = c.items.filter((i) => i.status === "not_met" || i.status === "partial");
+    const open = input.include === "all" ? c.items : c.items.filter((i) => i.status === "not_met" || i.status === "partial");
     const data = {
       kind: c.kind,
       state: c.state,
       page: c.page ? { id: c.page.id, url: clip(c.page.url, 300) } : null,
       sources: c.sources,
       counts: c.counts,
-      notMetOrPartial: open.slice(0, 25).map((i) => ({ id: i.id, label: i.label, status: i.status, method: i.method, measured: clip(i.summary, 200), guidance: clip(i.guidance, 200) })),
+      [input.include === "all" ? "items" : "notMetOrPartial"]: open.slice(0, input.include === "all" ? 60 : 25).map((i) => ({ id: i.id, label: i.label, status: i.status, method: i.method, manual: i.method === "manual", measured: clip(i.summary, input.include === "all" ? 120 : 200), guidance: clip(i.guidance, input.include === "all" ? 120 : 200) })),
       disclaimer: clip(c.disclaimer, 200),
       path: input.kind === "page" ? projectRoute(ctx.project.id, `pages/${encodeURIComponent(input.pageId!)}/checklist`) : projectRoute(ctx.project.id, "checklists"),
     };
@@ -1137,9 +1144,12 @@ export const CHAT_TOOLS: ChatTool[] = [
   internalLinkSuggestions,
   importedResearch,
   draftCheck,
+  ...ADMIN_READ_TOOLS,
+  ...MATON_CHAT_TOOLS,
   runAgentNow,
   updateRecommendationStatus,
   approveCompetitorPageTool,
+  ...ADMIN_ACTION_TOOLS,
   navigate,
   exportCsv,
 ] as ChatTool[];

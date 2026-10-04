@@ -17,6 +17,7 @@ import { disconnectGsc, gscOAuthConfigured, handleGscCallback, integrationsPath,
 import { outbound, parseBody, siteHost } from "../platform/projects";
 import { gscEntryVerifiesHost, markVerified, verificationStatus } from "../platform/verification";
 import { listProviderStatuses } from "./credentials";
+import { matonAvailability } from "../platform/maton-credentials";
 import { handleSheetsCallback, oauthStatePurpose } from "../imports/sheets";
 
 export const integrationRoutes = new Hono<AppEnv>();
@@ -30,6 +31,12 @@ const userOf = (c: { get(key: "user"): SessionUser | null }): SessionUser => {
 export async function gscStatus(env: Env, db: Db, p: ProjectRow): Promise<IntegrationsStatus["gsc"]> {
   if (p.is_demo === 1) return { state: "demo", property: p.gsc_property, connectedAt: null, lastError: null };
   const conn = await loadGscConnection(db, p.workspace_id, p.id);
+  if (!conn || conn.status !== "connected") {
+    // No direct connection: the project may read Search Console through the workspace's Maton key (routes/maton.ts).
+    if (p.gsc_source === "maton" && (await matonAvailability(db, p.workspace_id, "google-search-console"))) {
+      return { state: "ready", property: p.gsc_property, connectedAt: null, lastError: null, via: "maton" };
+    }
+  }
   if (!conn || conn.status === "revoked") {
     return { state: gscOAuthConfigured(env) ? "setup_required" : "disabled", property: p.gsc_property, connectedAt: null, lastError: null };
   }

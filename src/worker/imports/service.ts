@@ -38,7 +38,7 @@ import { projectCompetitors } from "../competitors/dataforseo";
 import { targetDomain } from "../providers/dataforseo";
 import { COMPETITOR_ADDED, clip, prepare, runBatches, type ChangeRow, type ImportCtx, type RecordRow } from "./destinations";
 import type { LoadedTable } from "./source";
-import { sheetsStatus } from "./sheets";
+import { sheetsStatusWithMaton } from "./sheets-maton";
 
 export interface ImportRow {
   id: string;
@@ -62,6 +62,8 @@ export interface ImportRow {
   created_at: string;
   undone_at: string | null;
   undone_by: string | null;
+  /** 'direct' | 'maton' for sheet imports (migration 0018); NULL for CSV and older rows. */
+  transport?: string | null;
 }
 
 export interface SyncRow {
@@ -85,6 +87,8 @@ export interface SyncRow {
   last_error: string | null;
   last_warning: string | null;
   last_import_id: string | null;
+  /** 'direct' | 'maton' (migration 0018). */
+  last_transport?: string | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -143,6 +147,10 @@ export async function commitImport(
     created_by: ctx.userId,
     created_at: iso(ctx.now),
   });
+  if (src.kind === "sheets" && src.transport) {
+    // imports.transport (migration 0018): which transport read the sheet. A pending migration only skips the note.
+    await db.run("UPDATE imports SET transport = ? WHERE workspace_id = ? AND id = ?", src.transport, project.workspace_id, importId).catch(() => undefined);
+  }
   let result;
   try {
     result = await prepared.apply(importId);
@@ -207,6 +215,7 @@ export function toSummary(r: ImportRow, canUndo: boolean): ImportRecordSummary {
     createdAt: r.created_at,
     undoneAt: r.undone_at,
     canUndo: canUndo && r.status === "completed",
+    ...(r.transport === "maton" || r.transport === "direct" ? { transport: r.transport } : {}),
   };
 }
 
@@ -370,6 +379,7 @@ export function toSyncSummary(r: SyncRow, lastChanges: string[] = []): ImportSyn
     lastError: r.last_error,
     lastWarning: r.last_warning,
     lastChanges,
+    ...(r.last_transport === "maton" || r.last_transport === "direct" ? { lastTransport: r.last_transport } : {}),
   };
 }
 
@@ -416,7 +426,7 @@ export async function importOverview(env: Env, db: Db, p: ProjectRow, canManage:
   );
   return {
     canManage,
-    sheets: await sheetsStatus(env, db, p),
+    sheets: await sheetsStatusWithMaton(env, db, p),
     history: await listHistory(db, p),
     syncs: await listSyncs(db, p),
     documents: docs.map((d) => ({ id: d.id, title: d.title ?? "Imported document", version: Number(d.version), createdAt: d.created_at, chars: Number(d.chars) })),

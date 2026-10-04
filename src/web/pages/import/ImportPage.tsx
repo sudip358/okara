@@ -230,7 +230,8 @@ export function SheetsConnection({ projectId, status, onDisconnect }: { projectI
     <div className="space-y-2" data-testid="sheets-connection">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm font-medium">Google Sheets (read-only)</span>
-        {status.state === "ready" && <Badge tone="success">Connected {status.connectedAt ? formatRelative(status.connectedAt) : ""}</Badge>}
+        {status.state === "ready" && status.via === "maton" && <Badge tone="success">Connected via Maton ({status.maton?.label ?? "default connection"})</Badge>}
+        {status.state === "ready" && status.via !== "maton" && <Badge tone="success">Connected {status.connectedAt ? formatRelative(status.connectedAt) : ""}</Badge>}
         {status.state === "error" && <Badge tone="danger">Reconnect needed</Badge>}
         {status.state === "setup_required" && <Badge tone="warning">Not connected</Badge>}
         {status.state === "disabled" && <Badge tone="neutral">Not configured on this server</Badge>}
@@ -243,12 +244,17 @@ export function SheetsConnection({ projectId, status, onDisconnect }: { projectI
         ))}
       </ul>
       <div className="flex flex-wrap gap-2">
-        {(status.state === "setup_required" || status.state === "error") && (
-          <a className={buttonClass("primary", "sm")} href={connectHref}>
+        {(status.state === "setup_required" || status.state === "error" || status.via === "maton") && (
+          <a className={buttonClass(status.via === "maton" ? "secondary" : "primary", "sm")} href={connectHref}>
             {status.state === "error" ? "Reconnect Google Sheets" : "Connect Google Sheets"}
           </a>
         )}
-        {(status.state === "ready" || status.state === "error") && onDisconnect && (
+        {(status.state === "setup_required" || status.state === "disabled") && !status.maton?.available && (
+          <a className={buttonClass("secondary", "sm")} href={`/projects/${encodeURIComponent(projectId)}/integrations#maton`}>
+            Use Maton
+          </a>
+        )}
+        {(status.state === "ready" || status.state === "error") && status.via !== "maton" && onDisconnect && (
           <Button size="sm" variant="ghost" onClick={onDisconnect}>
             Disconnect
           </Button>
@@ -731,6 +737,7 @@ export function SyncList({ syncs, canManage, base, projectId, onChanged }: { syn
             </div>
             <p className="text-xs text-zinc-600 dark:text-zinc-400">
               {frequencyLabel(s.frequencyHours)} · last sync {s.lastRunAt ? formatRelative(s.lastRunAt) : "never"} · next {s.enabled ? formatDateTime(s.nextRunAt) : "paused"}
+              {s.lastTransport === "maton" ? " · read via Maton" : ""}
             </p>
             {s.lastStatus === "error" && (
               <div className="rounded border border-red-200 bg-red-50 p-2 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-100">

@@ -455,6 +455,49 @@ docs/provider-contracts.md "Google Sheets API v4".
   `imported_research` read tool and a `navigate` view `import`; the project export includes the four import tables.
 - **Limits:** dry run 30/min, commit and undo 10/min, Sheets reads 30/min per user and project.
 
+## Maton.ai API gateway (amends docs/build-kit.md [A34], 2026-10-03; types in `src/shared/maton.ts`)
+
+A workspace owner can paste a [Maton.ai](https://maton.ai) API key. Okara then reads Google Sheets (Import, Sync now,
+cron sync) and Search Console (gsc_sync, ownership check) **through Maton** when the project has no direct Google
+connection, with no Google Cloud setup. Direct Google OAuth always wins when it is connected. The key is stored
+AES-GCM encrypted (`provider_credentials.provider = 'maton'`), never returned (only `keyHint`, the last 4
+characters), and used only by `src/worker/platform/maton.ts`, whose egress policy admits only the read-only requests
+listed in docs/provider-contracts.md "Maton.ai API gateway" and refuses everything else before any fetch. Every Maton
+request is recorded in `provider_calls` (provider `maton`, cost 0). Migration `0018_maton_gateway.sql`.
+
+| Method | Path | Who | Body / result |
+|---|---|---|---|
+| GET | `/workspaces/:wid/maton` | member | `MatonStatus` (state, keyHint, last test, per-app cached ACTIVE connections and the owner's pick, warning text). No network call |
+| PUT | `/workspaces/:wid/maton` | owner | `{apiKey}` (8-400 printable ASCII) → `MatonStatus`. Clears the cached connection list (test again). 412 `setup_required` when encryption is not configured or migration 0018 is pending |
+| DELETE | `/workspaces/:wid/maton` | owner | `{ok: true}`; deletes the key and the cached connections |
+| POST | `/workspaces/:wid/maton/test` | owner | `{apiKey?}` → `MatonTestResult {ok, detail, apps: [{app, connectionId, status, createdAt, used}]}`. One `GET https://ctrl.maton.ai/connections?status=ACTIVE`; only `google-sheets`, `google-search-console` (used), `google-analytics-data`, `google-analytics-admin` ("available, not used yet") are returned; other apps, connection URLs and metadata are dropped. A typed key is tested without saving; a saved-key test stores the list and the result. 412 when no key is saved |
+| PUT | `/workspaces/:wid/maton/connections/:app` | owner | `{connectionId: string \| null}` → `MatonStatus`. Picks the connection sent as `Maton-Connection` (null = Maton's default, the oldest active connection). 400 when the id is not a listed active connection of that app; 404 for other apps |
+| GET | `/projects/:pid/gsc/maton` | member | `GscMatonStatus {effective: 'direct'\|'maton'\|null, source, directConnected, matonAvailable, matonConnectionLabel, property, canManage}` |
+| GET | `/projects/:pid/gsc/maton/sites` | owner | `[{siteUrl, permissionLevel}]` through Maton (`GET .../webmasters/v3/sites`). 412 without a key/connection |
+| PUT | `/projects/:pid/gsc/source` | owner | `{source: "direct"}` or `{source: "maton", property}` → `{status: GscMatonStatus, verification}`. A Maton property must be in Maton's sites list (400 otherwise); it sets `projects.gsc_source = 'maton'` and `gsc_property`, and verifies ownership like `PUT /gsc/property`. `direct` clears the Maton choice |
+
+Changes to existing responses (all optional fields):
+- `IntegrationsStatus.gsc.via = "maton"` (state `ready`, `connectedAt` null) when the project reads Search Console
+  through Maton.
+- `SheetsConnectionStatus.via` (`direct` | `maton`) and `.maton {available, label}` on `GET /projects/:pid/import`; with
+  no direct connection and a Maton google-sheets connection the state is `ready` via Maton.
+- `ImportRecordSummary.transport` and `ImportSyncSummary.lastTransport` (`direct` | `maton`): which transport read the
+  sheet (`imports.transport`, `import_syncs.last_transport`).
+- The 412 messages of the Sheets routes and the sync's `not_connected` error mention the Maton option.
+
+Transport precedence (Sheets and Search Console): direct OAuth connected → direct; else Maton (Sheets: whenever the
+workspace has a key with an active google-sheets connection; Search Console: only when the project's source is
+`maton`); else `setup_required` (gsc_sync `setup_required`, Import 412, sync `not_connected`). Errors through Maton map
+to the same codes as direct (401 → `token_expired`/setup_required "Update the key", 400 missing connection →
+`not_connected`, 404, 403, "Unable to parse range" → `tab_missing`, 429).
+
+Reusable Worker helpers for Ask Okara (no route; `src/worker/platform/maton.ts`, each tenant-scoped by `workspaceId`,
+returning `MatonResult<T> {data, source: "Maton (<connection>), fetched <ts>", connectionLabel, fetchedAt, truncated}`
+and throwing `MatonSetupRequiredError` (code `setup_required`) without a key or connection): `matonStatus`,
+`readSheetTabs`, `readSheetValues` (≤ 5,000 rows, 100 columns, 500 characters per cell), `gscSites`, `gscQuery`
+(rowLimit ≤ 25,000), `gaListProperties` (GA4 accountSummaries), `gaRunReport` (GA4 runReport; documented request fields
+only, limit ≤ 10,000; values returned as Google's strings).
+
 ## Internal links workbench (amends docs/build-kit.md [A25]; [A30], 2026-10-03)
 
 Owner request 2026-10-03 ("all eight improvements"). Types: `src/shared/types.ts`, section "internal links workbench
@@ -1185,6 +1228,45 @@ not measured)" plus fetched date, location and the DataForSEO-reported cost.
 
 Paid tools never run from a model call alone: the confirmation gate below applies, and keywords, URLs and
 domains returned by Search Console or DataForSEO are untrusted data.
+
+**Admin tools (amends docs/build-kit.md [A33], 2026-10-03; code `src/worker/chat/tools-admin.ts` (reads),
+`src/worker/chat/tools-admin-actions.ts` (actions)).** The chat can read every product area of its project and
+propose every UI write a member (or, for owner-only routes, the owner) can make. Reads are grouped behind a
+`view`/`kind` enum. Each tool calls the mirrored route's own service function with the `requireProject()` row, so
+tenancy, validation, rate-limit keys (shared with the UI), quotas and role rules are the route's. Outputs pass
+`compact()` (secret-looking keys dropped, strings clipped, arrays cut with `<key>Total`) and the 12,000-character
+cap. Integration status is hand-picked: configured / source / state / model / host / last test only; never a key,
+key hint, encrypted column, OAuth token or state row, session or verification token.
+
+**Maton (2026-10-03):** `maton_data` (read, owner only, 20 per user per 10 minutes) reads live through the workspace Maton key via `platform/maton.ts` (same egress allowlist): `status`, `sheet_tabs`, `sheet_values` (≤200 rows), `gsc_query` (this project's property only), `ga_properties`, `ga_report` (GA4 runReport, ≤100 rows). Results carry the Maton source label; no key leaves the server.
+
+| Tool | Kind | Mirrors | Notes |
+|---|---|---|---|
+| `seo_audit` | read | GET `/seo/audit`, `/seo/page-audit`, `/seo/content-evidence`, `/seo/translation-opportunities`, `/seo/robots-suggestion` | `view` findings (severity / contains filters) / page_audit / content_evidence / translation / robots (`allowTraining`; one SSRF-guarded GET of the verified host's robots.txt under the route's `robots_suggest` limit) |
+| `link_workbench` | read | GET `/seo/internal-links/{graph,graph/urls,graph/url,clusters,broken,anchors,placed}` | `view` summary / urls (`filter`, `sort`, `dir`, `q`, `offset`, `limit`) / url (`url`) / clusters / broken / anchors (`all`) / placed |
+| `live_insight` | read | GET `/live/insights?kind=` | every kind (striking, movers, technical, engine_queries, brands, cited_domains, prompt_history, sheets, budget) |
+| `geo_data` | read | GET `/geo/prompts`, `/geo/board`, `/geo/answer-coverage`, `/geo/citation-evidence`, `/geo/displacements`, `/geo/search-queries`, `/geo/rewrite-plans`, `/geo/competitor-pages`, `/geo/observations/:id`, `/geo/pages/:pageId/skip-factors` | observation ids must belong to the chat's project |
+| `import_data` | read | GET `/import`, `/import/records/:destination`, `/import/links` | `view` overview (Sheets state without tokens) / syncs / records / placed_links |
+| `project_admin` | read | GET `/projects/:pid`, `/limits`, `/usage`, `/integrations`, `/workspaces/:wid/{credentials,custom-providers,dataforseo}` (status only), `/context`, `/verification` (no token), `/attention`, `/activity/current`; members from `memberships` (name + role only) | `view` settings / limits / usage / integrations / members / context / verification / attention / active_runs |
+| `run_detail` | read | GET `/runs/:id`, `/runs/:runId/activity`, `/live/seo`, `/live/geo` | `view` detail / activity / live_board |
+| `checklist_status` | read | GET `/checklists/:kind`, `/pages/:pageId/checklist` | new `include: open | all` (all items, `manual` flag) |
+| `link_job` | action | POST `/seo/internal-links/run`, `/graph/rebuild` | `job` analysis (3/hour/project, Jev + writer budget) / rebuild_graph (6/hour/project) |
+| `set_link_suggestion_status` | action | POST `/seo/internal-links/bulk` | 1-90 ids; open / accepted / dismissed / implemented |
+| `edit_link_cluster` | action | PUT `/clusters/hub`, `/clusters/assign` | mark / unmark / clear hub, assign / unassign / reset spoke; URLs on the verified host; 120 edits/hour/project |
+| `manage_import_sync` | action | POST `/import/syncs/:id/run`, PATCH `/import/syncs/:id` | **owner only** (checked at proposal and again at execution); run_now (per-sync hourly limit) / enable / disable / set_frequency (6, 12, 24) |
+| `update_geo_prompts` | action | PUT `/geo/prompts` | approve / unapprove / remove by id, add prompts; brand-blind discovery prompts, <= 25, no duplicates; saves a new version |
+| `update_competitors` | action | PATCH `/projects/:pid` (`competitors`) | add / remove; new domains may auto-fetch DataForSEO data (said on the card) |
+| `update_project_settings` | action | PATCH `/projects/:pid`, PUT `/limits` | name, brand, aliases, description, audience, voice, site type, locale, language, schedule; limits within `LIMIT_BOUNDS` (e.g. crawl pages per run 1-200). Site URL: Settings page |
+| `update_checklist_item` | action | PUT `/checklists/:kind/:itemId`, `/pages/:pageId/checklist/:itemId` | manual items only |
+| `classify_buyer_queries` | action | POST `/seo/buyer-queries` | Jev; the route's per-user and per-project-day limits |
+| `set_page_type` | action | PATCH `/pages/:pageId` | |
+| `cancel_run` | action | POST `/runs/:id/cancel` | pending / running only |
+
+Not available from chat (the assistant answers with `navigate` to Integrations or Settings): credential create /
+update / delete / test, key reveal, custom provider changes, member or role changes, workspace or project delete,
+the sign-in allowlist, Google OAuth connects / disconnects and property selection, CSV / sheet import wizards
+(dry-run, commit, undo), manual GEO answer import, the redirect map, AI prompt suggestions, decision feedback,
+DataForSEO location settings, verification checks and the project JSON export.
 
 **Confirmation gate (server-enforced).** The loop never executes an action: it validates it (`prepare`), stores
 a `chat_actions` row `pending`, marks the step `awaiting_confirmation`, saves the paused transcript on the

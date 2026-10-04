@@ -284,6 +284,32 @@ Implemented in `src/worker/imports/sheets.ts` (client + separate OAuth consent),
 | Limits | Response body read with a 24 MB cap; 25 s timeout per call; allowlisted host `sheets.googleapis.com` (runs/runtime.ts `API_HOST_ALLOWLIST`), redirects never followed. The Sheets API is free (quota-limited); calls are not reserved against the dollar budget |
 | Untrusted data | Cell text is stored and shown as plain text only (control characters removed, clipped), never interpreted as instructions; imported values are labelled "from your sheet, not measured by Okara" |
 
+## Maton.ai API gateway — Sheets / Search Console transport (`maton`, implemented 2026-10-03)
+
+Implemented in `src/worker/platform/maton.ts` (the only module that calls Maton), used by
+`src/worker/imports/sheets-maton.ts`, `src/worker/platform/gsc-maton.ts` and `src/worker/routes/maton.ts`.
+Verified 2026-10-03 against Maton's own api-gateway skill documentation (local copy of
+https://github.com/maton-ai/api-gateway-skill): `SKILL.md` sections "Base URL", "Authentication", "Connection
+Management" (List Connections, Specifying Connection), "Error Handling", "Rate Limits", "Tips"; and
+`references/google-sheets/README.md`, `references/google-search-console/README.md`,
+`references/google-analytics-data/README.md`, `references/google-analytics-admin/README.md`.
+
+| Item | Contract |
+|---|---|
+| Gateway | `https://gateway.maton.ai/{app}/{native-api-path}` (SKILL.md "Base URL": the path MUST start with the app name). Proxies the native API: request and response bodies are Google's own |
+| Auth | `Authorization: Bearer <MATON_API_KEY>` on every request (SKILL.md "Authentication"); "Custom headers (except Host and Authorization) are forwarded to the target API" (Tips), so Okara sends only Accept, Content-Type and Maton-Connection |
+| Connection pick | `Maton-Connection: <connection_id>` "if you have multiple connections for the same app … If omitted, the gateway uses the default (oldest) active connection" (SKILL.md "Specifying Connection") |
+| Control plane | `GET https://ctrl.maton.ai/connections?app=&status=ACTIVE` (same Bearer auth) → `{connections: [{connection_id, status, creation_time, last_updated_time, url, app, method, metadata}]}` (SKILL.md "List Connections"; `status` ACTIVE / PENDING / FAILED). No account e-mail or label is documented, so Okara labels a connection by id prefix + creation date. `url` (a connect session link) and `metadata` are dropped at parse time and never stored |
+| Sheets | app `google-sheets`, proxies `sheets.googleapis.com` (README): `GET /google-sheets/v4/spreadsheets/{spreadsheetId}` (metadata; Okara adds the documented Google `fields` mask) and `GET /google-sheets/v4/spreadsheets/{spreadsheetId}/values/{range}` ("Range in URL path must be URL-encoded (`!` → `%21`, `:` → `%3A`)"). Same shapes as "Google Sheets API v4" above. `values:batchGet` is documented but not used, so not allowed |
+| Search Console | app `google-search-console`, proxies `www.googleapis.com` (README): `GET /google-search-console/webmasters/v3/sites`; `POST /google-search-console/webmasters/v3/sites/{siteUrl}/searchAnalytics/query` with the native body ("Site URLs must be URL-encoded in the path (e.g., `sc-domain%3Aexample.com`)"; "Maximum 25,000 rows per request"). Same shapes as "Google Search Console" above |
+| Google Analytics | `google-analytics-data` (proxies `analyticsdata.googleapis.com`): `POST /google-analytics-data/v1beta/properties/{propertyId}:runReport` ("Property IDs are numeric"); `google-analytics-admin` (proxies `analyticsadmin.googleapis.com`): `GET /google-analytics-admin/v1beta/accountSummaries` ("Returns a lightweight summary of all accounts and properties"). Response shapes are Google's (RunReportResponse `{dimensionHeaders, metricHeaders, rows[{dimensionValues[{value}], metricValues[{value}]}], rowCount, metadata{currencyCode, timeZone}}`; ListAccountSummariesResponse `{accountSummaries[{account, displayName, propertySummaries[{property, displayName}]}], nextPageToken}`, per the developers.google.com references linked from those READMEs). Exported helpers only (for Ask Okara); no Okara feature calls them yet |
+| Errors | 400 missing connection for the app, 401 invalid or missing key, 429 rate limited (10 requests/second per account), 500, other 4xx/5xx passed through from the target API (SKILL.md "Error Handling"). Okara maps 401 → "update the key", 400 + "connection" → not connected, 403 / 404 / 429 like the direct clients, and shows the target API's message clipped, as plain text, with the key scrubbed |
+| Egress policy | Allowed, and nothing else (`checkMatonRequest`, before any fetch): `GET ctrl.maton.ai/connections` (query `app` ∈ listed apps, `status=ACTIVE`); `GET gateway …/google-sheets/v4/spreadsheets/{id}` (query `fields`); `GET …/values/{range}` (one encoded segment, no raw `:` so `:append`/`:clear`/`:batchUpdate` cannot be reached; query `majorDimension`, `valueRenderOption`); `GET …/google-search-console/webmasters/v3/sites`; `POST …/sites/{site}/searchAnalytics/query` (site one encoded segment); `POST …/google-analytics-data/v1beta/properties/{digits}:runReport`; `GET …/google-analytics-admin/v1beta/accountSummaries` (query `pageSize`, `pageToken`). https only, default port, no URL credentials, no fragment; the normalized URL is both checked and fetched. Hosts `gateway.maton.ai` and `ctrl.maton.ai` are admitted by `createApiFetch(env, fetch, MATON_HOSTS)` for these calls only (not in the shared `API_HOST_ALLOWLIST`); redirects are never followed |
+| Limits | Timeouts: control 10 s, Sheets 25 s, Search Console 30 s, GA 30 s. Body caps: control 1 MB, Sheets 24 MB, Search Console 16 MB, GA 8 MB (`readCapped`) |
+| Cost | Okara is not charged per request (the owner's Maton plan applies; Google APIs are quota-limited). Every request that left is recorded in `provider_calls` with provider `maton`, model `<app>/<op>`, cost 0 (actual), rate version `maton-2026-10-03` |
+| Key | Workspace-level, owner-only; `provider_credentials` row `maton`, AES-GCM (AAD `provider_credentials:<workspaceId>:maton`), key hint = last 4 characters; no operator fallback. The key reaches every app the owner connected in Maton, which is why the egress policy is strict |
+| Untrusted data | Cell text, property names and report values are data, rendered as plain text, never instructions |
+
 ## OpenAI Responses API web search — GEO (`openai_geo`, implemented)
 
 Implemented in `src/worker/providers/openai-geo.ts` (grounding mode `openai_web_search`; cohort

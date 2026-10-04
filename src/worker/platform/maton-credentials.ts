@@ -16,7 +16,8 @@ import { iso } from "../lib/time";
 import type { MatonAppId, MatonAppStatus, MatonStatus } from "@shared/maton";
 import { MATON_WARNING } from "@shared/maton";
 import { isMissingTableError } from "./custom-providers";
-import { MATON_LISTED_APPS, MATON_USED_APPS, type MatonConnection, type MatonDeps, type MatonUsedApp } from "./maton";
+import { MATON_LISTED_APPS, MATON_USED_APPS, type MatonListedApp } from "./maton-apps";
+import type { MatonConnection, MatonDeps } from "./maton";
 
 export const MATON_CREDENTIAL = "maton" as const;
 export const matonAad = (workspaceId: string) => `provider_credentials:${workspaceId}:${MATON_CREDENTIAL}`;
@@ -27,12 +28,14 @@ export const MATON_APP_LABEL: Record<MatonAppId, string> = {
   "google-sheets": "Google Sheets",
   "google-search-console": "Google Search Console",
   "google-analytics-data": "Google Analytics Data",
+  "google-analytics-admin": "Google Analytics Admin",
 };
 
 const APP_NOTE: Record<MatonAppId, string> = {
   "google-sheets": "Used for Import and live sync when the project has no direct Google Sheets connection (read-only: spreadsheet metadata and values).",
   "google-search-console": "Used for Search Console sync when a project picks Maton as its Search Console source and has no direct connection (read-only: sites list and Search Analytics queries).",
-  "google-analytics-data": "Available, not used yet. Okara makes no Google Analytics requests.",
+  "google-analytics-data": "Available, not used yet by Okara's own features. Only read-only reports (runReport) are allowed, for Ask Okara.",
+  "google-analytics-admin": "Available, not used yet by Okara's own features. Only the read-only GA4 property list (accountSummaries) is allowed, for Ask Okara.",
 };
 
 export interface MatonKeyRow {
@@ -109,7 +112,7 @@ export async function clearMatonConnections(db: Db, workspaceId: string): Promis
 }
 
 /** Pick (or clear, null) the connection used for an app. Returns false when the id is not a listed active connection. */
-export async function selectMatonConnection(db: Db, workspaceId: string, app: MatonUsedApp, connectionId: string | null): Promise<boolean> {
+export async function selectMatonConnection(db: Db, workspaceId: string, app: MatonListedApp, connectionId: string | null): Promise<boolean> {
   if (connectionId !== null) {
     const row = await db.first<{ n: number }>(
       "SELECT COUNT(*) AS n FROM maton_connections WHERE workspace_id = ? AND app = ? AND connection_id = ? AND status = 'ACTIVE'",
@@ -142,7 +145,7 @@ export interface MatonTransport {
 }
 
 /** Which connection an app would use, from the cache (no decryption). null = not available. */
-export function pickConnection(rows: ConnectionRow[], app: MatonUsedApp): { connectionId: string | null; label: string } | null {
+export function pickConnection(rows: ConnectionRow[], app: MatonListedApp): { connectionId: string | null; label: string } | null {
   const active = rows.filter((r) => r.app === app && r.status === "ACTIVE");
   if (active.length === 0) return null;
   const sel = active.find((r) => r.selected === 1);
@@ -154,7 +157,7 @@ export function pickConnection(rows: ConnectionRow[], app: MatonUsedApp): { conn
 }
 
 /** Whether the workspace can use Maton for an app (key saved + an active cached connection), without decrypting. */
-export async function matonAvailability(db: Db, workspaceId: string, app: MatonUsedApp): Promise<{ label: string } | null> {
+export async function matonAvailability(db: Db, workspaceId: string, app: MatonListedApp): Promise<{ label: string } | null> {
   let row: MatonKeyRow | null;
   try {
     row = await matonRow(db, workspaceId);
@@ -167,7 +170,7 @@ export async function matonAvailability(db: Db, workspaceId: string, app: MatonU
 }
 
 /** Key + connection for an app, or null. Throws when the saved key cannot be decrypted. */
-export async function matonTransport(env: Env, db: Db, workspaceId: string, app: MatonUsedApp): Promise<MatonTransport | null> {
+export async function matonTransport(env: Env, db: Db, workspaceId: string, app: MatonListedApp): Promise<MatonTransport | null> {
   let row: MatonKeyRow | null;
   try {
     row = await matonRow(db, workspaceId);
@@ -196,7 +199,7 @@ async function storageReady(db: Db, workspaceId: string): Promise<boolean> {
 }
 
 /** Status for the Integrations card. Never includes the key (last 4 characters only). */
-export async function matonStatus(db: Db, workspaceId: string): Promise<MatonStatus> {
+export async function matonWorkspaceStatus(db: Db, workspaceId: string): Promise<MatonStatus> {
   const [row, rows, ready] = await Promise.all([matonRow(db, workspaceId), loadMatonConnections(db, workspaceId), storageReady(db, workspaceId)]);
   const apps: MatonAppStatus[] = MATON_LISTED_APPS.map((app) => {
     const mine = rows.filter((r) => r.app === app);

@@ -11,7 +11,7 @@ import type { Db } from "../lib/db";
 import { randomToken } from "../lib/ids";
 import { iso } from "../lib/time";
 import type { ProjectRow } from "./access";
-import { createGscProvider } from "./gsc-client";
+import { resolveGscProvider } from "./gsc-maton";
 import { isPublicHostname, siteHost } from "./projects";
 
 export type VerificationMethod = "dns" | "file" | "gsc";
@@ -179,7 +179,8 @@ export function gscEntryVerifiesHost(entry: { siteUrl: string; permissionLevel: 
 
 export async function checkGsc(env: Env, db: Db, p: ProjectRow, fetchImpl: typeof fetch): Promise<CheckResult> {
   if (!p.gsc_property) return { ok: false, detail: "Select a Search Console property first." };
-  const gsc = await createGscProvider(env, db, { id: p.id, workspaceId: p.workspace_id }, fetchImpl);
+  // Direct OAuth first; the Maton source when the project chose it (platform/gsc-maton.ts).
+  const gsc = await resolveGscProvider(env, db, { id: p.id, workspaceId: p.workspace_id }, fetchImpl, undefined, { purpose: "verification" });
   if (!gsc) return { ok: false, detail: "Search Console is not connected." };
   try {
     const props = await gsc.listProperties();

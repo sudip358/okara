@@ -132,6 +132,8 @@ export interface IntegrationsStatus {
     property: string | null;
     connectedAt: string | null;
     lastError: string | null;
+    /** "maton": no direct connection; Search Console is read through the workspace's Maton.ai key (project setting). */
+    via?: "direct" | "maton";
   };
   providers: Array<{
     /** Includes the API GEO engine lanes (openai_geo, anthropic_geo). */

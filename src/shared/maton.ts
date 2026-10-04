@@ -4,10 +4,10 @@
  */
 import type { CapabilityState } from "./types";
 
-export type MatonAppId = "google-sheets" | "google-search-console" | "google-analytics-data";
+export type MatonAppId = "google-sheets" | "google-search-console" | "google-analytics-data" | "google-analytics-admin";
 
 export const MATON_WARNING =
-  "This key can reach every app you connected in Maton. Okara only makes read-only Google Sheets and Search Console requests and refuses everything else.";
+  "This key can reach every app you connected in Maton. Okara only makes read-only Google Sheets, Search Console and Google Analytics report requests and refuses everything else.";
 
 export interface MatonConnectionSummary {
   connectionId: string;
@@ -21,7 +21,7 @@ export interface MatonConnectionSummary {
 export interface MatonAppStatus {
   app: MatonAppId;
   label: string;
-  /** false for google-analytics-data ("available, not used yet"). */
+  /** false for the Google Analytics apps ("available, not used yet" by Okara's own features). */
   usedByOkara: boolean;
   connections: MatonConnectionSummary[];
   /** The connection Okara sends; null = Maton's default (oldest active) connection, or none. */

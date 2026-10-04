@@ -40,7 +40,7 @@ ALTER TABLE provider_credentials_new RENAME TO provider_credentials;
 --    survives as long as its connection is still listed. Deleted with the key.
 CREATE TABLE maton_connections (
   workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  app TEXT NOT NULL CHECK (app IN ('google-sheets', 'google-search-console', 'google-analytics-data')),
+  app TEXT NOT NULL CHECK (app IN ('google-sheets', 'google-search-console', 'google-analytics-data', 'google-analytics-admin')),
   connection_id TEXT NOT NULL,
   status TEXT NOT NULL,
   creation_time TEXT,

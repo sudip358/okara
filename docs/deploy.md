@@ -88,6 +88,11 @@ need more than 10 ms of CPU per step, so agent runs will fail on the free plan. 
      - **No new redirect URI**: the Sheets consent reuses `<APP_ORIGIN>/api/gsc/callback` (the callback dispatches
        on the stored state's purpose). Nothing else to register.
      - Apply migration `0015_sheet_imports.sql` (`npm run db:migrate:remote`) before using the Import page.
+   - **Maton.ai gateway key** (Integrations → Maton.ai; [A34]): apply migration `0018_maton_gateway.sql`
+     (`npm run db:migrate:remote`; widens `provider_credentials.provider` to `maton`, adds `maton_connections`,
+     `projects.gsc_source`, `imports.transport`, `import_syncs.last_transport`). No secret or var is needed: each
+     workspace owner pastes their own key (encrypted with `TOKEN_ENCRYPTION_KEY_V1`). Until it is applied, saving a
+     key answers 412 and everything else keeps working on direct Google OAuth.
    - **Partial (section) runs** (Live view "▶ Run …" buttons): apply migration `0016_run_scope.sql`
      (`npm run db:migrate:remote`; adds `agent_runs.scope_json`). Until it is applied, full runs keep working and
      a partial run request fails.

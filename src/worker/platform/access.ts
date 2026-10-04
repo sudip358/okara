@@ -30,6 +30,8 @@ export interface ProjectRow {
   verification_token: string | null;
   verified_at: string | null;
   gsc_property: string | null;
+  /** Search Console source (migration 0018): NULL/'direct' or 'maton'. Absent before the migration. */
+  gsc_source?: string | null;
   schedule_enabled: number;
   is_demo: number;
   created_at: string;

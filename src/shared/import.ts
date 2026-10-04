@@ -141,6 +141,8 @@ export interface ImportRecordSummary {
   createdAt: string;
   undoneAt: string | null;
   canUndo: boolean;
+  /** Sheet imports: how the sheet was read ('maton' = through the workspace's Maton.ai key). */
+  transport?: "direct" | "maton";
 }
 
 export type SyncErrorCode = "token_expired" | "not_connected" | "tab_missing" | "header_changed" | "forbidden" | "not_found" | "api_error" | "apply_error";
@@ -160,6 +162,8 @@ export interface ImportSyncSummary {
   lastError: string | null;
   lastWarning: string | null;
   lastChanges: string[];
+  /** Transport of the last successful sync ('maton' = through the workspace's Maton.ai key). */
+  lastTransport?: "direct" | "maton";
 }
 
 export interface SheetsConnectionStatus {
@@ -168,6 +172,10 @@ export interface SheetsConnectionStatus {
   lastError: string | null;
   scope: string;
   notes: string[];
+  /** What Import and sync use now: the direct Google Sheets connection wins; 'maton' when only Maton is available. */
+  via?: "direct" | "maton";
+  /** The workspace's Maton google-sheets connection (key saved + active connection), even when direct wins. */
+  maton?: { available: boolean; label: string | null };
 }
 
 export interface ImportOverview {
