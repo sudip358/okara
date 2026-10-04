@@ -11,8 +11,10 @@ import {
   countsSentence,
   decodeCsvBytes,
   parseCsv,
+  suggestBacklinksMapping,
   suggestDestination,
   toTable,
+  type BacklinksMapping,
   type CompetitorsMapping,
   type DestinationSuggestion,
   type DocMapping,
@@ -69,6 +71,9 @@ export function defaultMapping(s: DestinationSuggestion, destination: ImportDest
       return { domain: first, notes: null, assignedTo: null, metrics: headers.slice(1) } satisfies CompetitorsMapping;
     case "implemented_links":
       return { source: first, target: headers[1] ?? first, anchor: headers[2] ?? null } satisfies LinksMapping;
+    case "backlinks":
+      // The header row may still be recognisable (Live URL / Target ...); otherwise start from the first columns.
+      return suggestBacklinksMapping(headers) ?? ({ liveUrl: first, target: headers[1] ?? first, anchor: headers[2] ?? null } satisfies BacklinksMapping);
     default:
       return { columns: [...headers], sortBy: null, title: tabName } satisfies DocMapping;
   }
@@ -113,7 +118,7 @@ export function stageSheetTab(spreadsheetId: string, preview: { tab: string; hea
     destination: preview.suggestion.destination,
     mapping: structuredCloneSafe(preview.suggestion.mapping),
     options: {},
-    keepInSync: syncable && preview.suggestion.destination === "competitors",
+    keepInSync: syncable && (preview.suggestion.destination === "competitors" || preview.suggestion.destination === "backlinks"),
     frequencyHours: 24,
   };
 }
@@ -139,6 +144,7 @@ const NOUNS: Record<ImportDestination, { one: string; many: string }> = {
   geo_prompts: { one: "prompt", many: "prompts" },
   competitors: { one: "competitor", many: "competitors" },
   implemented_links: { one: "placed link", many: "placed links" },
+  backlinks: { one: "backlink", many: "backlinks" },
   context_doc: { one: "document", many: "documents" },
   reference: { one: "document", many: "documents" },
 };

@@ -23,7 +23,7 @@
 import { anchorsMatch, HOST_INTERVAL_MS, MAX_REDIRECT_HOPS, PAGE_MAX_BYTES, PAGE_TIMEOUT_MS, type BacklinkFoundLink, type BacklinkStatus, type LinkRel } from "@shared/backlinks";
 import { linkUrlKey } from "@shared/import";
 import { CRAWLER_UA_TOKEN, isPathAllowed, parseRobots, ROBOTS_MAX_BYTES, selectGroup, type RobotsGroup, type RobotsStatus } from "../seo/crawl/robots";
-import { CrawlFetchError, guardedFetch, normalizeHost, publicExternalFetch, type GuardedResponse } from "../seo/ssrf";
+import { assertPublicExternalUrl, CrawlFetchError, guardedFetch, normalizeHost, publicExternalFetch, type GuardedResponse } from "../seo/ssrf";
 import { analyzePage, parseXRobotsTag } from "./html";
 
 export const ROBOTS_TIMEOUT_MS = 10_000;
@@ -353,9 +353,10 @@ export async function checkBacklink(input: CheckInput, site: CheckTarget, cache:
 
   let start: URL;
   try {
-    start = new URL(input.liveUrl);
+    // The same guard as every request: a stored live URL that is not a public http(s) URL is never requested.
+    start = assertPublicExternalUrl(input.liveUrl);
   } catch {
-    return { ...result, status: "fetch_failed", errorCode: "blocked_url", statusReason: "The live URL is not a valid URL.", fetches: req.fetches };
+    return { ...result, status: "fetch_failed", errorCode: "blocked_url", statusReason: fetchErrorText("blocked_url", null), fetches: req.fetches };
   }
 
   let res: GuardedResponse;

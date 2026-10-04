@@ -523,10 +523,11 @@ docs/provider-contracts.md "Google Sheets API v4".
 - **Destinations and mappings** (column names from the header row; unknown column → 400 `header_changed`):
   `geo_prompts {question, done?, notes?[]}` + options `{approvePrompts?, addCompetitors?[]}`;
   `competitors {domain, notes?, assignedTo?, metrics?[]}`; `implemented_links {source, target, anchor?, date?,
-  method?, hub?, status?}` (absolute URLs or `/paths` on the verified host); `context_doc` / `reference
+  method?, hub?, status?}` (absolute URLs or `/paths` on the verified host); `backlinks {liveUrl, target, anchor?,
+  target2?, anchor2?, vendor?, type?, date?, da?, traffic?, price?}` ([A38], see "Backlinks"); `context_doc` / `reference
   {columns?[], sortBy?, title?}`. `options.excludeKeys[]`: record keys unchecked in the dry run (also excluded on
   later syncs).
-- **Auto-mapping** (`suggestDestination`): `Question` → GEO prompts; `Competing Domains` → competitors;
+- **Auto-mapping** (`suggestDestination`): `Live URL` + `Target` (the Built Links tab) → backlinks; `Question` → GEO prompts; `Competing Domains` → competitors;
   `Source … URL` + `Target URL` → placed links; tab names like Titles/H1/Meta/30x/40x/Indexed and internal-link
   or orphan tabs → reference; anything else → imported research document.
 - **ImportPlan:** `counts {add, update, unchanged, skip, remove, not_added}`, `summary[]` (e.g. "42 prompts new, 3
@@ -535,7 +536,7 @@ docs/provider-contracts.md "Google Sheets API v4".
 - **Idempotency and provenance:** `import_records` keeps one row per (project, destination, normalized key) with the
   sheet's values; `imports` one row per applied import (manual or sync) with counts and a change log
   (`+ lumens.com`, `− 1800lighting.com`); `import_changes` the previous state of each record changed (undo).
-- **Sync:** `import_syncs` (destinations competitors, geo_prompts, implemented_links; Sheets source only). The cron
+- **Sync:** `import_syncs` (destinations competitors, geo_prompts, implemented_links, backlinks; Sheets source only). The cron
   (every 15 min) runs up to 3 due syncs per tick with a 10-minute lease. Error codes: `token_expired`,
   `not_connected`, `tab_missing`, `header_changed`, `forbidden`, `not_found`, `api_error`, `apply_error`; failing
   syncs appear in `GET /projects/:pid/attention` as `importSyncs[]` (additive field) and on the Import page.
@@ -543,6 +544,48 @@ docs/provider-contracts.md "Google Sheets API v4".
   `title`); `GeoPromptSet.label`; the link suggester marks pairs placed per the sheet `implemented`; Ask Okara has an
   `imported_research` read tool and a `navigate` view `import`; the project export includes the four import tables.
 - **Limits:** dry run 30/min, commit and undo 10/min, Sheets reads 30/min per user and project.
+
+## Backlinks (backlink monitor; amends docs/build-kit.md [A38], 2026-10-04; types in `src/shared/backlinks.ts`)
+
+Code: `src/worker/backlinks/{html,check,events,store,jobs,service}.ts`, `src/worker/routes/backlinks.ts`, the `backlinks`
+import destination in `src/worker/imports/destinations.ts`, `publicExternalFetch` / `assertPublicExternalUrl` in
+`src/worker/seo/ssrf.ts`. Web: `src/web/pages/backlinks/**`, `src/web/pages/live/backlinks/**`. Migration
+`0020_backlink_monitor.sql` (tables `backlinks`, `backlink_jobs`, `backlink_job_cache`, `backlink_checks`,
+`backlink_events`; `imports` / `import_syncs` rebuilt to accept the `backlinks` destination).
+
+| Method | Path | Who | Body / query → Response |
+|---|---|---|---|
+| GET | `/projects/:pid/backlinks` | member | `?status=<BacklinkStatus or unchecked or target_broken>&vendor=&type=&changed=<days 1-365>&q=&inactive=1&sort=checked/status/host/vendor/date/da/traffic/changed&dir=asc/desc&offset=&limit=≤100` → `BacklinkListResponse` {rows, total, offset, limit, vendors, types, labels}; `&format=csv` → `text/csv` attachment (all matching rows, ≤ 2,000; cells starting with `= + - @` are prefixed with `'`) |
+| GET | `/projects/:pid/backlinks/summary` | member | `BacklinkSummary` {state ready/empty/demo, totals {active, inactive, checked, unchecked}, byStatus, dofollow {n, m} (m = checked pages read: found or missing), targetBroken, anchorMismatch, changes {last7, last30, negative7, negative30}, lastCheckAt, nextCheckAt (weekly; null when scheduled runs are off), job (running), lastJob, limits, canRun, verified, labels} |
+| GET | `/projects/:pid/backlinks/events` | member | `?since=<ISO>` (default 30 days) `&negative=1&limit=≤200` → `BacklinkEventsResponse` {events (with liveUrl, targetUrl), since, total} |
+| GET | `/projects/:pid/backlinks/feed` | member | `?after=<ISO>&limit=0-50` → `BacklinkFeed` {job (running, else latest), items: latest checks of that job} |
+| GET | `/projects/:pid/backlinks/:id` | member | `BacklinkDetail` {backlink, checks (latest 10, with redirect chain, robots, meta robots, X-Robots-Tag, canonical, links found), events (latest 50)}; 404 outside the project |
+| POST | `/projects/:pid/backlinks/check` | member | `{}` = every active backlink (manual, 3 per project per UTC day) or `{ids: string[1-30]}` = recheck (30 rows per project per hour) → 202 `StartBacklinkCheckResult` {job, existing}; a running full check is returned (`existing: true`); a running recheck → 409; no backlinks → 409; demo → 409 `demo_project`; over a limit → 429 with the remaining count; unknown ids → 404 |
+| POST | `/projects/:pid/backlinks/check/advance` | member | `{after?: ISO}` → `BacklinkFeed`; runs one more lease-guarded batch of the project's running job (rechecks first) in `ctx.waitUntil`; 60 per project per minute |
+
+- **Statuses** (`BacklinkStatus`): `dofollow`, `nofollow`, `sponsored`, `ugc` (the matching link's rel; sponsored >
+  ugc > nofollow when several; any followable matching link wins; page-level meta robots / X-Robots-Tag nofollow ⇒
+  `nofollow`, reason "Page-level nofollow (…)"), `missing` (page read, no link to our site), `page_error` (4xx/5xx),
+  `redirected` (the article's final URL differs after normalization; `linkRel` is the link class on the final page),
+  `robots_blocked` (robots.txt of the article's host, or of a redirect hop's host, disallows OkaraBot or is
+  unreachable; the page is not requested), `fetch_failed` (timeout, network, blocked URL, refused redirect hop,
+  non-HTML, more than 5 redirects, or a page needing more than 20 requests). A link to another URL of our site counts
+  as found with "Links to … not to the target URL" in the reason. Target check: `targetStatus` (final HTTP status on
+  the verified host) or `targetError` (`not_checked` when the site is not verified, `robots_blocked`, or a fetch error
+  code).
+- **Events** (`BacklinkEventKind`, code-computed against the previous check; the first check is the baseline):
+  `rel_changed` ("dofollow → nofollow"), `link_removed`, `link_restored`, `page_error` ("Page now 404"),
+  `redirected` ("Redirected to <url>"), `robots_blocked`, `fetch_failed`, `recovered`, `noindex_added`,
+  `noindex_removed`, `anchor_changed`, `target_moved`, `target_broken` ("Target now 404"), `target_recovered`,
+  `canonical_changed`. `negative: true` for losses; `GET /projects/:pid/attention` gains `backlinkChanges`
+  {negative, since, examples (≤ 3)} for the last 7 days (additive field).
+- **Batches:** ≤ 8 backlinks and ≤ 20 external requests per invocation (robots.txt, redirect hops and target checks
+  included), 90 s lease, robots verdicts / target results / per-host pacing cached per job (`backlink_job_cache`).
+  The 15-minute cron schedules the weekly check (projects with scheduled runs on, not demo, with active backlinks, no
+  full check created in the last 7 days; 3 projects per tick) and processes one batch per tick; jobs without progress
+  for 3 days are failed.
+- **Ask Okara:** no chat tool yet; `listBacklinks`, `backlinkSummary`, `backlinkEvents`, `startBacklinkCheck` in
+  `src/worker/backlinks/service.ts` are the functions a tool should call.
 
 ## Maton.ai API gateway (amends docs/build-kit.md [A34], 2026-10-03; types in `src/shared/maton.ts`)
 

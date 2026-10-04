@@ -62,6 +62,12 @@ export const EXPORT_TABLES = [
   "link_graph_urls",
   "link_cluster_overrides",
   "link_verifications",
+  // Backlink monitor, migration 0020: monitored backlinks (sheet values + latest check), check jobs, checks, changes.
+  // backlink_job_cache is transient (robots verdicts / pacing of a running job) and is not exported.
+  "backlinks",
+  "backlink_jobs",
+  "backlink_checks",
+  "backlink_events",
 ] as const;
 
 /** Column names that must never appear in an export, whichever table they are in. */

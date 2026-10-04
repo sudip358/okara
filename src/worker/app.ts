@@ -33,6 +33,7 @@ import { chatRoutes } from "./routes/chat";
 import { competitorDataRoutes } from "./routes/competitor-data";
 import { importRoutes } from "./routes/imports";
 import { matonRoutes } from "./routes/maton";
+import { backlinkRoutes } from "./routes/backlinks";
 
 export interface AppVariables {
   db: Db;
@@ -82,6 +83,7 @@ export function createApp() {
   app.route("/", competitorDataRoutes);
   app.route("/", importRoutes);
   app.route("/", matonRoutes);
+  app.route("/", backlinkRoutes);
 
   app.notFound((c) => c.json({ error: { code: "not_found", message: "Not found." } }, 404));
   app.onError((err, c) => {

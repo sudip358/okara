@@ -98,6 +98,16 @@ need more than 10 ms of CPU per step, so agent runs will fail on the free plan. 
      (copies every column and row, keeps ids and key envelopes; adds role `chat` and `is_chat`), so apply it in a
      quiet moment. No secret or var is needed. Until it is applied, Ask Okara keeps using the writer and adding a
      chat model answers 412.
+   - **Backlink monitor** (Backlinks page, Live Backlinks; [A38]): apply migration `0020_backlink_monitor.sql`
+     (`npm run db:migrate:remote`). It adds `backlinks`, `backlink_jobs`, `backlink_job_cache`, `backlink_checks`,
+     `backlink_events`, and rebuilds `imports`, `import_changes` and `import_syncs` (every row and column copied, same
+     ids and indexes; only the `destination` CHECK lists gain `backlinks`; `import_changes` is copied aside first so the
+     drop of `imports` cannot cascade into it), so apply it in a quiet moment (no import or sheet sync running). No
+     secret or var is needed. The checker fetches third-party article pages listed in the owner's sheet (owner-approved
+     exception, robots.txt respected, OkaraBot User-Agent) within the Workers Free budget: ≤ 20 external requests per
+     invocation, driven by the start request, the open Live Backlinks view and the existing 15-minute cron (one batch
+     per tick, so a 2,000-backlink weekly check finishes in about two to three days on cron alone). Until the migration
+     is applied, the Backlinks page shows its empty state with "apply migration 0020" and the cron skips the monitor.
    - **Partial (section) runs** (Live view "▶ Run …" buttons): apply migration `0016_run_scope.sql`
      (`npm run db:migrate:remote`; adds `agent_runs.scope_json`). Until it is applied, full runs keep working and
      a partial run request fails.

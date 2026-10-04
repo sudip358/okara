@@ -6,6 +6,7 @@ import { ProjectProvider, projectPath, useProjectLoader } from "@web/lib/project
 import { useSession } from "@web/lib/session";
 import { ActivityLauncher } from "@web/components/activity/ActivityWindow";
 import { LiveNavDot } from "@web/pages/live/LiveNavDot";
+import { BacklinkNavDot } from "@web/pages/live/backlinks/BacklinkNavDot";
 import { ChatLauncher } from "@web/components/chat/ChatPanel";
 import { Badge, DemoBanner, EmptyState, ErrorState, LoadingState, buttonClass, cx } from "@web/components/ui";
 
@@ -13,9 +14,11 @@ const NAV: Array<{ to: string; label: string; end?: boolean; group?: string }> =
   { to: "", label: "Overview", end: true },
   { to: "live", label: "Live SEO", end: true },
   { to: "live/geo", label: "Live GEO" },
+  { to: "live/backlinks", label: "Live Backlinks" },
   { to: "checklists", label: "Checklists" },
   { to: "seo", label: "SEO audit", group: "SEO" },
   { to: "internal-links", label: "Internal links" },
+  { to: "backlinks", label: "Backlinks" },
   { to: "draft-check", label: "Draft check" },
   { to: "redirects", label: "Redirects" },
   { to: "recommendations", label: "Recommendations" },
@@ -104,6 +107,7 @@ export function ProjectLayout() {
                     {item.label}
                     {item.to === "live" && <LiveNavDot projectId={projectId} agent="seo" />}
                     {item.to === "live/geo" && <LiveNavDot projectId={projectId} agent="geo" />}
+                    {item.to === "live/backlinks" && <BacklinkNavDot projectId={projectId} />}
                   </NavLink>
                 </li>
               ))}

@@ -4,6 +4,7 @@ import { createApp } from "./app";
 import { dispatchDueRuns, sweepOrphans } from "./runs/scheduler";
 import { processQueuedCompetitorFetches } from "./competitors/dataforseo";
 import { processDueImportSyncs } from "./imports/sync";
+import { processDueBacklinkChecks } from "./backlinks/jobs";
 
 export { AgentRunWorkflow } from "./runs/workflow";
 
@@ -36,6 +37,12 @@ export default {
     ctx.waitUntil(
       processDueImportSyncs(env, now).catch((e) => {
         console.error("import sync tick failed", e instanceof Error ? e.message.slice(0, 200) : "unknown");
+      }),
+    );
+    // Backlink monitor: weekly scheduling + one bounded batch (<= 20 external fetches) of the oldest check job.
+    ctx.waitUntil(
+      processDueBacklinkChecks(env, now).catch((e) => {
+        console.error("backlink check tick failed", e instanceof Error ? e.message.slice(0, 200) : "unknown");
       }),
     );
   },

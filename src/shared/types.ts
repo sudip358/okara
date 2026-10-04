@@ -2235,3 +2235,8 @@ export interface AttentionFeed {
   /** Links you marked implemented (or your sheet says are placed) that the latest crawl of the source page did not find. */
   linkVerification?: { notFound: number; checkedAt: string | null; examples: Array<{ sourceUrl: string; targetUrl: string }> } | null;
 }
+
+export interface AttentionFeed {
+  /** Backlink monitor ([A38]): new negative changes (lost, nofollow, 404, redirected, noindex, target broken) in the last 7 days. */
+  backlinkChanges?: { negative: number; since: string; examples: Array<{ backlinkId: string; liveUrl: string; targetUrl: string; message: string; detectedAt: string }> } | null;
+}

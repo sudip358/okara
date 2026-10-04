@@ -19,6 +19,7 @@ Specification: `docs/build-kit.md`. API contract: `docs/api.md` + `src/shared/ty
 | GEO agent | `src/worker/geo/*`, `src/worker/providers/{gemini,perplexity,rates}.ts` | Grounded prompt sampling, mention/citation/sentiment analysis, displacement, search-query capture, proposals |
 | Recommendations | `src/worker/recommendations/*` | Evidence rows, dedup, 0-2/day cap, persistence shared by both agents |
 | Internal links | `src/worker/links/*`, `src/worker/seo/crawl/rolling.ts`, `src/worker/routes/links.ts`, `src/web/pages/links/*` | Rolling crawl inventory, full-site link graph, clusters, priority, drafted sentences, broken links, anchor audit, auto-verification, sheet export |
+| Backlink monitor | `src/worker/backlinks/*`, `src/worker/routes/backlinks.ts`, `src/web/pages/backlinks/*`, `src/web/pages/live/backlinks/*` | Built links from the owner's sheet ([A38]): checks each live article for the link to our page (dofollow / nofollow / sponsored / ugc), page status, redirects, robots; change events; Live Backlinks containers |
 | Ask Okara | `src/worker/chat/*`, `src/worker/routes/chat.ts`, `src/web/components/chat/*` | In-app chat agent: tool-calling writer model over internal read tools; confirmed actions only |
 | Web | `src/web/*` | SPA; renders untrusted text as plain text |
 
@@ -192,6 +193,31 @@ POST .../run ─► candidates (TF-IDF overlap + cluster gaps) ─► computePri
   sanitized evidence for Jev and the writer); cluster edits accept only URLs on the verified host.
 - **UI** (`src/web/pages/links/*`): tabs Suggestions, Clusters, Link graph, Broken links, Anchors, Placed & verified
   (`?tab=`), each with setup/empty/demo states, server-side paging for the per-URL table, and CSV exports.
+
+## Backlink monitor ([A38])
+
+```
+Import (Sheets via OAuth or Maton, or CSV) ──► destination "backlinks" ──► backlinks (one row per live URL × target)
+POST /backlinks/check ──► backlink_jobs (queued; 1 active per project and scope) ──► processBatch in ctx.waitUntil
+POST /backlinks/check/advance (Live view / Backlinks page while a job runs) ──► processBatch (lease-guarded)
+cron (*/15) ──► processDueBacklinkChecks: weekly scheduling + one processBatch
+processBatch: ≤ 8 backlinks, ≤ 20 external requests ──► checkBacklink (robots.txt per host, article via
+  publicExternalFetch, our target via guardedFetch) ──► backlink_checks + diffChecks ──► backlink_events, backlinks summary
+```
+
+- **External fetch exception** (owner-approved, [A38]): article URLs come only from the owner's sheet/CSV. Every request
+  goes through `seo/ssrf.ts` `publicExternalFetch` (public hostnames only, every hop re-validated, no IP literals or
+  local names, http(s), default port, 15 s, 2 MB, HTML only); robots.txt is respected per host for OkaraBot; at most 1
+  request per second per host. Our own target URLs use the crawl's verified-host `guardedFetch`.
+- **Workers Free budget**: one batch per invocation (≤ 20 external requests including robots.txt, redirect hops and
+  target checks; ≤ 8 backlinks; about 6 D1 calls, results written in one atomic `db.batch`); a 90 s lease on the job
+  makes concurrent invocations no-ops; robots verdicts, target results and per-host pacing persist per job in
+  `backlink_job_cache` so later batches reuse them. A check that would exceed the budget stops before the request and
+  is retried next batch; one that cannot finish even with a full budget is recorded as `fetch_failed` (`fetch_budget`).
+- **CPU**: the article is not parsed into a DOM; comments and scripts are stripped and only `<a>` tags containing our
+  host name, `<meta>` robots and `<link rel=canonical>` are read (`backlinks/html.ts`).
+- **Change detection** (`backlinks/events.ts`) is pure code against the previous stored check; losses feed the Overview
+  attention feed. Checks keep the latest 10 per backlink, events the latest 50, jobs the latest 50 per project.
 
 ## Deviations and known limitations
 

@@ -68,6 +68,27 @@ export function AttentionFeed({ projectId, feed, onRunStarted }: { projectId: st
             </Link>
           </li>
         )}
+        {feed.backlinkChanges && feed.backlinkChanges.negative > 0 && (
+          <li className="space-y-1 px-4 py-3" data-testid="attention-backlinks">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-semibold">Backlinks lost or downgraded</span>
+              <Badge tone="danger">{feed.backlinkChanges.negative}</Badge>
+            </div>
+            <p className="text-sm text-zinc-700 dark:text-zinc-300">
+              {feed.backlinkChanges.negative === 1 ? "1 change" : `${feed.backlinkChanges.negative} changes`} in the last 7 days (link removed, now nofollow, page 404, redirected, noindex or target broken).
+            </p>
+            <ul className="space-y-0.5 text-xs text-zinc-600 dark:text-zinc-400">
+              {feed.backlinkChanges.examples.map((e) => (
+                <li key={`${e.backlinkId}:${e.detectedAt}:${e.message}`} className="break-words">
+                  {e.message} · {e.liveUrl} · {formatRelative(e.detectedAt)}
+                </li>
+              ))}
+            </ul>
+            <Link className="text-sm" to={`${projectPath(projectId, "backlinks")}?changed=7`}>
+              Review on the Backlinks page
+            </Link>
+          </li>
+        )}
         {(feed.importSyncs ?? []).map((s) => (
           <li key={s.id} className="space-y-1 px-4 py-3" data-testid="attention-import-sync">
             <div className="flex flex-wrap items-center gap-2">

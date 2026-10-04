@@ -13,6 +13,7 @@ import {
   IMPORT_DESTINATIONS,
   IMPORT_LABEL_SHEET,
   SYNC_FREQUENCIES,
+  type BacklinksMapping,
   type CompetitorsMapping,
   type DocMapping,
   type ImportDestination,
@@ -505,6 +506,31 @@ export function MappingFields({ destination, mapping, headers, onChange }: { des
       </div>
     );
   }
+  if (destination === "backlinks") {
+    const m = mapping as BacklinksMapping;
+    const set = (k: keyof BacklinksMapping) => (v: string | null) => onChange({ ...m, [k]: k === "liveUrl" || k === "target" ? (v ?? "") : v });
+    return (
+      <div className="space-y-2" data-testid="backlinks-mapping">
+        <div className="grid gap-3 sm:grid-cols-3">
+          <ColumnSelect label="Live URL (the article)" value={m.liveUrl} headers={headers} onChange={set("liveUrl")} />
+          <ColumnSelect label="Target (your page)" value={m.target} headers={headers} onChange={set("target")} />
+          <ColumnSelect label="Anchor (expected)" value={m.anchor ?? null} headers={headers} onChange={set("anchor")} optional />
+          <ColumnSelect label="Target 2" value={m.target2 ?? null} headers={headers} onChange={set("target2")} optional />
+          <ColumnSelect label="Anchor 2" value={m.anchor2 ?? null} headers={headers} onChange={set("anchor2")} optional />
+          <ColumnSelect label="Vendor" value={m.vendor ?? null} headers={headers} onChange={set("vendor")} optional />
+          <ColumnSelect label="Type" value={m.type ?? null} headers={headers} onChange={set("type")} optional />
+          <ColumnSelect label="Date" value={m.date ?? null} headers={headers} onChange={set("date")} optional />
+          <ColumnSelect label="DA" value={m.da ?? null} headers={headers} onChange={set("da")} optional />
+          <ColumnSelect label="Traffic" value={m.traffic ?? null} headers={headers} onChange={set("traffic")} optional />
+          <ColumnSelect label="Price" value={m.price ?? null} headers={headers} onChange={set("price")} optional />
+        </div>
+        <p className="text-xs text-zinc-600 dark:text-zinc-400">
+          Each (live URL, target) pair becomes one monitored backlink; a row with Target 2 gives two. Vendor, type, date, DA, traffic and price are kept {IMPORT_LABEL_SHEET}. Okara then
+          fetches each live article (robots.txt respected) and checks the link to your page: dofollow, nofollow, sponsored or ugc.
+        </p>
+      </div>
+    );
+  }
   const m = mapping as DocMapping;
   return (
     <div className="grid gap-3 sm:grid-cols-2">
@@ -653,7 +679,13 @@ function TabCard({
             {syncable && tab.keepInSync && (
               <p className="text-xs text-zinc-600 dark:text-zinc-400">
                 Okara re-reads this tab on schedule: new rows are added
-                {tab.destination === "implemented_links" ? "" : tab.destination === "geo_prompts" ? "; removed questions are archived" : "; removed domains stop being tracked (history kept)"}.
+                {tab.destination === "implemented_links"
+                  ? ""
+                  : tab.destination === "geo_prompts"
+                    ? "; removed questions are archived"
+                    : tab.destination === "backlinks"
+                      ? "; rows removed from the sheet stop being monitored (marked inactive, check history kept)"
+                      : "; removed domains stop being tracked (history kept)"}.
               </p>
             )}
           </div>

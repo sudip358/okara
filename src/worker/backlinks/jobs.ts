@@ -384,16 +384,21 @@ export async function processBatch(env: Env, db: Db, jobId: string, workspaceId:
     try {
       result = await checkBacklink({ liveUrl: b.live_url, targetUrl: b.target_url, anchorExpected: b.anchor_expected }, site, cache, budget, deps);
     } catch (e) {
-      if (!(e instanceof FetchBudgetExhausted)) throw e;
-      if (usedBefore > 0) break; // retried with a fresh budget in the next batch
-      // Even a full budget was not enough (a very long robots/redirect chain): record it instead of retrying forever.
-      result = {
-        ...blankResult(),
-        status: "fetch_failed",
-        errorCode: "fetch_budget",
-        statusReason: `Checking this page needs more than ${budget.limit} requests (robots.txt and redirect hops); not completed.`,
-        fetches: budget.used - usedBefore,
-      };
+      if (!(e instanceof FetchBudgetExhausted)) {
+        // An unexpected error must not stall the job on this backlink: record it and move on.
+        console.error("backlink check error", e instanceof Error ? e.message.slice(0, 200) : "unknown");
+        result = { ...blankResult(), status: "fetch_failed", errorCode: "internal", statusReason: "The check failed unexpectedly; it is tried again in the next check.", fetches: budget.used - usedBefore };
+      } else if (usedBefore > 0) break; // retried with a fresh budget in the next batch
+      else {
+        // Even a full budget was not enough (a very long robots/redirect chain): record it instead of retrying forever.
+        result = {
+          ...blankResult(),
+          status: "fetch_failed",
+          errorCode: "fetch_budget",
+          statusReason: `Checking this page needs more than ${budget.limit} requests (robots.txt and redirect hops); not completed.`,
+          fetches: budget.used - usedBefore,
+        };
+      }
     }
     const now = clock();
     const ts = iso(now);

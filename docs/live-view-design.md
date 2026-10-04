@@ -1132,3 +1132,47 @@ found in crawl of <date>"), one after it (pending the next crawl). Accepted-only
 
 **Not shown:** verification of links that are only suggested (open), per-URL link counts (the Link graph tab has them),
 and anything about link equity, value or expected ranking change: the workbench stores none of it.
+
+## 19. Live Backlinks (amendment 2026-10-04, docs/build-kit.md [A38])
+
+Owner request: "Add a live tab for backlink monitor as well … In live action create a separate container for each
+section: backlink live check; dofollow/nofollow check; current status; new status (e.g. earlier it was dofollow, now
+nofollow; or 404, redirected, etc.)". A separate Live tab, `/projects/:pid/live/backlinks`, with its own sidebar entry
+"Live Backlinks" right after "Live SEO" / "Live GEO" (a pulsing dot with screen-reader text while a backlink check job
+is queued or running: `BacklinkNavDot`, one shared poller of `GET /backlinks/feed?limit=0`, 60 s idle / 5 s while a
+job runs, visible tab only). It is not a run replay: the backlink monitor has no agent run; the containers show the
+stored checks (docs/api.md "Backlinks"). Code: `src/web/pages/live/backlinks/{LiveBacklinksPage,BacklinkContainers,
+actions,job-store,BacklinkNavDot}.tsx|ts`, helpers in `src/web/pages/backlinks/lib.ts`. Tests:
+`tests/backlinks-web.test.ts`.
+
+| # | Container [accent] | Data | Button |
+|---|---|---|---|
+| 01 | Backlink live check [sky] | `GET /backlinks/feed` + `POST /backlinks/check/advance` while a job runs: progress "Checking n of m" with a progress bar (`role=progressbar`), robots-blocked, failed / page errors, changes, requests and batches; the job's latest checks as they land (live article host + path, status chip, anchor, time). Caption: running/last check (manual run, recheck or weekly check) and "Updates every 2 s while the check runs" / "Idle: not polling". | ▶ Run backlink check |
+| 02 | Dofollow / nofollow check [emerald] | `summary.byStatus` counts (dofollow, nofollow, sponsored, ugc) and the counter "n dofollow of m pages read"; the loaded rows grouped by rel, with page-level nofollow (meta robots / X-Robots-Tag) as its own group; anchor found vs expected ("≠ expected") and the match / differ / no-expected counts. | ▶ Run backlink check |
+| 03 | Current status [amber] | Buckets from the server counts: live + dofollow, live + nofollow / sponsored / ugc, link missing, page 404 / 5xx, redirected, robots blocked, fetch failed, target broken (overlaps the others), not checked yet; the first 50 rows by status (status chip with the reason as tooltip, broken target, target, last checked); the summary's notes (site not verified, scheduled runs off). Caption: latest check and next weekly check. | ▶ Recheck failed/changed (failing pages first, then rows changed in the last 7 days; ≤ 30 ids; 30 rows per project per hour) |
+| 04 | New status (changes) [rose] | `GET /backlinks/events` (last 30 days): "was dofollow → now nofollow", "Link removed", "Page now 404", "Redirected to …", "noindex added", "Anchor changed", "Target now 404", "Recovered", with the article and date; losses marked ▼ in rose (colour plus symbol plus words); link "Open Backlinks ›" (`?changed=30`). Counter: changes, sub "n losses". | ▶ Run backlink check |
+
+**Run buttons** reuse the section 16 `RunActionsProvider` / `SectionButton` / confirm dialog (`call` actions to `POST
+/backlinks/check`): disabled with the reason in demo projects, while loading, with no backlinks ("import your built
+links"), while a full check runs (label "Checking…", reason "A backlink check is running (Checking n of m)"), and when the
+3 manual checks of the UTC day are used. The dialog says what is fetched (each live article and its robots.txt, our
+target pages), the politeness and batch limits, "Free: no paid provider is called", and the manual checks left today.
+The header carries the same "▶ Run backlink check" (no "Run all" menu: there is one action).
+
+**Data plan:** summary, rows (first 100, sorted by status) and events load on mount and again when a check ends (the
+feed's job leaves queued/running) or a run button finished. While a job runs the view calls `POST
+/backlinks/check/advance {after}` sequentially at most every 2 s (`LIVE_POLL_MS`), visible tab only: each call runs one
+more bounded batch in its own invocation and returns the checks stored since `after`, merged newest-first (≤ 50).
+Nothing polls while idle. Replay is not offered.
+
+**States:** loading shimmer; empty / setup (no backlinks: "Import your built links sheet (the Built Links tab maps
+automatically …)" with a link to Import; demo projects: "demo projects never fetch pages"); data; running (progress,
+live rows, arrival highlight `lv-row-in`, a static marker under reduced motion); errors use the shared "Could not load …" state.
+
+**Layout:** a 12-column grid at `xl` with each container `xl:col-span-6` at 420 px (internal scroll), stacked below `xl`;
+tables are `table-fixed` with secondary columns dropped below the container's `@lg` width; no horizontal page scroll at
+390 px; light and dark through the shared zinc / accent tokens; the progress bar's width transition and arrival
+animation are off under `prefers-reduced-motion`.
+
+**Not shown:** no backlink "value", authority or traffic estimate from Okara; DA, traffic and price appear only on the
+Backlinks page as the owner's own sheet labels.

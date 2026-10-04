@@ -52,10 +52,12 @@ export function historyLabel(engine: string, cells: readonly LiveHistoryCell[], 
 }
 
 // ------------------------------------------------------------------ sheet syncs
-export const DESTINATION_LABEL: Record<LiveSheetSyncRow["destination"], string> = {
+/** Also labels a "backlinks" sync (backlink monitor [A38]); the shared row type lists the original three. */
+export const DESTINATION_LABEL: Record<LiveSheetSyncRow["destination"], string> & Partial<Record<string, string>> = {
   competitors: "Competitors",
   geo_prompts: "AI questions (GEO prompts)",
   implemented_links: "Placed internal links",
+  backlinks: "Backlinks to monitor",
 };
 
 export function syncState(row: Pick<LiveSheetSyncRow, "enabled" | "lastStatus" | "lastErrorCode">): { label: string; tone: "keep" | "change" | "review" | "none" } {

@@ -43,7 +43,7 @@ export interface ConfirmText {
  * What a finished tool call reloads: an existing panel's data or a section 17 container. "links" (link analysis) and
  * "link-graph" (graph rebuild) both rebuild the stored link graph, so both also reload the section 18 containers.
  */
-export type ReloadKey = "buyer" | "links" | "link-graph" | "sheets" | "competitor-gap";
+export type ReloadKey = "buyer" | "links" | "link-graph" | "sheets" | "competitor-gap" | "backlinks";
 
 /** A pick the confirm dialog asks for before calling (sent as `body[field]`), e.g. which competitor domain. */
 export interface ActionChoice {
@@ -416,11 +416,12 @@ export function competitorRefreshAction(ctx: { projectId: string; demo: boolean 
   };
 }
 
-const SYNC_EFFECT: Record<LiveSheetSyncRow["destination"], string> = {
+const SYNC_EFFECT: Record<LiveSheetSyncRow["destination"], string> & Partial<Record<string, string>> = {
   competitors:
     "New domains become tracked competitors (at most 5); with automatic pull on, each queues a paid DataForSEO refresh within its daily caps. Domains removed from the sheet stop being tracked.",
   geo_prompts: "New questions are added to the prompt set pending your approval; questions removed from the sheet are archived (earlier answers are kept).",
   implemented_links: "New rows are recorded as placed links (append-only).",
+  backlinks: "New rows become monitored backlinks; rows removed from the sheet stop being monitored (check history kept).",
 };
 
 /** SEO 14 / GEO 10 per-row "Sync now": POST /import/syncs/:syncId/run (owner; rate-limited per tab). */

@@ -8,6 +8,7 @@
  * Status transitions: open -> approved | dismissed; approved -> implemented | dismissed;
  * dismissed -> open (reopen). "Implemented" is a manual mark; it never claims the site changed.
  */
+import { backlinkAttention } from "../backlinks/service";
 import { Hono } from "hono";
 import { z } from "zod";
 import type {
@@ -480,6 +481,8 @@ export async function buildAttentionFeed(env: AppEnv["Bindings"], db: Db, projec
     importSyncs: syncs.map((s) => ({ id: s.id, spreadsheetTitle: s.spreadsheetTitle, tab: s.tab, destination: s.destination, code: s.lastErrorCode, message: s.lastError, lastRunAt: s.lastRunAt })),
     // Internal links workbench: implemented or sheet-placed links the latest crawl of their source page did not find.
     linkVerification: await linkVerificationAttention(db, project),
+    // Backlink monitor: new negative changes (lost, nofollow, 404, redirected, noindex, target broken) in the last 7 days.
+    backlinkChanges: await backlinkAttention(db, project, now),
   };
   return feed;
 }
