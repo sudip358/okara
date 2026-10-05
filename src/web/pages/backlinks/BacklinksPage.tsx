@@ -4,9 +4,9 @@
  * Summary tiles, filters, table, CSV export, a detail drawer (check history, redirect chain, changes) with a per-row
  * Recheck, and "Run backlink check" (the section 16 confirm dialog). Every sheet and page string is plain text.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router";
-import { BACKLINK_STATUSES, type BacklinkDetail, type BacklinkFeed, type BacklinkFilterStatus, type BacklinkListResponse, type BacklinkRow, type BacklinkSummary } from "@shared/backlinks";
+import { BACKLINK_STATUSES, MAX_RECHECK_IDS, type BacklinkDetail, type BacklinkJobView, type BacklinkFeed, type BacklinkFilterStatus, type BacklinkListResponse, type BacklinkRow, type BacklinkSummary } from "@shared/backlinks";
 import { api, errorMessage } from "@web/lib/api";
 import { useApi } from "@web/lib/hooks";
 import { formatDateTime, formatRelative } from "@web/lib/format";
@@ -50,7 +50,49 @@ export function SummaryTiles({ s }: { s: BacklinkSummary }) {
   );
 }
 
-function BacklinkTable({ rows, onOpen }: { rows: BacklinkRow[]; onOpen: (r: BacklinkRow) => void }) {
+/**
+ * Per-row check state for the Change column: "pending" while a recheck the user clicked has not produced a newer
+ * check, "queued" while a full check job has not reached the row yet, else idle (shows the last change + a button).
+ */
+export function rowCheckState(r: BacklinkRow, pendingSince: string | undefined, job: BacklinkJobView | null | undefined): "pending" | "queued" | "idle" {
+  if (pendingSince && !(r.lastCheckedAt && r.lastCheckedAt > pendingSince)) return "pending";
+  if (r.active && job && jobActive(job) && job.scope === "all" && (!r.lastCheckedAt || r.lastCheckedAt < job.createdAt)) return "queued";
+  return "idle";
+}
+
+function RowCheckCell({ r, state, job, disabledReason, onCheck }: { r: BacklinkRow; state: "pending" | "queued" | "idle"; job: BacklinkJobView | null | undefined; disabledReason: string | null; onCheck: (r: BacklinkRow) => void }) {
+  if (state === "pending") {
+    return (
+      <Button size="sm" variant="secondary" loading disabled aria-live="polite">
+        Checking…
+      </Button>
+    );
+  }
+  if (state === "queued") {
+    return (
+      <Button size="sm" variant="ghost" disabled title="Waiting for the running check to reach this link" aria-live="polite">
+        Queued{job ? ` · ${job.done}/${job.total}` : ""}
+      </Button>
+    );
+  }
+  return (
+    <div className="flex min-w-0 flex-col items-start gap-1">
+      <ChangeBadge text={r.lastChangeText} negative={r.lastChangeNegative} at={r.lastChangeAt} />
+      <Button
+        size="sm"
+        variant={r.lastCheckedAt ? "ghost" : "secondary"}
+        disabled={!!disabledReason || !r.active}
+        title={disabledReason ?? (!r.active ? "Inactive (removed from sheet)" : undefined)}
+        onClick={() => onCheck(r)}
+        aria-label={`${r.lastCheckedAt ? "Recheck" : "Check"} ${r.liveUrl}`}
+      >
+        {r.lastCheckedAt ? "↻ Recheck" : "▶ Check"}
+      </Button>
+    </div>
+  );
+}
+
+function BacklinkTable({ rows, onOpen, pending, job, disabledReason, onCheck }: { rows: BacklinkRow[]; onOpen: (r: BacklinkRow) => void; pending: Record<string, string>; job: BacklinkJobView | null | undefined; disabledReason: string | null; onCheck: (r: BacklinkRow) => void }) {
   return (
     <div className="min-w-0 overflow-x-hidden">
       <table className="w-full table-fixed text-sm" data-testid="backlink-table">
@@ -116,7 +158,7 @@ function BacklinkTable({ rows, onOpen }: { rows: BacklinkRow[]; onOpen: (r: Back
                   {r.lastCheckedAt ? formatRelative(r.lastCheckedAt) : "never"}
                 </td>
                 <td className="min-w-0 py-1.5">
-                  <ChangeBadge text={r.lastChangeText} negative={r.lastChangeNegative} at={r.lastChangeAt} />
+                  <RowCheckCell r={r} state={rowCheckState(r, pending[r.id], job)} job={job} disabledReason={disabledReason} onCheck={onCheck} />
                 </td>
               </tr>
             );
@@ -161,6 +203,66 @@ export function BacklinksPage() {
   }, [running, summary.data, base, projectId]);
 
   const onReload = useCallback(() => setReloadKey((k) => k + 1), []);
+
+  // Row checks from the Change column: clicks within 600 ms go out as one recheck request (max MAX_RECHECK_IDS ids).
+  const [pending, setPending] = useState<Record<string, string>>({});
+  const [rowCheckError, setRowCheckError] = useState<unknown>(null);
+  const queueRef = useRef<string[]>([]);
+  const flushRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushQueue = useCallback(async () => {
+    flushRef.current = null;
+    const ids = queueRef.current.splice(0, MAX_RECHECK_IDS);
+    if (!ids.length) return;
+    try {
+      await api(`${base}/check`, { method: "POST", body: { ids } });
+      setRowCheckError(null);
+    } catch (e) {
+      setRowCheckError(e);
+      setPending((p) => {
+        const next = { ...p };
+        for (const id of ids) delete next[id];
+        return next;
+      });
+    }
+    if (queueRef.current.length) flushRef.current = setTimeout(() => void flushQueue(), 600);
+    onReload();
+  }, [base, onReload]);
+  const onRowCheck = useCallback(
+    (r: BacklinkRow) => {
+      setPending((p) => ({ ...p, [r.id]: new Date().toISOString() }));
+      if (!queueRef.current.includes(r.id)) queueRef.current.push(r.id);
+      if (!flushRef.current) flushRef.current = setTimeout(() => void flushQueue(), 600);
+    },
+    [flushQueue],
+  );
+  // Drop pending marks once the row shows a check newer than the click.
+  useEffect(() => {
+    const rows = list.data?.rows;
+    if (!rows) return;
+    setPending((p) => {
+      let changed = false;
+      const next = { ...p };
+      for (const r of rows) {
+        const since = next[r.id];
+        if (since && r.lastCheckedAt && r.lastCheckedAt > since) {
+          delete next[r.id];
+          changed = true;
+        }
+      }
+      return changed ? next : p;
+    });
+  }, [list.data]);
+  // While a row check is pending, drive batches and refresh every 3 s (the job-wide poll above runs every 5 s).
+  const anyPending = Object.keys(pending).length > 0;
+  useEffect(() => {
+    if (!anyPending) return;
+    const t = setTimeout(() => {
+      void api<BacklinkFeed>(`${base}/check/advance`, { method: "POST", body: {} })
+        .catch(() => null)
+        .finally(onReload);
+    }, 3_000);
+    return () => clearTimeout(t);
+  }, [anyPending, reloadKey, base, onReload]);
   const runAction = runCheckAction({ projectId, demo: project.isDemo, summary: summary.data, recheckIds: [] });
 
   const doRecheck = async (r: BacklinkRow) => {
@@ -264,7 +366,21 @@ export function BacklinksPage() {
               ) : pageRows.length === 0 ? (
                 <p className="py-6 text-center text-sm text-zinc-600 dark:text-zinc-400">No backlinks match these filters.</p>
               ) : (
-                <BacklinkTable rows={pageRows} onOpen={(r) => setOpen(r)} />
+                <>
+                  <BacklinkTable
+                    rows={pageRows}
+                    onOpen={(r) => setOpen(r)}
+                    pending={pending}
+                    job={summary.data?.job}
+                    disabledReason={project.isDemo ? "Demo project: checks are disabled." : null}
+                    onCheck={onRowCheck}
+                  />
+                  {rowCheckError !== null && (
+                    <p role="alert" className="mt-2 text-xs text-red-700 dark:text-red-400">
+                      Could not start the check: {errorMessage(rowCheckError)}
+                    </p>
+                  )}
+                </>
               )}
               {total > filters.limit && (
                 <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
