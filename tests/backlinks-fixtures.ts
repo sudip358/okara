@@ -63,6 +63,8 @@ export function deps(fetchImpl: typeof fetch): CheckDeps & { slept: number[] } {
   return {
     fetchImpl,
     userAgent: UA,
+    // Most checker tests cover the robots.txt-respecting path; the production default (off) has its own test.
+    respectRobots: true,
     clock: () => now,
     sleep: async (ms: number) => {
       slept.push(ms);

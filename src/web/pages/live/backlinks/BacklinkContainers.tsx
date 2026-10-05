@@ -98,7 +98,7 @@ export function LiveCheckPanel({
       testId="backlinks-live"
       reduced={reduced}
       className={PANEL}
-      subtitle="Each live article being fetched now: robots.txt first, then the page, then the link to your site."
+      subtitle="Each live article being fetched now: the page, then the link to your site (robots.txt is not consulted for your own placed links)."
       captions={[
         job ? `${running ? "Running" : job.status === "failed" ? "Stopped" : "Last"} ${TRIGGER_LABEL[job.trigger]} · started ${shortDay(job.startedAt ?? job.createdAt)}` : "No check has run yet",
         running ? "Updates every 2 s while the check runs" : "Idle: not polling",

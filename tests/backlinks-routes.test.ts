@@ -150,8 +150,8 @@ describe("check jobs", () => {
     expect(sum1.byStatus.dofollow).toBe(10);
     expect(sum1.dofollow).toEqual({ n: 10, m: 10 });
     expect(sum1.changes.last7).toBe(0); // first check is the baseline
-    // robots.txt fetched once per host per job; each target once per job.
-    expect(ff.calls.filter((c) => c === "https://site0.example.net/robots.txt")).toHaveLength(1);
+    // Owner setting: robots.txt is not consulted for backlink checks (never requested); each target once per job.
+    expect(ff.calls.filter((c) => c.endsWith("/robots.txt") && !c.includes(OUR_HOST))).toHaveLength(0);
     expect(ff.calls.filter((c) => c === T("/collections/c0"))).toHaveLength(1);
 
     // Second check: two links become nofollow, one page 404, one link removed, one target 404.

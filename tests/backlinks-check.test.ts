@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { FETCHES_PER_INVOCATION } from "@shared/backlinks";
-import { checkBacklink, emptyCache, FetchBudgetExhausted, type CheckTarget } from "@worker/backlinks/check";
+import { BACKLINK_RESPECT_ROBOTS, checkBacklink, emptyCache, FetchBudgetExhausted, type CheckTarget } from "@worker/backlinks/check";
 import { analyzePage, parseXRobotsTag, relClass } from "@worker/backlinks/html";
 import { assertPublicExternalUrl, CrawlFetchError, publicExternalFetch } from "@worker/seo/ssrf";
 import { linkUrlKey } from "@shared/import";
@@ -124,6 +124,21 @@ describe("backlink checker: page states", () => {
     expect(r.status).toBe("robots_blocked");
     expect(r.robots).toBe("disallowed");
     expect(calls).not.toContain(LIVE);
+  });
+
+  it("default (owner setting): robots.txt is not consulted, the page is fetched and the link classified", async () => {
+    const ff = fakeFetch({
+      ...targetOk,
+      ["https://decor-blog.example.net/robots.txt"]: ok("User-agent: *\nDisallow: /", { "content-type": "text/plain" }),
+      [LIVE]: ok(article(`<p>See <a href="https://${OUR_HOST}/collections/pulls">brass cabinet pulls</a>.</p>`)),
+    });
+    const d = { ...deps(ff.fetch), respectRobots: undefined };
+    expect(BACKLINK_RESPECT_ROBOTS).toBe(false);
+    const r = await checkBacklink({ liveUrl: LIVE, targetUrl: TARGET, anchorExpected: "brass cabinet pulls" }, SITE, emptyCache(), { limit: FETCHES_PER_INVOCATION, used: 0 }, d);
+    expect(r.status).toBe("dofollow");
+    expect(r.robots).toBe("not_consulted");
+    expect(ff.calls).not.toContain("https://decor-blog.example.net/robots.txt");
+    expect(ff.calls).toContain(LIVE);
   });
 
   it("robots.txt unreachable (5xx) is treated as disallow-all", async () => {

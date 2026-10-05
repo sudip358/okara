@@ -72,9 +72,19 @@ export interface JobCache {
 
 export const emptyCache = (): JobCache => ({ robots: new Map(), pace: new Map(), targets: new Map(), dirty: new Set() });
 
+/**
+ * Owner decision (2026-10-05, "don't respect robots.txt for backlink monitor"): the backlink checker verifies the
+ * owner's own placed links on single article URLs from the owner's sheet, so robots.txt is NOT consulted by default.
+ * Still enforced: the public-host SSRF guard, the honest User-Agent, >= 1 s between requests per host, the per-
+ * invocation request cap. Our own site's crawl (seo/crawl) keeps respecting robots.txt.
+ */
+export const BACKLINK_RESPECT_ROBOTS = false;
+
 export interface CheckDeps {
   fetchImpl: typeof fetch;
   userAgent: string;
+  /** Consult robots.txt before fetching an article (default BACKLINK_RESPECT_ROBOTS). */
+  respectRobots?: boolean;
   /** Wall-clock milliseconds (tests inject a fake clock). */
   clock?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -361,9 +371,10 @@ export async function checkBacklink(input: CheckInput, site: CheckTarget, cache:
 
   let res: GuardedResponse;
   try {
-    const first = await robotsFor(start, req, cache, deps);
+    const useRobots = deps.respectRobots ?? BACKLINK_RESPECT_ROBOTS;
+    const first: RobotsVerdict = useRobots ? await robotsFor(start, req, cache, deps) : { status: "not_found", httpStatus: null, group: null };
     const firstAllowed = robotsAllowsUrl(first, start);
-    result.robots = robotsWord(first, firstAllowed);
+    result.robots = useRobots ? robotsWord(first, firstAllowed) : "not_consulted";
     if (!firstAllowed) throw new RobotsBlocked(start, first.status === "unreachable");
     res = await publicExternalFetch(deps.fetchImpl, start.toString(), {
       maxBytes: PAGE_MAX_BYTES,
@@ -374,7 +385,7 @@ export async function checkBacklink(input: CheckInput, site: CheckTarget, cache:
       userAgent: deps.userAgent,
       onRedirect: (hop) => result.redirectChain.push(hop),
       beforeRequest: async (u, hop) => {
-        const v = hop === 0 ? first : await robotsFor(u, req, cache, deps);
+        const v = hop === 0 || !useRobots ? first : await robotsFor(u, req, cache, deps);
         if (hop > 0 && !robotsAllowsUrl(v, u)) throw new RobotsBlocked(u, v.status === "unreachable");
         await req.before(u.hostname, (v.group?.crawlDelay ?? 0) * 1000);
       },
