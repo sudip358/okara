@@ -39,7 +39,8 @@ export default {
         console.error("import sync tick failed", e instanceof Error ? e.message.slice(0, 200) : "unknown");
       }),
     );
-    // Backlink monitor: weekly scheduling + one bounded batch (<= 20 external fetches) of the oldest check job.
+    // Backlink monitor: weekly scheduling + one bounded batch (<= 20 external fetches) of the oldest check job, then at
+    // most one browser re-check (Browser Run, within the daily browser budget; backlinks/browser.ts).
     ctx.waitUntil(
       processDueBacklinkChecks(env, now).catch((e) => {
         console.error("backlink check tick failed", e instanceof Error ? e.message.slice(0, 200) : "unknown");

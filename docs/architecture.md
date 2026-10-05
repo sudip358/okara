@@ -201,13 +201,18 @@ Import (Sheets via OAuth or Maton, or CSV) ──► destination "backlinks" ─
 POST /backlinks/check ──► backlink_jobs (queued; 1 active per project and scope) ──► processBatch in ctx.waitUntil
 POST /backlinks/check/advance (Live view / Backlinks page while a job runs) ──► processBatch (lease-guarded)
 cron (*/15) ──► processDueBacklinkChecks: weekly scheduling + one processBatch
-processBatch: ≤ 8 backlinks, ≤ 20 external requests ──► checkBacklink (robots.txt per host, article via
-  publicExternalFetch, our target via guardedFetch) ──► backlink_checks + diffChecks ──► backlink_events, backlinks summary
+processBatch: ≤ 8 backlinks, ≤ 20 external requests ──► checkBacklink (article via publicExternalFetch, our target
+  via guardedFetch) ──► backlink_checks + diffChecks ──► backlink_events, backlinks summary
+  └─ missing / 403·429·503 / fetch_failed ──► backlinks.browser_state = pending (events wait)
+advance (no plain work this invocation) or cron (after its batch) ──► processBrowserStep: 1 page
+  ──► budget (browser_usage, UTC day) + lease (browser_lease: 1 browser, ≥ 20 s between launches)
+  ──► Browser Run binding BROWSER (@cloudflare/puppeteer): interception (SSRF guard, no images/media/fonts),
+      goto 20 s ──► page.content() ──► classifyLoadedPage (same rules) ──► check method "browser" + events on final
 ```
 
 - **External fetch exception** (owner-approved, [A38]): article URLs come only from the owner's sheet/CSV. Every request
   goes through `seo/ssrf.ts` `publicExternalFetch` (public hostnames only, every hop re-validated, no IP literals or
-  local names, http(s), default port, 15 s, 2 MB, HTML only); robots.txt is respected per host for OkaraBot; at most 1
+  local names, http(s), default port, 15 s, 2 MB, HTML only); robots.txt is NOT consulted for backlink articles (owner decision 2026-10-05; [A38] update); at most 1
   request per second per host. Our own target URLs use the crawl's verified-host `guardedFetch`.
 - **Workers Free budget**: one batch per invocation (≤ 20 external requests including robots.txt, redirect hops and
   target checks; ≤ 8 backlinks; about 6 D1 calls, results written in one atomic `db.batch`); a 90 s lease on the job
@@ -216,6 +221,14 @@ processBatch: ≤ 8 backlinks, ≤ 20 external requests ──► checkBacklink 
   is retried next batch; one that cannot finish even with a full budget is recorded as `fetch_failed` (`fetch_budget`).
 - **CPU**: the article is not parsed into a DOM; comments and scripts are stripped and only `<a>` tags containing our
   host name, `<meta>` robots and `<link rel=canonical>` are read (`backlinks/html.ts`).
+- **Browser fallback** (`backlinks/browser.ts`, [A38] 2026-10-05): Cloudflare Browser Run via the Workers binding
+  `BROWSER` and `@cloudflare/puppeteer` (loaded lazily, its own chunk). Not the default path: only rows a plain check
+  queued. One page per invocation, one Okara browser at a time (global D1 lease), ≥ 20 s between launches, a daily
+  browser-time cap (default 8 of the free 10 minutes, `BACKLINK_BROWSER_MS_PER_DAY`) counted as wall time with a 60 s
+  pre-charged reservation (the binding exposes no per-session usage header); over the cap rows wait for the next UTC
+  day. The SSRF guarantee holds inside the browser: the URL is validated before launch and every request (redirect hops
+  and subresources included) is re-validated by request interception; images, media and fonts are aborted. Without a
+  binding (tests, plain `npm run dev`) rows end as "browser unavailable" with the plain result kept.
 - **Change detection** (`backlinks/events.ts`) is pure code against the previous stored check; losses feed the Overview
   attention feed. Checks keep the latest 10 per backlink, events the latest 50, jobs the latest 50 per project.
 

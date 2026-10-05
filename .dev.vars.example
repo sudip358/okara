@@ -51,3 +51,7 @@ GLOBAL_PROVIDER_CALLS_PER_DAY=
 GLOBAL_WRITER_TOKENS_PER_DAY=
 # Non-brand GSC queries in scope of the buyer-queries view. Empty = 5000 (code default); clamped to 20000.
 BUYER_QUERIES_MAX=
+# Daily browser-time cap (ms) for backlink browser re-checks (Browser Run binding BROWSER in wrangler.jsonc).
+# Empty = 480000 (8 of the free 10 minutes per day); clamped to 540000; 0 = off. Without "remote": true on the
+# binding, local dev may have no real browser: re-checks then end as "browser unavailable" (plain result kept).
+BACKLINK_BROWSER_MS_PER_DAY=

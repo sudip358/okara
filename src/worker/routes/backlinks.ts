@@ -127,7 +127,7 @@ backlinkRoutes.get("/projects/:pid/backlinks", async (c) => {
 
 backlinkRoutes.get("/projects/:pid/backlinks/summary", async (c) => {
   const { db, row } = await access(c);
-  return c.json({ data: await backlinkSummary(db, row, c.get("now")) });
+  return c.json({ data: await backlinkSummary(db, row, c.get("now"), true, c.env) });
 });
 
 backlinkRoutes.get("/projects/:pid/backlinks/events", async (c) => {

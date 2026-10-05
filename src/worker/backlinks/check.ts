@@ -353,8 +353,6 @@ export async function checkBacklink(input: CheckInput, site: CheckTarget, cache:
     bytes: 0,
     truncated: false,
   };
-  const targetKey = linkUrlKey(input.targetUrl);
-
   // Our target first (cheap, deduplicated per job): its result is part of every check.
   const target = await checkTarget(input.targetUrl, site, req, cache, deps);
   result.targetStatus = target.status;
@@ -408,37 +406,63 @@ export async function checkBacklink(input: CheckInput, site: CheckTarget, cache:
     return { ...result, status: "fetch_failed", errorCode: code, statusReason: fetchErrorText(code, e) };
   }
   result.fetches = req.fetches;
-  result.httpStatus = res.status;
   result.bytes = res.bytes;
-  result.truncated = res.truncated;
-  const movedOff = linkUrlKey(res.finalUrl) !== linkUrlKey(start.toString());
-  result.finalUrl = res.finalUrl !== start.toString() ? res.finalUrl : null;
+  return classifyLoadedPage(result, { status: res.status, finalUrl: res.finalUrl, startUrl: start.toString(), body: res.body, xRobotsTag: res.headers.get("x-robots-tag"), truncated: res.truncated }, input, site);
+}
 
-  if (res.status >= 400) {
-    return { ...result, status: "page_error", statusReason: `The page returned HTTP ${res.status}${movedOff ? ` after redirecting to ${res.finalUrl}` : ""}.` };
+/** A loaded article page (plain fetch or headless browser), as the classification needs it. */
+export interface LoadedPage {
+  /** HTTP status of the main document response. */
+  status: number;
+  /** URL after redirects. */
+  finalUrl: string;
+  /** The URL that was requested first (the stored live URL, validated). */
+  startUrl: string;
+  /** HTML (plain: the response body; browser: the rendered DOM serialized by page.content()). */
+  body: string;
+  xRobotsTag: string | null;
+  truncated: boolean;
+}
+
+/**
+ * Status / rel / anchor / page-level robots classification of a loaded page. Shared by the plain checker and the
+ * browser re-check (browser.ts) so both apply identical rules: page_error for >= 400, dofollow when any matching link is
+ * followable and the page does not nofollow every link, redirected when the article moved to another URL, etc.
+ * `base` carries the fields already known (target result, redirect chain, robots, fetches).
+ */
+export function classifyLoadedPage(base: CheckResult, page: LoadedPage, input: CheckInput, site: CheckTarget): CheckResult {
+  const result: CheckResult = { ...base };
+  const targetKey = linkUrlKey(input.targetUrl);
+  result.httpStatus = page.status;
+  result.truncated = page.truncated;
+  const movedOff = linkUrlKey(page.finalUrl) !== linkUrlKey(page.startUrl);
+  result.finalUrl = page.finalUrl !== page.startUrl ? page.finalUrl : null;
+
+  if (page.status >= 400) {
+    return { ...result, status: "page_error", statusReason: `The page returned HTTP ${page.status}${movedOff ? ` after redirecting to ${page.finalUrl}` : ""}.` };
   }
-  if (res.status < 200 || res.status >= 300) {
-    return { ...result, status: "fetch_failed", errorCode: "unexpected_status", statusReason: `The page returned HTTP ${res.status}.` };
+  if (page.status < 200 || page.status >= 300) {
+    return { ...result, status: "fetch_failed", errorCode: "unexpected_status", statusReason: `The page returned HTTP ${page.status}.` };
   }
 
-  const xrt = res.headers.get("x-robots-tag");
+  const xrt = page.xRobotsTag;
   const header = parseXRobotsTag(xrt);
-  const page = analyzePage(res.body, res.finalUrl, site.ourHost, targetKey);
+  const analysis = analyzePage(page.body, page.finalUrl, site.ourHost, targetKey);
   result.xRobotsTag = xrt ? xrt.slice(0, 300) : null;
-  result.metaRobots = page.metaRobots;
-  result.pageNoindex = header.noindex || page.metaNoindex;
-  result.pageNofollow = header.nofollow || page.metaNofollow;
-  result.canonicalUrl = page.canonicalElsewhere;
-  result.links = page.links;
-  const targetLinks = page.links.filter((l) => l.match === "target");
-  const matching = targetLinks.length ? targetLinks : page.links;
-  result.linkMatch = targetLinks.length ? "target" : page.links.length ? "host" : "none";
+  result.metaRobots = analysis.metaRobots;
+  result.pageNoindex = header.noindex || analysis.metaNoindex;
+  result.pageNofollow = header.nofollow || analysis.metaNofollow;
+  result.canonicalUrl = analysis.canonicalElsewhere;
+  result.links = analysis.links;
+  const targetLinks = analysis.links.filter((l) => l.match === "target");
+  const matching = targetLinks.length ? targetLinks : analysis.links;
+  result.linkMatch = targetLinks.length ? "target" : analysis.links.length ? "host" : "none";
 
   let rel: LinkRel;
   let reason: string | null = null;
   if (matching.length === 0) {
     rel = "missing";
-    reason = res.truncated
+    reason = page.truncated
       ? `No link to your site in the first ${Math.round(PAGE_MAX_BYTES / 1024 / 1024)} MB of the page (the page is larger; the rest was not read).`
       : "The page loaded but has no link to your site.";
   } else {
@@ -456,7 +480,7 @@ export async function checkBacklink(input: CheckInput, site: CheckTarget, cache:
   result.linkRel = rel;
   if (movedOff) {
     result.status = "redirected";
-    result.statusReason = `The article redirects to ${res.finalUrl} (${result.redirectChain.length} hop${result.redirectChain.length === 1 ? "" : "s"}); on that page the link is ${rel === "missing" ? "missing" : rel}.${reason ? ` ${reason}` : ""}`;
+    result.statusReason = `The article redirects to ${page.finalUrl} (${result.redirectChain.length} hop${result.redirectChain.length === 1 ? "" : "s"}); on that page the link is ${rel === "missing" ? "missing" : rel}.${reason ? ` ${reason}` : ""}`;
   } else {
     result.status = rel === "missing" ? "missing" : rel;
     result.statusReason = reason;

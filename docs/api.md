@@ -585,17 +585,19 @@ Code: `src/worker/backlinks/{html,check,events,store,jobs,service}.ts`, `src/wor
 import destination in `src/worker/imports/destinations.ts`, `publicExternalFetch` / `assertPublicExternalUrl` in
 `src/worker/seo/ssrf.ts`. Web: `src/web/pages/backlinks/**`, `src/web/pages/live/backlinks/**`. Migration
 `0020_backlink_monitor.sql` (tables `backlinks`, `backlink_jobs`, `backlink_job_cache`, `backlink_checks`,
-`backlink_events`; `imports` / `import_syncs` rebuilt to accept the `backlinks` destination).
+`backlink_events`; `imports` / `import_syncs` rebuilt to accept the `backlinks` destination) and
+`0022_backlink_browser_recheck.sql` (browser fallback: `backlink_checks.method`, `backlinks.check_method` /
+`browser_*`, tables `browser_usage`, `browser_lease`; `src/worker/backlinks/browser.ts`).
 
 | Method | Path | Who | Body / query → Response |
 |---|---|---|---|
 | GET | `/projects/:pid/backlinks` | member | `?status=<BacklinkStatus or unchecked or target_broken>&vendor=&type=&changed=<days 1-365>&q=&inactive=1&sort=checked/status/host/vendor/date/da/traffic/changed&dir=asc/desc&offset=&limit=≤100` → `BacklinkListResponse` {rows, total, offset, limit, vendors, types, labels}; `&format=csv` → `text/csv` attachment (all matching rows, ≤ 2,000; cells starting with `= + - @` are prefixed with `'`) |
-| GET | `/projects/:pid/backlinks/summary` | member | `BacklinkSummary` {state ready/empty/demo, totals {active, inactive, checked, unchecked}, byStatus, dofollow {n, m} (m = checked pages read: found or missing), targetBroken, anchorMismatch, changes {last7, last30, negative7, negative30}, lastCheckAt, nextCheckAt (weekly; null when scheduled runs are off), job (running), lastJob, limits, canRun, verified, labels} |
+| GET | `/projects/:pid/backlinks/summary` | member | `BacklinkSummary` {state ready/empty/demo, totals {active, inactive, checked, unchecked}, byStatus, dofollow {n, m} (m = checked pages read: found or missing), targetBroken, anchorMismatch, changes {last7, last30, negative7, negative30}, lastCheckAt, nextCheckAt (weekly; null when scheduled runs are off), job (running), lastJob, limits, browser `BrowserSummary` {available, unavailableReason, waiting, unavailable, failed, usedMs (today, UTC, whole account), capMs, deferred, deferredUntil}, canRun, verified, labels} |
 | GET | `/projects/:pid/backlinks/events` | member | `?since=<ISO>` (default 30 days) `&negative=1&limit=≤200` → `BacklinkEventsResponse` {events (with liveUrl, targetUrl), since, total} |
 | GET | `/projects/:pid/backlinks/feed` | member | `?after=<ISO>&limit=0-50` → `BacklinkFeed` {job (running, else latest), items: latest checks of that job} |
 | GET | `/projects/:pid/backlinks/:id` | member | `BacklinkDetail` {backlink, checks (latest 10, with redirect chain, robots, meta robots, X-Robots-Tag, canonical, links found), events (latest 50)}; 404 outside the project |
 | POST | `/projects/:pid/backlinks/check` | member | `{}` = every active backlink (manual, 3 per project per UTC day) or `{ids: string[1-30]}` = recheck (30 rows per project per hour) → 202 `StartBacklinkCheckResult` {job, existing}; a running full check is returned (`existing: true`); a running recheck → 409; no backlinks → 409; demo → 409 `demo_project`; over a limit → 429 with the remaining count; unknown ids → 404 |
-| POST | `/projects/:pid/backlinks/check/advance` | member | `{after?: ISO}` → `BacklinkFeed`; runs one more lease-guarded batch of the project's running job (rechecks first) in `ctx.waitUntil`; 60 per project per minute |
+| POST | `/projects/:pid/backlinks/check/advance` | member | `{after?: ISO}` → `BacklinkFeed`; runs one more lease-guarded batch of the project's running job (rechecks first) in `ctx.waitUntil`; when that invocation did no plain work, one browser re-check of the project's oldest pending row instead (see "Browser re-checks"); 60 per project per minute |
 
 - **Statuses** (`BacklinkStatus`): `dofollow`, `nofollow`, `sponsored`, `ugc` (the matching link's rel; sponsored >
   ugc > nofollow when several; any followable matching link wins; page-level meta robots / X-Robots-Tag nofollow ⇒
@@ -618,6 +620,18 @@ import destination in `src/worker/imports/destinations.ts`, `publicExternalFetch
   The 15-minute cron schedules the weekly check (projects with scheduled runs on, not demo, with active backlinks, no
   full check created in the last 7 days; 3 projects per tick) and processes one batch per tick; jobs without progress
   for 3 days are failed.
+- **Browser re-checks** (Cloudflare Browser Run fallback, 2026-10-05): a plain result `missing`, `page_error` 403 / 429
+  / 503 or `fetch_failed` (not `blocked_url` / `redirect_offsite`) sets `BacklinkRow.browserState = "pending"` (the
+  plain check is stored; its events wait). One page per invocation (advance with no plain work; the cron after its
+  batch) is rendered in the headless browser (binding `BROWSER`, `@cloudflare/puppeteer`): URL validated before
+  launch, every request intercepted (public http(s) hosts only; images / media / fonts aborted), 20 s navigation, then
+  the rendered DOM is classified with the plain checker's rules. The browser check (`BacklinkCheckView.method` /
+  `BacklinkFeedItem.method = "browser"`) supersedes the plain result (`BacklinkRow.checkMethod = "browser"`); events
+  are computed on the final result. Browser could not load the page → `browserState: "failed"`, plain result kept. No
+  binding / cap 0 / Browser Run refusing 3 launches → `browserState: "unavailable"` with `browserReason`, plain result
+  kept. Budget: browser wall time per UTC day (whole account) capped at `BACKLINK_BROWSER_MS_PER_DAY` (default 480,000
+  ms = 8 min; Workers Free includes 10 min/day); over it, rows wait until the next UTC day (`browser.deferred`). One
+  browser at a time, ≥ 20 s between launches.
 - **Ask Okara:** no chat tool yet; `listBacklinks`, `backlinkSummary`, `backlinkEvents`, `startBacklinkCheck` in
   `src/worker/backlinks/service.ts` are the functions a tool should call.
 

@@ -31,6 +31,7 @@ import type { Db } from "../lib/db";
 import { notFound } from "../lib/errors";
 import { addSeconds, iso } from "../lib/time";
 import type { ProjectRow } from "../platform/access";
+import { browserSummary } from "./browser";
 import { activeJobs, advanceProject, createJob, manualChecksToday, processBatch, REQUEST_BATCH_DEADLINE_MS, type BatchOptions } from "./jobs";
 import { toBacklinkRow, toCheckView, toEventView, toJobView, type BacklinkDbRow, type CheckDbRow, type EventDbRow, type JobDbRow } from "./store";
 
@@ -229,7 +230,7 @@ export async function backlinkEvents(db: Db, p: ProjectRow, opts: { since?: stri
 // ------------------------------------------------------------------ summary
 const zeroStatus = (): Record<BacklinkStatus, number> => Object.fromEntries(BACKLINK_STATUSES.map((s) => [s, 0])) as Record<BacklinkStatus, number>;
 
-export async function backlinkSummary(db: Db, p: ProjectRow, now: Date, canRun = true): Promise<BacklinkSummary> {
+export async function backlinkSummary(db: Db, p: ProjectRow, now: Date, canRun = true, env: Pick<Env, "BROWSER" | "BACKLINK_BROWSER_MS_PER_DAY"> = {}): Promise<BacklinkSummary> {
   const byStatus = zeroStatus();
   const base: BacklinkSummary = {
     state: p.is_demo === 1 ? "demo" : "empty",
@@ -251,6 +252,7 @@ export async function backlinkSummary(db: Db, p: ProjectRow, now: Date, canRun =
       fetchesPerInvocation: FETCHES_PER_INVOCATION,
       scheduledEveryDays: SCHEDULED_CHECK_DAYS,
     },
+    browser: { available: false, unavailableReason: null, waiting: 0, unavailable: 0, failed: 0, usedMs: 0, capMs: 0, deferred: false, deferredUntil: null },
     canRun: canRun && p.is_demo !== 1,
     verified: !!p.verified_host,
     labels: [],
@@ -307,6 +309,7 @@ export async function backlinkSummary(db: Db, p: ProjectRow, now: Date, canRun =
     );
     base.lastJob = last ? toJobView(last) : null;
     base.limits.manualUsedToday = await manualChecksToday(db, p, now);
+    base.browser = await browserSummary(db, p, env, now);
     if (p.schedule_enabled === 1 && p.is_demo !== 1 && base.totals.active > 0) {
       const lastAll = await db.first<{ created_at: string }>(
         "SELECT created_at FROM backlink_jobs WHERE workspace_id = ? AND project_id = ? AND scope = 'all' ORDER BY created_at DESC LIMIT 1",
@@ -321,7 +324,8 @@ export async function backlinkSummary(db: Db, p: ProjectRow, now: Date, canRun =
   }
   if (p.is_demo !== 1) base.state = base.totals.active + base.totals.inactive > 0 ? "ready" : "empty";
   base.labels = [
-    "Checked by fetching each live article (robots.txt respected); dofollow = a followable link to your site on a page without page-level nofollow.",
+    "Checked by fetching each live article (robots.txt is not consulted for your own placed links); dofollow = a followable link to your site on a page without page-level nofollow.",
+    "A link missing, a bot wall (HTTP 403 / 429 / 503) or a failed fetch is re-checked once in Cloudflare's headless browser (Browser Run), within a daily browser-time budget; that result then counts.",
     ...(p.verified_host ? [] : ["Your site is not verified, so target URLs are not checked (verify it in Settings)."]),
     ...(p.schedule_enabled === 1 ? [] : ["Scheduled runs are off for this project, so there is no weekly check."]),
   ];
@@ -356,6 +360,7 @@ export async function backlinkFeed(db: Db, p: ProjectRow, opts: { after?: string
         const v = toCheckView(r);
         return {
           checkId: v.id,
+          method: v.method,
           backlinkId: v.backlinkId,
           checkedAt: v.checkedAt,
           liveUrl: r.live_url,

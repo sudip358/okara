@@ -3,7 +3,7 @@
  * import destination (imports/destinations.ts), and undo. Tenancy: every statement filters by workspace_id (and
  * project_id) of a project the caller resolved with requireProject() (or the cron's own job row).
  */
-import { isBacklinkStatus, type BacklinkCheckView, type BacklinkEventKind, type BacklinkEventView, type BacklinkFoundLink, type BacklinkJobView, type BacklinkRow, type LinkRel } from "@shared/backlinks";
+import { isBacklinkStatus, type BrowserState, type CheckMethod, type BacklinkCheckView, type BacklinkEventKind, type BacklinkEventView, type BacklinkFoundLink, type BacklinkJobView, type BacklinkRow, type LinkRel } from "@shared/backlinks";
 import type { Db } from "../lib/db";
 import { parseJson } from "../lib/db";
 import { iso } from "../lib/time";
@@ -50,6 +50,13 @@ export interface BacklinkDbRow {
   last_change_negative: number | null;
   created_at: string;
   updated_at: string;
+  /** Migration 0022 (browser fallback). */
+  check_method?: string | null;
+  browser_state?: string | null;
+  browser_reason?: string | null;
+  browser_queued_at?: string | null;
+  browser_base_check_id?: string | null;
+  browser_attempts?: number | null;
 }
 
 export interface CheckDbRow {
@@ -83,6 +90,8 @@ export interface CheckDbRow {
   fetches: number;
   bytes: number;
   truncated: number;
+  /** Migration 0022: 'plain' | 'browser'. */
+  method?: string | null;
 }
 
 export interface EventDbRow {
@@ -128,6 +137,9 @@ const bool = (v: number | null | undefined): boolean | null => (v === null || v 
 const num = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
 const rel = (v: string | null): LinkRel | null => (v === "dofollow" || v === "nofollow" || v === "sponsored" || v === "ugc" || v === "missing" ? v : null);
 
+export const method = (v: string | null | undefined): CheckMethod => (v === "browser" ? "browser" : "plain");
+const browserState = (v: string | null | undefined): BrowserState | null => (v === "pending" || v === "unavailable" || v === "failed" ? v : null);
+
 export function toBacklinkRow(r: BacklinkDbRow): BacklinkRow {
   return {
     id: r.id,
@@ -160,6 +172,9 @@ export function toBacklinkRow(r: BacklinkDbRow): BacklinkRow {
     lastChangeNegative: bool(r.last_change_negative),
     sourceRow: num(r.source_row),
     createdAt: r.created_at,
+    checkMethod: r.last_check_id ? method(r.check_method) : null,
+    browserState: browserState(r.browser_state),
+    browserReason: r.browser_reason ?? null,
   };
 }
 
@@ -170,6 +185,7 @@ export function toCheckView(r: CheckDbRow): BacklinkCheckView {
     backlinkId: r.backlink_id,
     jobId: r.job_id,
     checkedAt: r.checked_at,
+    method: method(r.method),
     status: isBacklinkStatus(r.status) ? r.status : "fetch_failed",
     statusReason: r.status_reason,
     linkRel: rel(r.link_rel),

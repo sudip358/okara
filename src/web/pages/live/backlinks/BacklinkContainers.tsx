@@ -27,7 +27,8 @@ import {
   urlParts,
   type RelGroup,
 } from "@web/pages/backlinks/lib";
-import { StatusChip } from "@web/pages/backlinks/parts";
+import { BrowserBadge, StatusChip } from "@web/pages/backlinks/parts";
+import { browserSummaryText } from "@shared/backlinks";
 import { PulseDot, staggerStyle } from "../motion";
 import { LTD, LTH, Panel, PanelEmpty, THEAD } from "../parts";
 import { SectionButton } from "../RunActions";
@@ -135,6 +136,11 @@ export function LiveCheckPanel({
               {job.note && <p className="text-[11px] text-amber-800 dark:text-amber-300">{job.note}</p>}
             </div>
           )}
+          {summary.data?.browser && (
+            <p className="text-[11px] text-zinc-600 dark:text-zinc-400" data-testid="backlinks-browser-summary">
+              {browserSummaryText(summary.data.browser)}
+            </p>
+          )}
           {items.length === 0 ? (
             <PanelEmpty>{running ? "Waiting for the first pages of this check…" : "No pages checked in the latest check."}</PanelEmpty>
           ) : (
@@ -157,6 +163,7 @@ export function LiveCheckPanel({
                     </LTD>
                     <LTD title={i.statusReason ?? undefined}>
                       <StatusChip status={i.status} httpStatus={i.httpStatus} />
+                      {i.method === "browser" && <BrowserBadge className="ml-1" />}
                       {i.robots === "disallowed" && <span className="sr-only"> robots.txt disallows</span>}
                     </LTD>
                     <LTD className="hidden @lg:table-cell" title={i.anchorFound ?? undefined}>

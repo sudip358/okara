@@ -8,13 +8,26 @@ import type { BacklinkCheckView, BacklinkDetail, BacklinkEventView, BacklinkStat
 import { ExternalUrl } from "@web/components/ExternalUrl";
 import { cx } from "@web/components/ui";
 import { formatDateTime } from "@web/lib/format";
-import { TONE_CLASS, anchorMatchText, relLabel, statusChip, targetText, urlParts } from "./lib";
+import { METHOD_LABEL, TONE_CLASS, anchorMatchText, relLabel, statusChip, targetText, urlParts } from "./lib";
 
 export function StatusChip({ status, httpStatus, className }: { status: BacklinkStatus | null; httpStatus?: number | null; className?: string }) {
   const c = statusChip(status, httpStatus ?? null);
   return (
     <span data-status={status ?? "unchecked"} className={cx("inline-flex max-w-full items-center rounded px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap ring-1 ring-inset", TONE_CLASS[c.tone], className)}>
       {c.label}
+    </span>
+  );
+}
+
+/** "checked in browser": the status comes from Cloudflare's headless browser (Browser Run), not the plain fetch. */
+export function BrowserBadge({ className }: { className?: string }) {
+  return (
+    <span
+      data-testid="browser-badge"
+      title="This result comes from a re-check in Cloudflare's headless browser (Browser Run): the plain fetch saw no link, a bot wall or a failure."
+      className={cx("inline-flex items-center rounded px-1.5 py-0.5 text-[10px] whitespace-nowrap ring-1 ring-inset", TONE_CLASS.neutral, className)}
+    >
+      checked in browser
     </span>
   );
 }
@@ -94,10 +107,16 @@ export function BacklinkHistory({ detail }: { detail: BacklinkDetail }) {
         <div className="flex flex-wrap gap-x-2">
           <dt className="text-zinc-600 dark:text-zinc-400">Status</dt>
           <dd className="min-w-0">
-            <StatusChip status={b.status} httpStatus={b.httpStatus} /> {b.status === "redirected" && b.linkRel && <span className="text-xs">final page: {relLabel(b.linkRel)}</span>}
+            <StatusChip status={b.status} httpStatus={b.httpStatus} /> {b.checkMethod === "browser" && <BrowserBadge />}{" "}
+            {b.status === "redirected" && b.linkRel && <span className="text-xs">final page: {relLabel(b.linkRel)}</span>}
           </dd>
         </div>
         {b.statusReason && <p className="text-xs text-zinc-600 dark:text-zinc-400">{b.statusReason}</p>}
+        {(b.browserState === "pending" || b.browserReason) && (
+          <p className="text-xs text-zinc-600 dark:text-zinc-400" data-testid="browser-reason">
+            {b.browserState === "pending" ? "Waiting for a re-check in the headless browser (Browser Run)." : b.browserReason}
+          </p>
+        )}
         <div className="flex flex-wrap gap-x-2">
           <dt className="text-zinc-600 dark:text-zinc-400">Anchor</dt>
           <dd className="min-w-0 break-words">
@@ -152,6 +171,9 @@ export function BacklinkHistory({ detail }: { detail: BacklinkDetail }) {
               <li key={c.id} className="min-w-0 text-xs">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-zinc-500 dark:text-zinc-400">{formatDateTime(c.checkedAt)}</span>
+                  <span data-method={c.method} className="rounded bg-zinc-100 px-1 font-mono text-[10px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                    {METHOD_LABEL[c.method]}
+                  </span>
                   <StatusChip status={c.status} httpStatus={c.httpStatus} />
                   {c.httpStatus !== null && <span className="font-mono">HTTP {c.httpStatus}</span>}
                   {c.targetStatus !== null && <span className="font-mono">target {c.targetStatus}</span>}

@@ -15,14 +15,13 @@
  * when the lease expires. Results of a batch are written in one D1 batch (atomic).
  */
 import {
-  CHECKS_KEPT_PER_BACKLINK,
   FETCHES_PER_INVOCATION,
   ITEMS_PER_INVOCATION,
   MANUAL_CHECKS_PER_DAY,
   MAX_RECHECK_IDS,
   RECHECK_ROWS_PER_HOUR,
   SCHEDULED_CHECK_DAYS,
-  type BacklinkStatus,
+  needsBrowserRecheck,
   type StartBacklinkCheckResult,
 } from "@shared/backlinks";
 import type { Env } from "../env";
@@ -34,8 +33,10 @@ import type { ProjectRow } from "../platform/access";
 import { loadProjectRow, siteHost } from "../platform/projects";
 import { crawlerUserAgent } from "../seo/crawl/robots";
 import { normalizeHost } from "../seo/ssrf";
+import { browserConfig, processBrowserStep, type BrowserStepOptions, type BrowserStepOutcome } from "./browser";
 import { checkBacklink, emptyCache, FetchBudgetExhausted, type CheckDeps, type CheckResult, type JobCache, type RobotsVerdict, type TargetResult } from "./check";
-import { diffChecks, type CheckSnapshot } from "./events";
+import { diffChecks } from "./events";
+import { backlinkUpdateStmt, blankResult, checkInsertStmt, eventStmts, pruneChecksStmt, snapshotOf, snapshotOfResult, type BrowserFields } from "./record";
 import { toJobView, type BacklinkDbRow, type CheckDbRow, type JobDbRow } from "./store";
 
 /** A batch holding the lease longer than this was interrupted; the next invocation may take the job. */
@@ -48,8 +49,7 @@ export const CRON_BATCH_DEADLINE_MS = 60_000;
 export const STALLED_JOB_DAYS = 3;
 /** Jobs kept per project (active jobs are never pruned). */
 export const JOBS_KEPT_PER_PROJECT = 50;
-/** Events kept per backlink. */
-export const EVENTS_KEPT_PER_BACKLINK = 50;
+export { EVENTS_KEPT_PER_BACKLINK } from "./record";
 /** Projects given a weekly scheduled job per cron tick. */
 export const SCHEDULES_PER_TICK = 3;
 
@@ -272,42 +272,6 @@ function cacheStatements(job: JobDbRow, cache: JobCache, now: Date): Array<[stri
   return out;
 }
 
-function snapshotOf(c: CheckDbRow): CheckSnapshot {
-  const links = parseJson<Array<{ href?: string; match?: string }>>(c.links_json, []);
-  return {
-    status: c.status as BacklinkStatus,
-    linkRel: (c.link_rel as CheckSnapshot["linkRel"]) ?? null,
-    httpStatus: c.http_status === null ? null : Number(c.http_status),
-    finalUrl: c.final_url,
-    anchorFound: c.anchor_found,
-    pageNoindex: Number(c.page_noindex) === 1,
-    targetStatus: c.target_status === null ? null : Number(c.target_status),
-    targetError: c.target_error,
-    canonicalUrl: c.canonical_url,
-    linkMatch: (c.link_match as CheckSnapshot["linkMatch"]) ?? null,
-    linkHref: links[0]?.href ?? null,
-    statusReason: c.status_reason,
-  };
-}
-
-function snapshotOfResult(r: CheckResult): CheckSnapshot {
-  const first = r.links.find((l) => l.match === "target") ?? r.links[0];
-  return {
-    status: r.status,
-    linkRel: r.linkRel,
-    httpStatus: r.httpStatus,
-    finalUrl: r.finalUrl,
-    anchorFound: r.anchorFound,
-    pageNoindex: r.pageNoindex,
-    targetStatus: r.targetStatus,
-    targetError: r.targetError,
-    canonicalUrl: r.canonicalUrl,
-    linkMatch: r.linkMatch,
-    linkHref: first?.href ?? null,
-    statusReason: r.statusReason,
-  };
-}
-
 /** Claim the job's lease; false when another invocation holds it or the job is finished. */
 async function claim(db: Db, job: JobDbRow, now: Date): Promise<boolean> {
   const r = await db.run(
@@ -357,7 +321,10 @@ export async function processBatch(env: Env, db: Db, jobId: string, workspaceId:
   }
 
   const cache = await loadCache(db, job, cacheKeysFor(items, project));
-  const prevIds = items.map((b) => b.last_check_id).filter((x): x is string => !!x);
+  // The previous FINAL check of each backlink: while a browser re-check is pending, the plain check it re-checks is not
+  // final yet, so events are computed against the check before it (browser_base_check_id).
+  const baseIdOf = (b: BacklinkDbRow) => (b.browser_state === "pending" ? (b.browser_base_check_id ?? null) : b.last_check_id);
+  const prevIds = items.map(baseIdOf).filter((x): x is string => !!x);
   const prevChecks = new Map<string, CheckDbRow>();
   if (prevIds.length) {
     const rows = await db.all<CheckDbRow>(
@@ -366,8 +333,9 @@ export async function processBatch(env: Env, db: Db, jobId: string, workspaceId:
       job.project_id,
       ...prevIds,
     );
-    for (const r of rows) prevChecks.set(r.backlink_id, r);
+    for (const r of rows) prevChecks.set(r.id, r);
   }
+  const browser = browserConfig(env);
 
   const deps = opts.deps ?? checkDeps(env);
   const budget = { limit: opts.fetchLimit ?? FETCHES_PER_INVOCATION, used: 0 };
@@ -403,59 +371,28 @@ export async function processBatch(env: Env, db: Db, jobId: string, workspaceId:
     const now = clock();
     const ts = iso(now);
     const checkId = newId("blchk");
-    const prev = prevChecks.get(b.id);
-    const events = diffChecks(prev ? snapshotOf(prev) : null, snapshotOfResult(result));
+    const baseId = baseIdOf(b);
+    const prev = baseId ? prevChecks.get(baseId) : undefined;
     checked++;
     if (result.status === "fetch_failed" || result.status === "page_error") failed++;
     if (result.status === "robots_blocked") robotsBlocked++;
+    stmts.push(checkInsertStmt(b, checkId, job.id, ts, result, "plain"));
+    const wantsBrowser = project.is_demo !== 1 && needsBrowserRecheck(result);
+    let browserFields: BrowserFields;
+    let events = diffChecks(prev ? snapshotOf(prev) : null, snapshotOfResult(result));
+    if (wantsBrowser && browser.available) {
+      // Not final yet: the browser step records the final result and computes the events against `baseId`.
+      events = [];
+      browserFields = { state: "pending", reason: null, baseCheckId: baseId, queuedAt: b.browser_state === "pending" && b.browser_queued_at ? b.browser_queued_at : ts, attempts: 0 };
+    } else if (wantsBrowser) {
+      browserFields = { state: "unavailable", reason: browser.reason, baseCheckId: null, queuedAt: null, attempts: 0 };
+    } else {
+      browserFields = { state: null, reason: null, baseCheckId: null, queuedAt: null, attempts: 0 };
+    }
     changes += events.length;
-    stmts.push([
-      `INSERT INTO backlink_checks (id, workspace_id, project_id, backlink_id, job_id, checked_at, status, status_reason, link_rel, http_status, final_url,
-         redirect_chain_json, robots, meta_robots, x_robots_tag, page_noindex, page_nofollow, canonical_url, link_match, links_json, rel_text, anchor_found,
-         anchor_match, target_status, target_final_url, target_error, error_code, fetches, bytes, truncated)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      checkId, job.workspace_id, job.project_id, b.id, job.id, ts, result.status, clipN(result.statusReason, 600), result.linkRel, result.httpStatus, clipN(result.finalUrl, 2000),
-      JSON.stringify(result.redirectChain.slice(0, 10).map((h) => ({ status: h.status, to: h.to.slice(0, 2000) }))), result.robots, clipN(result.metaRobots, 400), clipN(result.xRobotsTag, 300),
-      result.pageNoindex ? 1 : 0, result.pageNofollow ? 1 : 0, clipN(result.canonicalUrl, 2000), result.linkMatch, JSON.stringify(result.links.slice(0, 20)), clipN(result.relText, 200),
-      clipN(result.anchorFound, 200), result.anchorMatch === null ? null : result.anchorMatch ? 1 : 0, result.targetStatus, clipN(result.targetFinalUrl, 2000), result.targetError,
-      result.errorCode, result.fetches, result.bytes, result.truncated ? 1 : 0,
-    ]);
-    for (const e of events) {
-      stmts.push([
-        `INSERT INTO backlink_events (id, workspace_id, project_id, backlink_id, check_id, job_id, kind, from_value, to_value, message, negative, detected_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-        newId("blevt"), job.workspace_id, job.project_id, b.id, checkId, job.id, e.kind, e.from, e.to, e.message, e.negative ? 1 : 0, ts,
-      ]);
-    }
-    const lastEvent = events.find((e) => e.negative) ?? events[0] ?? null;
-    stmts.push([
-      `UPDATE backlinks SET status = ?, status_reason = ?, link_rel = ?, http_status = ?, final_url = ?, anchor_found = ?, anchor_match = ?, rel_text = ?, page_noindex = ?,
-         target_status = ?, target_error = ?, last_checked_at = ?, last_check_id = ?, last_job_id = ?,
-         last_change_at = CASE WHEN ? IS NULL THEN last_change_at ELSE ? END,
-         last_change_text = CASE WHEN ? IS NULL THEN last_change_text ELSE ? END,
-         last_change_negative = CASE WHEN ? IS NULL THEN last_change_negative ELSE ? END,
-         updated_at = ?
-       WHERE workspace_id = ? AND project_id = ? AND id = ?`,
-      result.status, clipN(result.statusReason, 600), result.linkRel, result.httpStatus, clipN(result.finalUrl, 2000), clipN(result.anchorFound, 200),
-      result.anchorMatch === null ? null : result.anchorMatch ? 1 : 0, clipN(result.relText, 200), result.pageNoindex ? 1 : 0,
-      result.targetStatus, result.targetError, ts, checkId, job.id,
-      lastEvent ? ts : null, ts,
-      lastEvent ? lastEvent.message : null, lastEvent?.message ?? null,
-      lastEvent ? 1 : null, lastEvent ? (lastEvent.negative ? 1 : 0) : null,
-      ts, job.workspace_id, job.project_id, b.id,
-    ]);
-    stmts.push([
-      `DELETE FROM backlink_checks WHERE workspace_id = ? AND backlink_id = ? AND id NOT IN (
-         SELECT id FROM backlink_checks WHERE workspace_id = ? AND backlink_id = ? ORDER BY checked_at DESC, rowid DESC LIMIT ?)`,
-      job.workspace_id, b.id, job.workspace_id, b.id, CHECKS_KEPT_PER_BACKLINK,
-    ]);
-    if (events.length) {
-      stmts.push([
-        `DELETE FROM backlink_events WHERE workspace_id = ? AND backlink_id = ? AND id NOT IN (
-           SELECT id FROM backlink_events WHERE workspace_id = ? AND backlink_id = ? ORDER BY detected_at DESC, rowid DESC LIMIT ?)`,
-        job.workspace_id, b.id, job.workspace_id, b.id, EVENTS_KEPT_PER_BACKLINK,
-      ]);
-    }
+    stmts.push(...eventStmts(b, checkId, job.id, ts, events));
+    stmts.push(backlinkUpdateStmt(b, ts, result, checkId, job.id, "plain", events, browserFields));
+    stmts.push(pruneChecksStmt(b));
   }
   const now = clock();
   stmts.push(...cacheStatements(job, cache, now));
@@ -475,37 +412,6 @@ export async function processBatch(env: Env, db: Db, jobId: string, workspaceId:
   return { status: "processed", checked, fetches: budget.used, job };
 }
 
-const clipN = (s: string | null | undefined, n: number) => (s === null || s === undefined ? null : s.length > n ? s.slice(0, n) : s);
-
-function blankResult(): CheckResult {
-  return {
-    status: "fetch_failed",
-    statusReason: null,
-    linkRel: null,
-    httpStatus: null,
-    finalUrl: null,
-    redirectChain: [],
-    robots: null,
-    metaRobots: null,
-    xRobotsTag: null,
-    pageNoindex: false,
-    pageNofollow: false,
-    canonicalUrl: null,
-    linkMatch: null,
-    links: [],
-    relText: null,
-    anchorFound: null,
-    anchorMatch: null,
-    targetStatus: null,
-    targetFinalUrl: null,
-    targetError: null,
-    errorCode: null,
-    fetches: 0,
-    bytes: 0,
-    truncated: false,
-  };
-}
-
 async function finish(db: Db, job: JobDbRow, now: Date, status: "completed" | "failed", note: string | null): Promise<void> {
   await db.batch([
     [
@@ -519,15 +425,31 @@ async function finish(db: Db, job: JobDbRow, now: Date, status: "completed" | "f
 }
 
 /** Process one batch of the project's oldest active job whose lease is free (POST /backlinks/check/advance). */
-export async function advanceProject(env: Env, db: Db, p: ProjectRow, opts: BatchOptions = {}): Promise<BatchOutcome | null> {
+export async function advanceProject(env: Env, db: Db, p: ProjectRow, opts: BatchOptions & { browser?: BrowserStepOptions } = {}): Promise<BatchOutcome | null> {
   const jobs = await activeJobs(db, p);
   // Rechecks (a few rows the user is waiting for) go before a long full check.
   const ordered = [...jobs].sort((a, b) => (a.scope === b.scope ? 0 : a.scope === "ids" ? -1 : 1));
+  let out: BatchOutcome | null = null;
   for (const j of ordered) {
-    const out = await processBatch(env, db, j.id, j.workspace_id, opts);
-    if (out.status !== "busy") return out;
+    const o = await processBatch(env, db, j.id, j.workspace_id, opts);
+    if (o.status !== "busy") {
+      out = o;
+      break;
+    }
   }
-  return null;
+  // Browser re-checks (one page) only in an invocation that did no plain work, so both fit the request's wall time.
+  if (!out || out.checked === 0) await runBrowserStep(env, db, { project: p }, opts.browser);
+  return out;
+}
+
+/** One browser re-check; errors are logged, never fail the caller (plain checks keep running). */
+export async function runBrowserStep(env: Env, db: Db, scope: { project?: ProjectRow }, opts?: BrowserStepOptions): Promise<BrowserStepOutcome | null> {
+  try {
+    return await processBrowserStep(env, db, scope, opts);
+  } catch (e) {
+    console.error("backlink browser step failed", e instanceof Error ? e.message.slice(0, 200) : "unknown");
+    return null;
+  }
 }
 
 // ------------------------------------------------------------------ cron
@@ -537,7 +459,7 @@ export async function advanceProject(env: Env, db: Db, p: ProjectRow, opts: Batc
  * days), then process ONE batch of the oldest active job with a free lease (rechecks first). Missing tables (migration
  * not applied) are a no-op.
  */
-export async function processDueBacklinkChecks(env: Env, now: Date, opts: BatchOptions = {}): Promise<{ scheduled: number; processed: number }> {
+export async function processDueBacklinkChecks(env: Env, now: Date, opts: BatchOptions & { browser?: BrowserStepOptions } = {}): Promise<{ scheduled: number; processed: number; browser: BrowserStepOutcome["status"] | null }> {
   const db = new Db(env.DB);
   try {
     await db.run(
@@ -548,7 +470,7 @@ export async function processDueBacklinkChecks(env: Env, now: Date, opts: BatchO
       iso(addSeconds(now, -STALLED_JOB_DAYS * 86_400)),
     );
   } catch (e) {
-    if (e instanceof Error && /no such table/i.test(e.message)) return { scheduled: 0, processed: 0 };
+    if (e instanceof Error && /no such table/i.test(e.message)) return { scheduled: 0, processed: 0, browser: null };
     throw e;
   }
   const due = await db.all<{ id: string; workspace_id: string }>(
@@ -582,5 +504,7 @@ export async function processDueBacklinkChecks(env: Env, now: Date, opts: BatchO
     const out = await processBatch(env, db, next.id, next.workspace_id, { deadlineMs: CRON_BATCH_DEADLINE_MS, ...opts });
     processed = out.checked;
   }
-  return { scheduled, processed };
+  // Then at most one browser re-check (oldest pending row of any project), within the day's browser budget.
+  const b = await runBrowserStep(env, db, {}, opts.browser);
+  return { scheduled, processed, browser: b?.status ?? null };
 }

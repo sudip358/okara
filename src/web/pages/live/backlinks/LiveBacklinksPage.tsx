@@ -16,7 +16,7 @@ import { api } from "@web/lib/api";
 import { useApi } from "@web/lib/hooks";
 import { projectPath, useProject } from "@web/lib/project-context";
 import { DemoBanner, cx } from "@web/components/ui";
-import { backlinksBase, jobActive, recheckCandidates } from "@web/pages/backlinks/lib";
+import { backlinksBase, browserPollInterval, jobActive, recheckCandidates } from "@web/pages/backlinks/lib";
 import { LIVE_CSS, useReducedMotion } from "../motion";
 import { RunActionsProvider, SectionButton } from "../RunActions";
 import { recheckAction, runCheckAction } from "./actions";
@@ -104,6 +104,21 @@ export function LiveBacklinksPage() {
       if (timer) clearTimeout(timer);
     };
   }, [running, base, applyFeed]);
+
+  // No job, but browser re-checks wait (budget left): one advance call every BROWSER_POLL_MS drives the browser step,
+  // then the stored state reloads. Stops when nothing waits, the browser is unavailable or the day's budget is used up.
+  const browserPoll = running ? null : browserPollInterval(summary.data);
+  useEffect(() => {
+    if (!browserPoll) return;
+    const t = setTimeout(() => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      void api<BacklinkFeed>(`${base}/check/advance`, { method: "POST", body: {} })
+        .then((next) => applyFeed(next, true))
+        .catch(() => null)
+        .finally(() => setReloadKey((k) => k + 1));
+    }, browserPoll);
+    return () => clearTimeout(t);
+  }, [browserPoll, base, applyFeed, reloadKey]);
 
   const onReload = useCallback(() => {
     setReloadKey((k) => k + 1);

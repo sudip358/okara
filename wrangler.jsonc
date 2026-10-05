@@ -14,6 +14,11 @@
   "workflows": [
     { "name": "okara-agent-run", "binding": "AGENT_RUN", "class_name": "AgentRunWorkflow" }
   ],
+  // Cloudflare Browser Run (formerly Browser Rendering): backlink browser re-checks only (src/worker/backlinks/browser.ts,
+  // @cloudflare/puppeteer). Workers Free: 10 min browser time/day, 3 concurrent browsers; Okara uses 1 browser at a time
+  // and stops at BACKLINK_BROWSER_MS_PER_DAY (default 8 min). Without this binding re-checks show "browser unavailable".
+  // Local dev: add "remote": true to drive a real Browser Run browser from `npm run dev` (uses your account's time).
+  "browser": { "binding": "BROWSER" },
   "triggers": { "crons": ["*/15 * * * *"] },
   "vars": {
     "ENVIRONMENT": "production",
@@ -46,7 +51,10 @@
     "GLOBAL_PROVIDER_CALLS_PER_DAY": "3000",
     "GLOBAL_WRITER_TOKENS_PER_DAY": "1000000",
     // Non-brand GSC queries in scope of the buyer-queries view. Code default 5000; values above 20000 are clamped.
-    "BUYER_QUERIES_MAX": "5000"
+    "BUYER_QUERIES_MAX": "5000",
+    // Daily browser-time cap (ms, whole Cloudflare account, UTC day) for backlink browser re-checks. Default 480000
+    // (8 of the free 10 minutes); values above 540000 are clamped; "0" turns browser re-checks off.
+    "BACKLINK_BROWSER_MS_PER_DAY": "480000"
   },
   // Custom domain (docs/deploy.md step 1). APP_ORIGIN must be the only host users reach: on any other host
   // (workers.dev, preview URLs) sign-in fails with state_mismatch and writes fail CSRF. Uncomment with your host:

@@ -537,7 +537,7 @@ export function MappingFields({ destination, mapping, headers, onChange }: { des
         </div>
         <p className="text-xs text-zinc-600 dark:text-zinc-400">
           Each (live URL, target) pair becomes one monitored backlink; a row with Target 2 gives two. Vendor, type, date, DA, traffic and price are kept {IMPORT_LABEL_SHEET}. Okara then
-          fetches each live article (robots.txt respected) and checks the link to your page: dofollow, nofollow, sponsored or ugc.
+          fetches each live article (robots.txt not consulted for your own placed links) and checks the link to your page: dofollow, nofollow, sponsored or ugc.
         </p>
       </div>
     );

@@ -62,6 +62,7 @@ const summary = (o: Partial<BacklinkSummary> = {}): BacklinkSummary => ({
   job: null,
   lastJob: job({ status: "completed", done: 12, finishedAt: "2026-10-03T09:30:00.000Z" }),
   limits: { maxBacklinks: 2000, manualPerDay: 3, manualUsedToday: 1, recheckRowsPerHour: 30, fetchesPerInvocation: 20, scheduledEveryDays: 7 },
+  browser: { available: true, unavailableReason: null, waiting: 0, unavailable: 0, failed: 0, usedMs: 0, capMs: 480_000, deferred: false, deferredUntil: null },
   canRun: true,
   verified: true,
   labels: ["Checked by fetching each live article (robots.txt respected)."],
@@ -99,6 +100,9 @@ const row = (o: Partial<BacklinkRow> = {}): BacklinkRow => ({
   lastChangeNegative: null,
   sourceRow: 2,
   createdAt: "2026-10-01T00:00:00.000Z",
+  checkMethod: "plain",
+  browserState: null,
+  browserReason: null,
   ...o,
 });
 
@@ -121,8 +125,8 @@ const events: BacklinkEventsResponse = {
 const feed = (j: BacklinkJobView | null = job()): BacklinkFeed => ({
   job: j,
   items: [
-    { checkId: "c9", backlinkId: "bl_1", checkedAt: "2026-10-04T10:00:05.000Z", liveUrl: "https://decor-blog.example.net/brass-guide", targetUrl: "https://shop.example.com/x", status: "dofollow", statusReason: null, httpStatus: 200, finalUrl: null, anchorFound: HOSTILE, robots: "allowed" },
-    { checkId: "c8", backlinkId: "bl_6", checkedAt: "2026-10-04T10:00:03.000Z", liveUrl: "https://blocked.example.org/p", targetUrl: "https://shop.example.com/x", status: "robots_blocked", statusReason: "robots.txt of blocked.example.org disallows OkaraBot", httpStatus: null, finalUrl: null, anchorFound: null, robots: "disallowed" },
+    { checkId: "c9", method: "plain", backlinkId: "bl_1", checkedAt: "2026-10-04T10:00:05.000Z", liveUrl: "https://decor-blog.example.net/brass-guide", targetUrl: "https://shop.example.com/x", status: "dofollow", statusReason: null, httpStatus: 200, finalUrl: null, anchorFound: HOSTILE, robots: "allowed" },
+    { checkId: "c8", method: "plain", backlinkId: "bl_6", checkedAt: "2026-10-04T10:00:03.000Z", liveUrl: "https://blocked.example.org/p", targetUrl: "https://shop.example.com/x", status: "robots_blocked", statusReason: "robots.txt of blocked.example.org disallows OkaraBot", httpStatus: null, finalUrl: null, anchorFound: null, robots: "disallowed" },
   ],
 });
 
@@ -265,6 +269,7 @@ describe("Backlinks page parts", () => {
           backlinkId: "bl_1",
           jobId: "j",
           checkedAt: "2026-10-03T09:00:00.000Z",
+          method: "plain",
           status: "redirected",
           statusReason: "The article redirects to https://new.example.org/x (2 hops)",
           linkRel: "nofollow",

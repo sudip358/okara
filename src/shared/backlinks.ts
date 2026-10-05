@@ -32,6 +32,52 @@ export const HOST_INTERVAL_MS = 1_000;
 /** Live view polls at most this often, and only while a check job runs. */
 export const LIVE_POLL_MS = 2_000;
 
+// ------------------------------------------------------------------ browser fallback (Browser Run)
+/**
+ * Browser re-checks run in Cloudflare's headless browser (Browser Run, binding BROWSER). Cloudflare's published Workers
+ * Free allowance (developers.cloudflare.com/browser-run/pricing/ and /limits/, checked 2026-10-05): 10 minutes of
+ * browser time per day, 3 concurrent browsers, 1 new browser instance every 20 seconds.
+ */
+export const BROWSER_FREE_DAILY_MS = 600_000;
+/** Default daily cap Okara stops at (8 minutes), below the free allowance. Override: BACKLINK_BROWSER_MS_PER_DAY. */
+export const BROWSER_DAILY_CAP_MS = 480_000;
+/** Highest accepted override: one reservation below the free allowance, so a running render never crosses it. */
+export const BROWSER_DAILY_CAP_MAX_MS = 540_000;
+/** Navigation timeout of one browser re-check. */
+export const BROWSER_NAV_TIMEOUT_MS = 20_000;
+/** Extra wait for the network to go idle after DOM ready (bounded; a page that never idles is read anyway). */
+export const BROWSER_IDLE_WAIT_MS = 5_000;
+/**
+ * Browser time reserved (pre-charged) per re-check before launching: Browser Run closes an idle browser after 60 s by
+ * default, so an invocation cut off mid-render can cost at most this much. Adjusted to the measured time afterwards.
+ */
+export const BROWSER_RESERVE_MS = 60_000;
+/** Minimum time between two browser launches (Workers Free: 1 new browser instance every 20 seconds). */
+export const BROWSER_LAUNCH_INTERVAL_MS = 20_000;
+/** Launch failures of one backlink before it is marked "browser unavailable" (the plain result is kept). */
+export const BROWSER_MAX_ATTEMPTS = 3;
+/** The Backlinks page / Live view refresh this often while browser re-checks wait (and the budget is not used up). */
+export const BROWSER_POLL_MS = 10_000;
+/** HTTP statuses of a plain fetch that look like a bot wall and are re-checked in the browser. */
+export const BOT_WALL_STATUSES: readonly number[] = [403, 429, 503];
+/** fetch_failed error codes that are never sent to the browser (the SSRF guard refused the URL or a redirect). */
+export const NO_BROWSER_ERROR_CODES: readonly string[] = ["blocked_url", "redirect_offsite"];
+
+export type CheckMethod = "plain" | "browser";
+/** pending = waiting for the browser step; unavailable = no browser (plain result kept); failed = browser could not load the page. */
+export type BrowserState = "pending" | "unavailable" | "failed";
+
+/**
+ * Which plain results are re-checked in the browser (pure; code decides): link missing, a bot-wall HTTP status
+ * (403 / 429 / 503) or a failed fetch other than an SSRF refusal. Everything else is final.
+ */
+export function needsBrowserRecheck(r: { status: BacklinkStatus; httpStatus: number | null; errorCode: string | null }): boolean {
+  if (r.status === "missing") return true;
+  if (r.status === "page_error") return r.httpStatus !== null && BOT_WALL_STATUSES.includes(r.httpStatus);
+  if (r.status === "fetch_failed") return !(r.errorCode !== null && NO_BROWSER_ERROR_CODES.includes(r.errorCode));
+  return false;
+}
+
 // ------------------------------------------------------------------ statuses
 export type BacklinkStatus = "dofollow" | "nofollow" | "sponsored" | "ugc" | "missing" | "page_error" | "redirected" | "robots_blocked" | "fetch_failed";
 export const BACKLINK_STATUSES: readonly BacklinkStatus[] = ["dofollow", "nofollow", "sponsored", "ugc", "missing", "page_error", "redirected", "robots_blocked", "fetch_failed"];
@@ -107,6 +153,11 @@ export interface BacklinkRow {
   lastChangeNegative: boolean | null;
   sourceRow: number | null;
   createdAt: string;
+  /** Method of the check the status comes from (null = never checked). */
+  checkMethod: CheckMethod | null;
+  /** Browser re-check state (null = none needed or done). */
+  browserState: BrowserState | null;
+  browserReason: string | null;
 }
 
 export interface BacklinkListResponse {
@@ -134,6 +185,7 @@ export interface BacklinkCheckView {
   backlinkId: string;
   jobId: string | null;
   checkedAt: string;
+  method: CheckMethod;
   status: BacklinkStatus;
   statusReason: string | null;
   linkRel: LinkRel | null;
@@ -230,13 +282,34 @@ export interface BacklinkSummary {
   job: BacklinkJobView | null;
   lastJob: BacklinkJobView | null;
   limits: { maxBacklinks: number; manualPerDay: number; manualUsedToday: number; recheckRowsPerHour: number; fetchesPerInvocation: number; scheduledEveryDays: number };
+  /** Browser re-checks (Browser Run fallback). */
+  browser: BrowserSummary;
   canRun: boolean;
   verified: boolean;
   labels: string[];
 }
 
+export interface BrowserSummary {
+  /** A BROWSER binding is configured and the daily cap is above 0. */
+  available: boolean;
+  /** Why browser re-checks are unavailable (null when available). */
+  unavailableReason: string | null;
+  /** Active backlinks waiting for a browser re-check. */
+  waiting: number;
+  /** Active backlinks marked "browser unavailable" / "browser failed" (plain result kept). */
+  unavailable: number;
+  failed: number;
+  /** Browser milliseconds used today (UTC, whole Cloudflare account, Okara's own counter) and the cap. */
+  usedMs: number;
+  capMs: number;
+  /** The daily budget is used up: waiting rows run after 00:00 UTC (deferredUntil). */
+  deferred: boolean;
+  deferredUntil: string | null;
+}
+
 export interface BacklinkFeedItem {
   checkId: string;
+  method: CheckMethod;
   backlinkId: string;
   checkedAt: string;
   liveUrl: string;
@@ -292,6 +365,21 @@ export function anchorsMatch(expected: string | null | undefined, found: string 
   const e = normAnchor(expected);
   if (!e || found === null || found === undefined) return null;
   return normAnchor(found) === e;
+}
+
+/** "1.5" minutes for "used 1.5 of 8 min today" (one decimal, trailing .0 dropped). */
+export function minutesText(ms: number): string {
+  const m = Math.max(0, ms) / 60_000;
+  const r = Math.round(m * 10) / 10;
+  return Number.isInteger(r) ? String(r) : r.toFixed(1);
+}
+
+/** "Browser re-checks: 3 waiting · used 1.5 of 8 min today" (summary line of the Backlinks page and Live container 01). */
+export function browserSummaryText(b: BrowserSummary): string {
+  if (!b.available) return `Browser re-checks: unavailable${b.unavailableReason ? ` (${b.unavailableReason})` : ""}`;
+  const wait = `${b.waiting.toLocaleString("en-US")} waiting`;
+  const used = `used ${minutesText(b.usedMs)} of ${minutesText(b.capMs)} min today`;
+  return `Browser re-checks: ${wait} · ${used}${b.deferred && b.waiting > 0 ? " · budget used up, the rest run after 00:00 UTC" : ""}`;
 }
 
 /** Human status text with the HTTP status where it helps ("Page error · 404"). */

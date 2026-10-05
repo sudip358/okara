@@ -974,7 +974,7 @@ export async function prepareBacklinks(ctx: ImportCtx, loaded: LoadedTable, mapp
   if (accepted.length) summary.push("New backlinks are checked in the next weekly check, or right away with “Run backlink check” on the Backlinks page.");
   const notes = [
     `Each (live URL, target) pair is one monitored backlink; a row with Anchor 2 / Target 2 gives two. Vendor, type, date, DA, traffic and price are ${IMPORT_LABEL_SHEET}.`,
-    "Okara fetches each live article (public pages only, robots.txt respected, at most 1 request per second per host) and checks whether it links to your target and whether that link is dofollow, nofollow, sponsored or ugc.",
+    "Okara fetches each live article (public pages only, robots.txt not consulted for your own placed links, at most 1 request per second per host; a real-browser re-check for pages the plain fetch cannot read) and checks whether it links to your target and whether that link is dofollow, nofollow, sponsored or ugc.",
   ];
   return {
     plan: basePlan("backlinks", loaded, b, summary, notes),

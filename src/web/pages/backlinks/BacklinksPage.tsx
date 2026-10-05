@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router";
-import { BACKLINK_STATUSES, MAX_RECHECK_IDS, type BacklinkDetail, type BacklinkJobView, type BacklinkFeed, type BacklinkFilterStatus, type BacklinkListResponse, type BacklinkRow, type BacklinkSummary } from "@shared/backlinks";
+import { BACKLINK_STATUSES, MAX_RECHECK_IDS, browserSummaryText, type BacklinkDetail, type BacklinkJobView, type BacklinkFeed, type BacklinkFilterStatus, type BacklinkListResponse, type BacklinkRow, type BacklinkSummary } from "@shared/backlinks";
 import { api, errorMessage } from "@web/lib/api";
 import { useApi } from "@web/lib/hooks";
 import { formatDateTime, formatRelative } from "@web/lib/format";
@@ -15,8 +15,8 @@ import { Button, Card, Drawer, EmptyState, ErrorState, LoadingState, MetricTile,
 import { RunActionsProvider, SectionButton } from "@web/pages/live/RunActions";
 import { runCheckAction } from "@web/pages/live/backlinks/actions";
 import { setBacklinkJob } from "@web/pages/live/backlinks/job-store";
-import { DEFAULT_FILTERS, FILTER_LABELS, backlinksBase, csvHref, jobActive, listQuery, nOfM, progressText, relLabel, rowCheckState, shortDay, targetText, type ListFilters } from "./lib";
-import { BacklinkHistory, ChangeBadge, StatusChip, UrlCell } from "./parts";
+import { DEFAULT_FILTERS, FILTER_LABELS, backlinksBase, browserNote, browserPollInterval, csvHref, jobActive, listQuery, nOfM, progressText, relLabel, rowCheckState, shortDay, targetText, type ListFilters, type RowCheckState } from "./lib";
+import { BacklinkHistory, BrowserBadge, ChangeBadge, StatusChip, UrlCell } from "./parts";
 
 const FILTER_STATUSES: BacklinkFilterStatus[] = [...BACKLINK_STATUSES, "unchecked", "target_broken"];
 
@@ -46,15 +46,25 @@ export function SummaryTiles({ s }: { s: BacklinkSummary }) {
         value={jobActive(s.job) ? progressText(s.job) : s.lastCheckAt ? shortDay(s.lastCheckAt) : "Never"}
         sublabel={`${s.nextCheckAt ? `next weekly ${shortDay(s.nextCheckAt)}` : "no weekly check"} · ${s.totals.unchecked.toLocaleString("en-US")} not checked yet`}
       />
+      <p className="col-span-full text-xs text-zinc-600 dark:text-zinc-400" data-testid="browser-summary">
+        {browserSummaryText(s.browser)}
+      </p>
     </div>
   );
 }
 
-function RowCheckCell({ r, state, job, disabledReason, onCheck }: { r: BacklinkRow; state: "pending" | "queued" | "idle"; job: BacklinkJobView | null | undefined; disabledReason: string | null; onCheck: (r: BacklinkRow) => void }) {
+export function RowCheckCell({ r, state, job, disabledReason, onCheck }: { r: BacklinkRow; state: RowCheckState; job: BacklinkJobView | null | undefined; disabledReason: string | null; onCheck: (r: BacklinkRow) => void }) {
   if (state === "pending") {
     return (
       <Button size="sm" variant="secondary" loading disabled aria-live="polite">
         Checking…
+      </Button>
+    );
+  }
+  if (state === "browser") {
+    return (
+      <Button size="sm" variant="secondary" loading disabled aria-live="polite" title="The plain fetch is stored; this link is re-checked in Cloudflare's headless browser next (within the daily browser budget).">
+        Checking in browser…
       </Button>
     );
   }
@@ -142,6 +152,8 @@ function BacklinkTable({ rows, onOpen, pending, job, disabledReason, onCheck }: 
                 </td>
                 <td className="min-w-0 py-1.5 pr-2" title={r.statusReason ?? undefined}>
                   <StatusChip status={r.status} httpStatus={r.httpStatus} />
+                  {r.checkMethod === "browser" && <BrowserBadge className="mt-0.5" />}
+                  {browserNote(r) && <span className="block text-[11px] text-zinc-500 dark:text-zinc-400" title={r.browserReason ?? undefined}>{browserNote(r)}</span>}
                   {r.pageNoindex && <span className="block text-[11px] text-amber-800 dark:text-amber-300">page noindex</span>}
                 </td>
                 <td className="hidden py-1.5 pr-2 text-xs text-zinc-600 sm:table-cell dark:text-zinc-400" title={r.lastCheckedAt ? formatDateTime(r.lastCheckedAt) : undefined}>
@@ -253,6 +265,17 @@ export function BacklinksPage() {
     }, 3_000);
     return () => clearTimeout(t);
   }, [anyPending, reloadKey, base, onReload]);
+  // Browser re-checks waiting (and the day's browser budget left): drive the browser step and refresh, slowly.
+  const browserPoll = running || anyPending ? null : browserPollInterval(summary.data);
+  useEffect(() => {
+    if (!browserPoll) return;
+    const t = setTimeout(() => {
+      void api<BacklinkFeed>(`${base}/check/advance`, { method: "POST", body: {} })
+        .catch(() => null)
+        .finally(onReload);
+    }, browserPoll);
+    return () => clearTimeout(t);
+  }, [browserPoll, reloadKey, base, onReload]);
   const runAction = runCheckAction({ projectId, demo: project.isDemo, summary: summary.data, recheckIds: [] });
 
   const doRecheck = async (r: BacklinkRow) => {

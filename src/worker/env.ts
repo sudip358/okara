@@ -3,6 +3,13 @@ export interface Env {
   DB: D1Database;
   AGENT_RUN?: Workflow;
   ASSETS?: Fetcher;
+  /**
+   * Cloudflare Browser Run (formerly Browser Rendering) binding, wrangler.jsonc "browser": { "binding": "BROWSER" }.
+   * Used only for backlink browser re-checks (backlinks/browser.ts). Missing -> re-checks show "browser unavailable".
+   */
+  BROWSER?: Fetcher;
+  /** Daily browser-time cap in ms for backlink re-checks (default 480000 = 8 min; max 540000; 0 = off). */
+  BACKLINK_BROWSER_MS_PER_DAY?: string;
 
   ENVIRONMENT: "production" | "staging" | "development" | "test";
   APP_ORIGIN: string;

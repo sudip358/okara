@@ -4,6 +4,7 @@
  * as plain text; nothing here builds HTML.
  */
 import {
+  BROWSER_POLL_MS,
   FOUND_STATUSES,
   LIVE_POLL_MS,
   MAX_RECHECK_IDS,
@@ -208,10 +209,39 @@ export function nOfM(n: number, m: number): string {
 
 /**
  * Per-row check state for the Change column: "pending" while a recheck the user clicked has not produced a newer
- * check, "queued" while a full check job has not reached the row yet, else idle (shows the last change + a button).
+ * check, "browser" while the row waits for its browser re-check, "queued" while a full check job has not reached the row
+ * yet, else idle (shows the last change + a button).
  */
-export function rowCheckState(r: BacklinkRow, pendingSince: string | undefined, job: BacklinkJobView | null | undefined): "pending" | "queued" | "idle" {
+export type RowCheckState = "pending" | "browser" | "queued" | "idle";
+
+export function rowCheckState(r: BacklinkRow, pendingSince: string | undefined, job: BacklinkJobView | null | undefined): RowCheckState {
   if (pendingSince && !(r.lastCheckedAt && r.lastCheckedAt > pendingSince)) return "pending";
+  // The plain check is stored; the row waits for its browser re-check (Browser Run).
+  if (r.active && r.browserState === "pending") return "browser";
   if (r.active && job && jobActive(job) && job.scope === "all" && (!r.lastCheckedAt || r.lastCheckedAt < job.createdAt)) return "queued";
   return "idle";
+}
+
+// ------------------------------------------------------------------ browser re-checks
+/** Badge text for a status that came from the headless browser (null for a plain fetch / never checked). */
+export function methodBadge(r: Pick<BacklinkRow, "checkMethod">): string | null {
+  return r.checkMethod === "browser" ? "checked in browser" : null;
+}
+
+/** Short note under the status for rows whose browser re-check could not run (the plain result is shown). */
+export function browserNote(r: Pick<BacklinkRow, "browserState">): string | null {
+  if (r.browserState === "unavailable") return "browser unavailable";
+  if (r.browserState === "failed") return "browser re-check failed";
+  return null;
+}
+
+export const METHOD_LABEL: Record<"plain" | "browser", string> = { plain: "plain fetch", browser: "browser" };
+
+/**
+ * Re-checks are waiting and can run now: the pages call POST /check/advance every BROWSER_POLL_MS (no polling while
+ * the browser is unavailable or the day's browser budget is used up).
+ */
+export function browserPollInterval(s: Pick<BacklinkSummary, "browser"> | null | undefined): number | null {
+  const b = s?.browser;
+  return b && b.available && !b.deferred && b.waiting > 0 ? BROWSER_POLL_MS : null;
 }

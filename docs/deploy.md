@@ -108,6 +108,19 @@ need more than 10 ms of CPU per step, so agent runs will fail on the free plan. 
      invocation, driven by the start request, the open Live Backlinks view and the existing 15-minute cron (one batch
      per tick, so a 2,000-backlink weekly check finishes in about two to three days on cron alone). Until the migration
      is applied, the Backlinks page shows its empty state with "apply migration 0020" and the cron skips the monitor.
+   - **Backlink browser re-checks** (Cloudflare Browser Run fallback; [A38] 2026-10-05): apply migration
+     `0022_backlink_browser_recheck.sql` (`npm run db:migrate:remote`) BEFORE deploying the code (it adds
+     `backlink_checks.method`, `backlinks.check_method` / `browser_*` columns and the `browser_usage` / `browser_lease`
+     tables; the new checker writes those columns). `wrangler.jsonc` declares the binding `"browser": { "binding":
+     "BROWSER" }`; the Cloudflare Vite plugin copies it into `dist/okara/wrangler.json` (check after `npx vite build`:
+     `"browser": {"binding": "BROWSER"}`; `wrangler deploy --dry-run` lists `env.BROWSER  Browser Run`). Browser Run is
+     available on Workers Free (10 min of browser time per day, 3 concurrent browsers) and Paid (10 h/month then
+     $0.09/h; 10 concurrent browsers averaged monthly then $2/browser), per developers.cloudflare.com/browser-run/pricing/
+     (checked 2026-10-05). Okara uses at most one browser at a time and stops at `BACKLINK_BROWSER_MS_PER_DAY` (var,
+     default `480000` = 8 min/day, clamped to 540000, `0` = off), counted per UTC day for the whole account in D1. To
+     turn the fallback off, set the var to `0` or remove the binding: queued rows then show "browser unavailable" and
+     keep their plain result. Local dev: without `"remote": true` on the binding there may be no real browser; launches
+     then fail and rows end as "browser unavailable" after 3 tries (never a faked result).
    - **Partial (section) runs** (Live view "▶ Run …" buttons): apply migration `0016_run_scope.sql`
      (`npm run db:migrate:remote`; adds `agent_runs.scope_json`). Until it is applied, full runs keep working and
      a partial run request fails.

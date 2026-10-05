@@ -316,7 +316,7 @@ describe("cron", () => {
     setBacklinkFetch(fakeFetch(siteRoutes(3, () => "ugc")).fetch, noSleep);
     const now = new Date();
     const r = await processDueBacklinkChecks(s.env, now);
-    expect(r).toEqual({ scheduled: 1, processed: 3 });
+    expect(r).toEqual({ scheduled: 1, processed: 3, browser: "idle" });
     const jobs = await s.db.all<Json>("SELECT trigger, status, done FROM backlink_jobs WHERE project_id = ?", s.pid);
     expect(jobs).toEqual([{ trigger: "scheduled", status: "completed", done: 3 }]);
     expect((await s.db.first<{ n: number }>("SELECT COUNT(*) AS n FROM backlinks WHERE project_id = ? AND status = 'ugc'", s.pid))?.n).toBe(3);
