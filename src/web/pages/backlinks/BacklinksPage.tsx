@@ -15,7 +15,7 @@ import { Button, Card, Drawer, EmptyState, ErrorState, LoadingState, MetricTile,
 import { RunActionsProvider, SectionButton } from "@web/pages/live/RunActions";
 import { runCheckAction } from "@web/pages/live/backlinks/actions";
 import { setBacklinkJob } from "@web/pages/live/backlinks/job-store";
-import { DEFAULT_FILTERS, FILTER_LABELS, backlinksBase, csvHref, jobActive, listQuery, nOfM, progressText, relLabel, shortDay, targetText, type ListFilters } from "./lib";
+import { DEFAULT_FILTERS, FILTER_LABELS, backlinksBase, csvHref, jobActive, listQuery, nOfM, progressText, relLabel, rowCheckState, shortDay, targetText, type ListFilters } from "./lib";
 import { BacklinkHistory, ChangeBadge, StatusChip, UrlCell } from "./parts";
 
 const FILTER_STATUSES: BacklinkFilterStatus[] = [...BACKLINK_STATUSES, "unchecked", "target_broken"];
@@ -48,16 +48,6 @@ export function SummaryTiles({ s }: { s: BacklinkSummary }) {
       />
     </div>
   );
-}
-
-/**
- * Per-row check state for the Change column: "pending" while a recheck the user clicked has not produced a newer
- * check, "queued" while a full check job has not reached the row yet, else idle (shows the last change + a button).
- */
-export function rowCheckState(r: BacklinkRow, pendingSince: string | undefined, job: BacklinkJobView | null | undefined): "pending" | "queued" | "idle" {
-  if (pendingSince && !(r.lastCheckedAt && r.lastCheckedAt > pendingSince)) return "pending";
-  if (r.active && job && jobActive(job) && job.scope === "all" && (!r.lastCheckedAt || r.lastCheckedAt < job.createdAt)) return "queued";
-  return "idle";
 }
 
 function RowCheckCell({ r, state, job, disabledReason, onCheck }: { r: BacklinkRow; state: "pending" | "queued" | "idle"; job: BacklinkJobView | null | undefined; disabledReason: string | null; onCheck: (r: BacklinkRow) => void }) {

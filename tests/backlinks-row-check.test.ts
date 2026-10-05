@@ -1,7 +1,7 @@
 /** Change column: per-row Check / Recheck button state (pending → result; queued during a full check). */
 import { describe, expect, it } from "vitest";
 import type { BacklinkJobView, BacklinkRow } from "@shared/backlinks";
-import { rowCheckState } from "@web/pages/backlinks/BacklinksPage";
+import { rowCheckState } from "@web/pages/backlinks/lib";
 
 const row = (over: Partial<BacklinkRow> = {}): BacklinkRow =>
   ({ id: "bl1", liveUrl: "https://blog.example/a", liveHost: "blog.example", targetUrl: "https://shop.example/c", active: true, lastCheckedAt: null, ...over }) as BacklinkRow;

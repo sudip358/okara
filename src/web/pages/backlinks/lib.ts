@@ -205,3 +205,13 @@ export function shortDay(v: string | null | undefined): string {
 export function nOfM(n: number, m: number): string {
   return `${n.toLocaleString("en-US")} of ${m.toLocaleString("en-US")}`;
 }
+
+/**
+ * Per-row check state for the Change column: "pending" while a recheck the user clicked has not produced a newer
+ * check, "queued" while a full check job has not reached the row yet, else idle (shows the last change + a button).
+ */
+export function rowCheckState(r: BacklinkRow, pendingSince: string | undefined, job: BacklinkJobView | null | undefined): "pending" | "queued" | "idle" {
+  if (pendingSince && !(r.lastCheckedAt && r.lastCheckedAt > pendingSince)) return "pending";
+  if (r.active && job && jobActive(job) && job.scope === "all" && (!r.lastCheckedAt || r.lastCheckedAt < job.createdAt)) return "queued";
+  return "idle";
+}
