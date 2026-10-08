@@ -3,6 +3,9 @@
  * phones). The launcher sits in the project sidebar. Answers stream as ndjson (POST ...?stream=1): steps show
  * as collapsible groups ("Read data · 3 steps"); state-changing actions show a confirmation card and run only
  * when the user presses Confirm (enforced server-side). Model output renders as markdown-lite text, never HTML.
+ * [A40] While a turn runs: the current step ("Thinking…", "Reading Search Console…", "Writing answer…") with the
+ * elapsed seconds, and the answer text as it streams (text_delta events, applied at most every 100 ms). The polite
+ * live region announces step changes only, never tokens or seconds.
  */
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -13,7 +16,28 @@ import { formatRelative } from "@web/lib/format";
 import { projectPath } from "@web/lib/project-context";
 import { CHAT_MODEL_ANCHOR } from "@web/pages/integrations/custom-writer-lib";
 import { Badge, Spinner, buttonClass, cx } from "@web/components/ui";
-import { groupSteps, mergeActions, mergeMessages, parseMarkdownLite, progressText, safeFilename, secretKeyHint, secretRequestAllowed, secretRequestBody, starterPrompts, STEP_STATUS_LABEL, toCsv, upsertStep, type Block, type Inline } from "./lib";
+import {
+  createDraftBatcher,
+  formatElapsed,
+  groupSteps,
+  mergeActions,
+  mergeMessages,
+  parseMarkdownLite,
+  phaseLabel,
+  progressText,
+  safeFilename,
+  secretKeyHint,
+  secretRequestAllowed,
+  secretRequestBody,
+  starterPrompts,
+  STEP_STATUS_LABEL,
+  toCsv,
+  upsertStep,
+  type Block,
+  type Draft,
+  type Inline,
+  type TurnPhase,
+} from "./lib";
 
 const store = {
   get(key: string): string | null {
@@ -339,6 +363,25 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
+/** [A40] Seconds since the turn started, updated once a second (only this label re-renders). */
+export function Elapsed({ since, nowMs }: { since: number; nowMs?: number }) {
+  const [now, setNow] = useState(() => nowMs ?? Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return <span className="tabular-nums">{formatElapsed((now - since) / 1000)}</span>;
+}
+
+/** [A40] Live state of the running turn: streamed text so far, the current step label and when it started. */
+export interface LiveTurn {
+  draft: Draft | null;
+  label: string;
+  startedAt: number | null;
+  /** Tests: fixed clock for the elapsed label. */
+  nowMs?: number;
+}
+
 export function AssistantMessage({
   message,
   actions,
@@ -346,6 +389,7 @@ export function AssistantMessage({
   busy,
   onDecide,
   onNavigate,
+  live = null,
 }: {
   message: ChatMessage;
   actions: ChatAction[];
@@ -353,20 +397,37 @@ export function AssistantMessage({
   busy: boolean;
   onDecide: Decide;
   onNavigate: (path: string) => void;
+  live?: LiveTurn | null;
 }) {
   const mine = actions.filter((a) => message.steps.some((s) => s.actionId === a.id));
   const running = message.status === "running";
+  const draft = running && !message.content ? (live?.draft?.text ?? "") : "";
   return (
     <div className="min-w-0 space-y-2">
       <StepGroups steps={message.steps} />
-      {message.content ? <MarkdownLite text={message.content} projectId={projectId} /> : running ? null : message.status === "error" ? null : <p className="text-sm text-zinc-500">No answer.</p>}
+      {message.content ? (
+        <MarkdownLite text={message.content} projectId={projectId} />
+      ) : draft ? (
+        // Streamed text as plain markdown-lite (untrusted model output, never HTML); screen readers get the step label.
+        <div aria-busy="true" data-streaming="true">
+          <MarkdownLite text={draft} projectId={projectId} />
+        </div>
+      ) : running ? null : message.status === "error" ? null : (
+        <p className="text-sm text-zinc-500">No answer.</p>
+      )}
       {mine.map((a) => (
         <ConfirmCard key={a.id} action={a} busy={busy} onDecide={onDecide} />
       ))}
       <Outputs steps={message.steps} onNavigate={onNavigate} />
       {running && (
         <p className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-          <Spinner className="h-3.5 w-3.5" /> {progressText(message.steps)}
+          <Spinner className="h-3.5 w-3.5" /> <span>{live ? live.label : progressText(message.steps)}</span>
+          {live?.startedAt ? (
+            <>
+              <span aria-hidden="true">·</span>
+              <Elapsed since={live.startedAt} nowMs={live.nowMs} />
+            </>
+          ) : null}
         </p>
       )}
       {message.status === "error" && (
@@ -402,6 +463,11 @@ function useChat(projectId: string, enabled: boolean) {
   const [error, setError] = useState<string | null>(null);
   const [loadingSession, setLoadingSession] = useState(false);
   const ctrl = useRef<AbortController | null>(null);
+  // [A40] Streamed answer text (batched to ~10 renders/s), the current step and the turn's start time.
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const [phase, setPhase] = useState<TurnPhase | null>(null);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const batcher = useMemo(() => createDraftBatcher(setDraft), []);
 
   const loadStatus = useCallback(() => {
     setStatusError(null);
@@ -460,7 +526,13 @@ function useChat(projectId: string, enabled: boolean) {
         path,
         body,
         (ev) => {
-          if (ev.type === "started") {
+          if (ev.type === "text_delta") {
+            batcher.push(ev);
+          } else if (ev.type === "phase") {
+            setPhase({ phase: ev.phase, round: ev.round, tools: ev.tools });
+          } else if (ev.type === "started") {
+            batcher.reset();
+            setPhase(null);
             currentId = ev.messageId;
             setState((s) => {
               const withoutTemp = s.messages.filter((m) => !m.id.startsWith("tmp_"));
@@ -474,6 +546,8 @@ function useChat(projectId: string, enabled: boolean) {
             setState((s) => ({ ...s, messages: s.messages.map((m) => (m.id === currentId ? { ...m, steps: upsertStep(m.steps, ev.step) } : m)) }));
           } else if (ev.type === "done") {
             sawDone = true;
+            batcher.reset();
+            setPhase(null);
             const r = ev.result;
             setState((s) => ({ ...s, messages: mergeMessages(s.messages.filter((m) => !m.id.startsWith("tmp_")), [r.userMessage, r.message]), actions: mergeActions(s.actions, r.actions) }));
             setSessions((list) => (list ? [r.session, ...list.filter((x) => x.id !== r.session.id)] : list));
@@ -485,7 +559,7 @@ function useChat(projectId: string, enabled: boolean) {
       );
       return sawDone;
     },
-    [],
+    [batcher],
   );
 
   const send = useCallback(
@@ -494,6 +568,7 @@ function useChat(projectId: string, enabled: boolean) {
       if (!content || busy) return;
       setBusy(true);
       setError(null);
+      setStartedAt(Date.now());
       const now = new Date().toISOString();
       let sid = state.sessionId;
       setState((s) => ({
@@ -520,9 +595,12 @@ function useChat(projectId: string, enabled: boolean) {
         if ((e as { status?: number })?.status === 412) loadStatus();
       } finally {
         setBusy(false);
+        setStartedAt(null);
+        setPhase(null);
+        batcher.reset();
       }
     },
-    [busy, state.sessionId, projectId, stream, openSession, loadStatus],
+    [busy, state.sessionId, projectId, stream, openSession, loadStatus, batcher],
   );
 
   const decide = useCallback(
@@ -531,6 +609,7 @@ function useChat(projectId: string, enabled: boolean) {
       if (!sid || busy) return;
       setBusy(true);
       setError(null);
+      setStartedAt(Date.now());
       setState((s) => ({ ...s, actions: s.actions.map((a) => (a.id === actionId ? { ...a, status: decision === "confirm" ? "executing" : a.status } : a)) }));
       try {
         const ok = await stream(`/projects/${encodeURIComponent(projectId)}/chat/sessions/${encodeURIComponent(sid)}/actions/${encodeURIComponent(actionId)}/${decision}?stream=1`, body, null);
@@ -540,9 +619,12 @@ function useChat(projectId: string, enabled: boolean) {
         await openSession(sid);
       } finally {
         setBusy(false);
+        setStartedAt(null);
+        setPhase(null);
+        batcher.reset();
       }
     },
-    [busy, state.sessionId, projectId, stream, openSession],
+    [busy, state.sessionId, projectId, stream, openSession, batcher],
   );
 
   const remove = useCallback(
@@ -558,7 +640,7 @@ function useChat(projectId: string, enabled: boolean) {
     [projectId, state.sessionId, newChat],
   );
 
-  return { status, statusError, loadStatus, state, sessions, loadSessions, openSession, newChat, send, decide, remove, busy, error, setError, loadingSession };
+  return { status, statusError, loadStatus, state, sessions, loadSessions, openSession, newChat, send, decide, remove, busy, error, setError, loadingSession, draft, phase, startedAt };
 }
 
 // ------------------------------------------------------------------ panel
@@ -602,7 +684,9 @@ export function ChatPanel({
   const ready = chat.status?.state === "ready";
   const running = chat.state.messages.some((m) => m.status === "running");
   const lastAssistant = [...chat.state.messages].reverse().find((m) => m.role === "assistant");
-  const live = running && lastAssistant ? progressText(lastAssistant.steps) : lastAssistant && !chat.busy ? (lastAssistant.status === "awaiting_confirmation" ? "Answer ready. An action is waiting for your confirmation." : "Answer ready.") : "";
+  // [A40] The polite live region changes only when the step changes (never per token or per second).
+  const stepLabel = running && lastAssistant ? phaseLabel(chat.phase, chat.draft, lastAssistant.steps) : "";
+  const live = running && lastAssistant ? stepLabel : lastAssistant && !chat.busy ? (lastAssistant.status === "awaiting_confirmation" ? "Answer ready. An action is waiting for your confirmation." : "Answer ready.") : "";
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -610,7 +694,7 @@ export function ChatPanel({
   useEffect(() => {
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [chat.state.messages]);
+  }, [chat.state.messages, chat.draft]);
 
   const goTo = (path: string) => {
     navigate(path);
@@ -781,7 +865,16 @@ export function ChatPanel({
                   <p className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-sm bg-zinc-900 px-3 py-2 text-sm text-white [overflow-wrap:anywhere] dark:bg-zinc-100 dark:text-zinc-900">{m.content}</p>
                 </div>
               ) : (
-                <AssistantMessage key={m.id} message={m} actions={chat.state.actions} projectId={projectId} busy={chat.busy} onDecide={(id, d, body) => void chat.decide(id, d, body)} onNavigate={goTo} />
+                <AssistantMessage
+                  key={m.id}
+                  message={m}
+                  actions={chat.state.actions}
+                  projectId={projectId}
+                  busy={chat.busy}
+                  onDecide={(id, d, body) => void chat.decide(id, d, body)}
+                  onNavigate={goTo}
+                  live={m.status === "running" && m.id === lastAssistant?.id ? { draft: chat.draft, label: stepLabel, startedAt: chat.startedAt } : null}
+                />
               ),
             )
           )}

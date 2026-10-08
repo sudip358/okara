@@ -17,7 +17,9 @@ import { HttpError, setupRequired } from "../lib/errors";
 import { utcDay } from "../lib/time";
 import type { ProjectRow, SessionUser } from "../platform/access";
 import { buildSystemPrompt } from "./prompt";
-import { CHAT_MAX_TOOL_ROUNDS, CHAT_TURN_DEADLINE_MS, errorOutcome, orderResults, runAgentLoop, type LoopOutcome, type PendingState } from "./loop";
+import { CHAT_MAX_TOOL_ROUNDS, CHAT_TURN_DEADLINE_MS, errorOutcome, orderResults, runAgentLoop, type LoopOutcome, type PendingState, type PhaseEvent, type TextDeltaEvent } from "./loop";
+import { clearSessionCache, REFRESH_RE, sessionCacheScope, sessionToolCache } from "./cache";
+import { isToolGroup, routeGroups, type ToolGroup } from "./routing";
 import { resolveChatModel } from "./model";
 import {
   acquireLease,
@@ -30,6 +32,7 @@ import {
   insertAction,
   insertTurnMessages,
   pendingActions,
+  previousAnswerTools,
   releaseLease,
   requireSession,
   toSummary,
@@ -84,6 +87,9 @@ async function expirePending(d: ChatDeps, s: SessionRow): Promise<void> {
   }
 }
 
+/** [A40] The session's read-tool cache scope (workspace, project, user, session). */
+const cacheScope = (d: ChatDeps, s: SessionRow) => sessionCacheScope(s.workspace_id, d.project.id, d.user.id, s.id);
+
 /** Run the loop for one assistant message, persisting steps as they land; returns the loop outcome. */
 async function runForMessage(
   d: ChatDeps,
@@ -91,16 +97,43 @@ async function runForMessage(
   model: ChatModel,
   messageId: string,
   initialSteps: ChatStep[],
-  start: { history: Array<{ role: "user" | "assistant"; text: string }>; turn: PendingState["turn"]; rounds: number; maxRounds: number },
+  start: {
+    history: Array<{ role: "user" | "assistant"; text: string }>;
+    turn: PendingState["turn"];
+    rounds: number;
+    maxRounds: number;
+    /** [A40] Routed tool groups and whether more_tools was used. */
+    groups: ToolGroup[];
+    expanded: boolean;
+    userText: string;
+  },
   emit: Emit,
+  streaming: boolean,
 ): Promise<{ outcome: LoopOutcome; steps: ChatStep[] }> {
   const steps = [...initialSteps];
   const nowMs = d.nowMs ?? (() => Date.now());
+  const day = utcDay(d.now);
+  const prompts = new Map<string, string>();
   const outcome = await runAgentLoop(
     {
       model,
       ctx: toolContext(d),
-      system: buildSystemPrompt(d.project, utcDay(d.now)),
+      system: buildSystemPrompt(d.project, day),
+      buildSystem(groups) {
+        const key = groups.join(",");
+        let p = prompts.get(key);
+        if (p === undefined) prompts.set(key, (p = buildSystemPrompt(d.project, day, groups)));
+        return p;
+      },
+      groups: start.groups,
+      expanded: start.expanded,
+      cache: sessionToolCache(cacheScope(d, s), nowMs, { bypassLive: REFRESH_RE.test(start.userText) }),
+      ...(streaming
+        ? {
+            onText: (ev: TextDeltaEvent) => emit({ type: "text_delta", round: ev.round, delta: ev.delta, ...(ev.reset ? { reset: true } : {}) }),
+            onPhase: (ev: PhaseEvent) => emit({ type: "phase", phase: ev.phase, round: ev.round, ...(ev.tools ? { tools: ev.tools } : {}) }),
+          }
+        : {}),
       history: start.history,
       maxRounds: start.maxRounds,
       deadlineAt: nowMs() + CHAT_TURN_DEADLINE_MS,
@@ -183,7 +216,9 @@ export async function prepareSend(d: ChatDeps, sessionId: string, rawText: strin
     throw e;
   }
   return {
-    async run(emit = () => {}) {
+    async run(emitArg?: Emit) {
+      const streaming = emitArg !== undefined;
+      const emit: Emit = emitArg ?? (() => {});
       const userMessage = ids.userMessageId ? await getMessage(d.db, s, ids.userMessageId) : null;
       emit({ type: "started", sessionId: s.id, userMessage, messageId: ids.assistantMessageId });
       let steps: ChatStep[] = [];
@@ -195,7 +230,18 @@ export async function prepareSend(d: ChatDeps, sessionId: string, rawText: strin
         () => steps,
         async () => {
           const history = await historyFor(d.db, s, ids.userSeq);
-          const r = await runForMessage(d, s, model, ids.assistantMessageId, [], { history, turn: [{ role: "user", text }], rounds: 0, maxRounds: CHAT_MAX_TOOL_ROUNDS }, emit);
+          // [A40] Tools for this turn: groups the message asks for plus those the previous answer used.
+          const groups = routeGroups(text, await previousAnswerTools(d.db, s, ids.userSeq));
+          const r = await runForMessage(
+            d,
+            s,
+            model,
+            ids.assistantMessageId,
+            [],
+            { history, turn: [{ role: "user", text }], rounds: 0, maxRounds: CHAT_MAX_TOOL_ROUNDS, groups, expanded: false, userText: text },
+            emit,
+            streaming,
+          );
           steps = r.steps;
           await finish(d, s, ids.assistantMessageId, "", r.outcome, r.steps);
         },
@@ -246,7 +292,9 @@ export async function prepareDecision(d: ChatDeps, sessionId: string, actionId: 
     return settled();
   }
   return {
-    async run(emit = () => {}) {
+    async run(emitArg?: Emit) {
+      const streaming = emitArg !== undefined;
+      const emit: Emit = emitArg ?? (() => {});
       const msg = await getMessage(d.db, s, action.message_id);
       emit({ type: "started", sessionId: s.id, userMessage: null, messageId: msg.id });
       let steps = [...msg.steps];
@@ -281,7 +329,19 @@ export async function prepareDecision(d: ChatDeps, sessionId: string, actionId: 
           }
           const history = await historyFor(d.db, s, await seqOf(d, s, msg.id));
           const turn = [...pending.turn, { role: "tool_results" as const, results: orderResults(pending.callOrder, results) }];
-          const r = await runForMessage(d, s, model, msg.id, steps, { history, turn, rounds: pending.rounds, maxRounds: Math.max(CHAT_MAX_TOOL_ROUNDS, pending.rounds + 2) }, emit);
+          const first = pending.turn.find((t) => t.role === "user");
+          const userText = first && first.role === "user" ? first.text : "";
+          const groups = Array.isArray(pending.groups) ? pending.groups.filter(isToolGroup) : routeGroups(userText);
+          const r = await runForMessage(
+            d,
+            s,
+            model,
+            msg.id,
+            steps,
+            { history, turn, rounds: pending.rounds, maxRounds: Math.max(CHAT_MAX_TOOL_ROUNDS, pending.rounds + 2), groups, expanded: pending.expanded === true, userText },
+            emit,
+            streaming,
+          );
           steps = r.steps;
           await finish(d, s, msg.id, msg.content, r.outcome, r.steps);
         },
@@ -328,6 +388,8 @@ async function executeDecision(d: ChatDeps, action: ActionRow, decision: "confir
   try {
     const out = await tool.execute(toolContext(d), parsed.data, { proposedAt: action.created_at, secret });
     await finishAs("executed", out.summary, out.data);
+    // [A40] The action may have changed what cached reads returned.
+    clearSessionCache(sessionCacheScope(action.workspace_id, d.project.id, d.user.id, action.session_id));
     return { status: "executed", summary: out.summary, navigate: out.navigate ?? null, forModel: resultForModel({ ok: true, executed: true, data: out.data }) };
   } catch (e) {
     const message = toolErrorMessage(e);

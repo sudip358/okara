@@ -186,14 +186,17 @@ describe("admin tool registry", () => {
     expect(ADMIN_READ_TOOLS.map((t) => t.name)).toEqual(["seo_audit", "link_workbench", "live_insight", "geo_data", "import_data", "project_admin", "run_detail"]);
     for (const t of ADMIN_READ_TOOLS) expect(t.kind).toBe("read");
     for (const t of ADMIN_ACTION_TOOLS) expect(t.kind).toBe("action");
-    expect(CHAT_TOOLS.length).toBeLessThanOrEqual(53); // [A35] +models, provider_models, integration_options, manage_models, manage_credentials, admin_settings
+    // [A35] +models, provider_models, integration_options, manage_models, manage_credentials, admin_settings; [A40] +backlinks
+    // (each round now sends only the routed subset, routing.ts).
+    expect(CHAT_TOOLS.length).toBeLessThanOrEqual(54);
     const specs = toolSpecs();
     expect(new Set(specs.map((s) => s.name)).size).toBe(specs.length);
     for (const s of specs) expect(s.parameters.type).toBe("object");
     for (const t of [...ADMIN_READ_TOOLS, ...ADMIN_ACTION_TOOLS]) expect(t.description.length, t.name).toBeLessThanOrEqual(420);
     // The OpenAI-compatible text-tools fallback carries every schema in the system prompt: keep it bounded.
     // [A35] raised from 40,000 for the six model/credential/admin tools (descriptions kept terse).
-    expect(textToolsSystem("sys", specs).length).toBeLessThan(44_000);
+    // [A40] raised to 46,000 for backlinks; a round now carries only the routed subset (tests/chat-speed.test.ts).
+    expect(textToolsSystem("sys", specs).length).toBeLessThan(46_000);
     // No member/delete/allowlist tools exist; the only credential tool is the secure-field manage_credentials [A35].
     for (const s of specs) expect(s.name).not.toMatch(/api_key|member_role|delete_project|allowlist/);
     expect(specs.filter((s) => /credential/.test(s.name)).map((s) => s.name)).toEqual(["manage_credentials"]);

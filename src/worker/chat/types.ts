@@ -42,7 +42,8 @@ export interface RoundResult {
   text: string;
   toolCalls: ToolCall[];
   stop: RoundStop;
-  usage: { inputTokens: number; outputTokens: number };
+  /** `estimated`: the provider reported no usage (a stream without a usage chunk); tokens are Okara's estimate. */
+  usage: { inputTokens: number; outputTokens: number; estimated?: boolean };
 }
 
 export interface ToolSpec {
@@ -59,6 +60,13 @@ export interface RoundRequest {
   tools: ToolSpec[];
   /** Milliseconds left before the turn's wall-clock limit (bounds the HTTP timeout). */
   timeoutMs: number;
+  /**
+   * [A40] Set when the caller streams the answer: the adapter requests a streamed response and calls this with each
+   * visible text delta as it arrives (never tool-call text). Unset: a plain (non-stream) request.
+   */
+  onText?: (delta: string) => void;
+  /** [A40] A retry restarts the round: text already passed to onText is void. */
+  onRestart?: () => void;
 }
 
 /** A tool-calling chat model (the workspace writer). Implementations meter every attempt (budget + provider_calls). */

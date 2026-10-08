@@ -46,6 +46,7 @@ import { MATON_CHAT_TOOLS } from "./tools-maton";
 import { ADMIN_ACTION_TOOLS } from "./tools-admin-actions";
 import { MODEL_ACTION_TOOLS, MODEL_CHAT_TOOLS } from "./tools-models";
 import { ADMIN_SETTINGS_ACTION_TOOLS, ADMIN_SETTINGS_READ_TOOLS } from "./tools-admin-settings";
+import { backlinksTool } from "./tools-backlinks";
 
 // ------------------------------------------------------------------ limits
 /** Max characters of one tool result handed to the model. */
@@ -1153,6 +1154,7 @@ export const CHAT_TOOLS: ChatTool[] = [
   ...MATON_CHAT_TOOLS,
   ...MODEL_CHAT_TOOLS,
   ...ADMIN_SETTINGS_READ_TOOLS,
+  backlinksTool,
   runAgentNow,
   updateRecommendationStatus,
   approveCompetitorPageTool,
@@ -1167,9 +1169,17 @@ const BY_NAME = new Map(CHAT_TOOLS.map((t) => [t.name, t]));
 export const getTool = (name: string): ChatTool | undefined => BY_NAME.get(name);
 export const isActionTool = (t: ChatTool): t is ActionTool => t.kind === "action";
 
-/** Tool definitions sent to the model (stable order, so the request prefix stays the same within a session). */
+const SPECS = new Map<string, ToolSpec>();
+/** One tool's definition for the model (JSON Schema computed once per isolate). */
+export function toolSpec(t: ChatTool): ToolSpec {
+  let s = SPECS.get(t.name);
+  if (!s) SPECS.set(t.name, (s = { name: t.name, description: t.description, parameters: toolParameters(t.schema) }));
+  return s;
+}
+
+/** Every tool definition (stable registry order). Rounds send a routed subset (routing.ts) [A40]. */
 export function toolSpecs(): ToolSpec[] {
-  return CHAT_TOOLS.map((t) => ({ name: t.name, description: t.description, parameters: toolParameters(t.schema) }));
+  return CHAT_TOOLS.map(toolSpec);
 }
 
 /** Wrap a tool's data for the model: capped JSON. */

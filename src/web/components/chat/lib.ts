@@ -3,7 +3,7 @@
  * markdown-lite tree (paragraphs, bullet/numbered lists, bold, inline code, links) and rendered as React text,
  * never as HTML. Links are kept only for in-app routes of the current project or http(s) URLs.
  */
-import type { ChatAction, ChatMessage, ChatSecretField, ChatStep, ChatStepKind } from "@shared/types";
+import type { ChatAction, ChatMessage, ChatPhase, ChatSecretField, ChatStep, ChatStepKind } from "@shared/types";
 
 // ------------------------------------------------------------------ markdown-lite
 export type Inline =
@@ -177,6 +177,103 @@ export function progressText(steps: ChatStep[]): string {
   if (!last) return "Ask Okara is thinking…";
   if (last.status === "awaiting_confirmation") return "Waiting for your confirmation.";
   return `${last.kind === "read" ? "Read" : last.kind === "output" ? "Prepared" : "Ran"} ${last.tool.replace(/_/g, " ")}. Still working…`;
+}
+
+// ------------------------------------------------------------------ live progress and streamed text [A40]
+/** What the turn is doing (from `phase` stream events). */
+export interface TurnPhase {
+  phase: ChatPhase;
+  round: number;
+  tools?: string[];
+}
+
+/** The streamed text of the current model round (display only; `done` brings the stored answer). */
+export interface Draft {
+  round: number;
+  text: string;
+}
+
+/** Apply one text_delta: a later round replaces the draft; `reset` replaces the round's text. */
+export function applyTextDelta(draft: Draft | null, ev: { round: number; delta: string; reset?: boolean }): Draft {
+  if (!draft || ev.round > draft.round || ev.reset) return { round: ev.round, text: ev.delta };
+  if (ev.round < draft.round) return draft;
+  return { round: draft.round, text: draft.text + ev.delta };
+}
+
+/**
+ * Batches text deltas so the panel re-renders at most every `ms` (100 ms by default), not per token; `flush` applies
+ * what is pending now (e.g. on `done`), `reset` clears the draft.
+ */
+export function createDraftBatcher(
+  onUpdate: (draft: Draft | null) => void,
+  ms = 100,
+  timers: { set: (fn: () => void, ms: number) => unknown; clear: (t: unknown) => void } = { set: (fn, t) => setTimeout(fn, t), clear: (t) => clearTimeout(t as ReturnType<typeof setTimeout>) },
+) {
+  let draft: Draft | null = null;
+  let timer: unknown = null;
+  return {
+    push(ev: { round: number; delta: string; reset?: boolean }) {
+      draft = applyTextDelta(draft, ev);
+      if (timer === null)
+        timer = timers.set(() => {
+          timer = null;
+          onUpdate(draft);
+        }, ms);
+    },
+    flush() {
+      if (timer !== null) timers.clear(timer);
+      timer = null;
+      onUpdate(draft);
+    },
+    reset() {
+      if (timer !== null) timers.clear(timer);
+      timer = null;
+      draft = null;
+      onUpdate(null);
+    },
+  };
+}
+
+/** Plain-language area of a tool, for "Reading <area>…". */
+export function toolArea(tool: string): string {
+  if (tool.startsWith("search_console") || tool === "classify_buyer_queries") return "Search Console";
+  if (tool.startsWith("dataforseo") || tool === "list_competitors" || tool === "update_competitors") return "competitor data";
+  if (tool === "backlinks") return "backlinks";
+  if (tool.startsWith("geo_") || tool === "update_geo_prompts" || tool === "approve_competitor_page") return "GEO results";
+  if (tool === "live_insight") return "the Live view";
+  if (tool === "maton_data") return "Google data via Maton";
+  if (tool === "import_data" || tool === "imported_research" || tool === "manage_import_sync") return "imports";
+  if (tool === "internal_link_suggestions" || tool === "link_workbench" || tool.includes("link")) return "internal links";
+  if (["list_pages", "page_details", "seo_audit", "checklist_status", "draft_check"].includes(tool)) return "the site audit";
+  if (tool.includes("recommendation")) return "recommendations";
+  if (["list_runs", "run_activity", "run_detail"].includes(tool)) return "agent runs";
+  if (tool === "models" || tool === "provider_models") return "models";
+  if (tool === "project_admin" || tool === "integration_options") return "project settings";
+  if (tool === "get_overview") return "the overview";
+  return tool.replace(/_/g, " ");
+}
+
+const ACTION_TOOLS_RE = /^(run_agent_now|cancel_run|update_|approve_|set_|edit_|link_job|manage_|classify_|admin_settings|dataforseo_(refresh|keyword))/;
+
+/** The step label shown while a turn runs: "Thinking…", "Reading Search Console…", "Writing answer…". */
+export function phaseLabel(phase: TurnPhase | null, draft: Draft | null, steps: ChatStep[]): string {
+  if (draft && draft.text && (!phase || draft.round > phase.round || (draft.round === phase.round && phase.phase === "model"))) return "Writing answer…";
+  if (phase?.phase === "tools" && phase.tools?.length) {
+    const tools = phase.tools;
+    if (tools.includes("more_tools") && tools.length === 1) return "Loading more tools…";
+    if (tools.every((t) => t === "navigate" || t === "export_csv")) return "Preparing…";
+    if (tools.some((t) => ACTION_TOOLS_RE.test(t)) && tools.every((t) => ACTION_TOOLS_RE.test(t))) return "Preparing a change for your confirmation…";
+    const areas = [...new Set(tools.filter((t) => !ACTION_TOOLS_RE.test(t) && t !== "more_tools").map(toolArea))];
+    return areas.length <= 1 ? `Reading ${areas[0] ?? "data"}…` : `Reading ${areas[0]} and ${areas.length - 1} more…`;
+  }
+  if (phase?.phase === "model") return phase.round > 1 ? "Thinking about the results…" : "Thinking…";
+  return progressText(steps);
+}
+
+/** "8 s", "1 min 05 s". */
+export function formatElapsed(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, "0")} s`;
 }
 
 // ------------------------------------------------------------------ CSV (client-side export)

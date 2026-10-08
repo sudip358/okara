@@ -214,6 +214,18 @@ export async function historyFor(db: Db, s: SessionRow, beforeSeq: number): Prom
   return out;
 }
 
+/** [A40] Tool names the previous answer in this session used (routing carries their groups into a follow-up). */
+export async function previousAnswerTools(db: Db, s: SessionRow, beforeSeq: number): Promise<string[]> {
+  const r = await db.first<{ steps_json: string }>(
+    "SELECT steps_json FROM chat_messages WHERE workspace_id = ? AND session_id = ? AND role = 'assistant' AND seq < ? ORDER BY seq DESC LIMIT 1",
+    s.workspace_id,
+    s.id,
+    beforeSeq,
+  );
+  if (!r) return [];
+  return [...new Set(parseJson<ChatStep[]>(r.steps_json, []).filter((st) => st.status !== "error").map((st) => st.tool))].slice(0, 30);
+}
+
 /** Take the session's turn lease: from idle, awaiting_confirmation (when allowed), or an expired running lease. */
 export async function acquireLease(db: Db, s: SessionRow, now: Date, from: Array<"idle" | "awaiting_confirmation">): Promise<boolean> {
   const states = from.map(() => "?").join(", ");

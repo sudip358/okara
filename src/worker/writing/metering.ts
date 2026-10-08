@@ -25,7 +25,7 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 3);
 }
 
-export async function metered<T extends { usage: { inputTokens: number; outputTokens: number } }>(
+export async function metered<T extends { usage: { inputTokens: number; outputTokens: number; estimated?: boolean } }>(
   hooks: WriterHooks,
   meta: { provider: string; model: string; purpose: string; estimatedTokens: number; maxRetries: number },
   run: (onAttempt: (a: AttemptInfo) => Promise<void>) => Promise<{ result: T; requestId: string | null; latencyMs: number; failure: WriterOutputError | null }>,
@@ -72,6 +72,7 @@ export async function metered<T extends { usage: { inputTokens: number; outputTo
       requestId,
       inputTokens: result.usage.inputTokens,
       outputTokens: result.usage.outputTokens,
+      ...(result.usage.estimated ? { tokensAreEstimate: true } : {}),
       costUsd: null,
       costIsEstimate: true,
       latencyMs,

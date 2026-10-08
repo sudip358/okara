@@ -14,11 +14,17 @@
  * tool use is rejected by current models. No `thinking` parameter is sent, so each model uses its own default
  * (adaptive on current models). The model id comes only from configuration (WRITER_MODEL / the workspace's
  * custom writer); there is no default.
+ * Streaming [A40] (https://docs.claude.com/en/docs/build-with-claude/streaming): when the caller streams (RoundRequest.onText)
+ * the body adds stream: true and the SSE events (message_start, content_block_start/delta/stop with text_delta,
+ * input_json_delta, thinking_delta, signature_delta, message_delta with stop_reason and usage, message_stop; error
+ * events) are parsed by the SDK's Stream and accumulated into the same Message shape (stream.ts).
  */
 import Anthropic from "@anthropic-ai/sdk";
+import { Stream } from "@anthropic-ai/sdk/core/streaming";
 import { backoffMs, ProviderHttpError } from "../writing/http";
 import { estimateTokens, metered, WriterOutputError, type WriterHooks } from "../writing/metering";
 import { redact } from "../runs/calls";
+import { AnthropicStreamAccumulator } from "./stream";
 import { ChatModelError, type ChatModel, type RoundRequest, type RoundResult, type ToolCall, type TurnItem } from "./types";
 
 /** Output cap per model round (answer + thinking). Engineering choice, not a provider limit. */
@@ -83,6 +89,7 @@ interface MessagesBody {
   usage?: { input_tokens?: number; output_tokens?: number };
 }
 
+
 export function parseAnthropicChatResponse(body: MessagesBody): RoundResult {
   const content = Array.isArray(body.content) ? body.content : [];
   const text = content.filter((b) => b.type === "text" && typeof b.text === "string").map((b) => b.text as string).join("");
@@ -132,11 +139,42 @@ export function createAnthropicChatModel(cfg: AnthropicChatConfig): ChatModel {
             for (let attempt = 0; attempt <= maxRetries; attempt++) {
               const started = Date.now();
               let retryAfter: string | null = null;
+              if (attempt > 0) req.onRestart?.();
+              const abort = new AbortController();
+              let timedOut = false;
+              const timer = setTimeout(() => {
+                timedOut = true;
+                abort.abort();
+              }, timeout);
               try {
-                const { data, request_id } = await client.messages.create(body as unknown as Anthropic.MessageCreateParamsNonStreaming).withResponse();
+                let data: MessagesBody;
+                let requestId: string | null;
+                let estimated = false;
+                if (!req.onText) {
+                  const r = await client.messages.create(body as unknown as Anthropic.MessageCreateParamsNonStreaming, { signal: abort.signal }).withResponse();
+                  data = r.data as unknown as MessagesBody;
+                  requestId = r.request_id ?? null;
+                } else {
+                  // [A40] Streamed: the SDK sends the request (auth, errors) and parses the SSE events; text deltas
+                  // go to the caller as they arrive. A JSON answer (a proxy that ignores `stream`) is accepted too.
+                  const res = await client.messages.create({ ...body, stream: true } as unknown as Anthropic.MessageCreateParamsStreaming, { signal: abort.signal }).asResponse();
+                  requestId = res.headers.get("request-id");
+                  if (/event-stream/i.test(res.headers.get("content-type") ?? "") && res.body) {
+                    const acc = new AnthropicStreamAccumulator();
+                    for await (const ev of Stream.fromSSEResponse<Record<string, unknown>>(res, abort)) {
+                      const t = acc.push(ev);
+                      if (t) req.onText(t);
+                    }
+                    if (!acc.done) throw timedOut ? new Anthropic.APIConnectionTimeoutError() : new Anthropic.APIConnectionError({ message: "The stream ended early." });
+                    data = acc.toMessage() as MessagesBody;
+                    estimated = !acc.sawUsage;
+                  } else data = (await res.json()) as MessagesBody;
+                }
                 const latencyMs = Date.now() - started;
-                await onAttempt({ attempt, ok: true, status: 200, timedOut: false, outcomeUnknown: false, requestId: request_id ?? null, latencyMs, error: null });
-                parsed = parseAnthropicChatResponse(data as unknown as MessagesBody);
+                await onAttempt({ attempt, ok: true, status: 200, timedOut: false, outcomeUnknown: false, requestId, latencyMs, error: null });
+                parsed = parseAnthropicChatResponse(data);
+                if (estimated) parsed.usage = { inputTokens: estimateTokens(JSON.stringify(body)), outputTokens: estimateTokens(JSON.stringify(data.content ?? [])), estimated: true };
+                const request_id = requestId;
                 const failure =
                   parsed.stop === "refusal" ? new WriterOutputError("The model declined the request.", "refusal")
                   : parsed.stop === "max_tokens" ? new WriterOutputError("The model's answer was cut off (output limit).", "truncated")
@@ -144,9 +182,9 @@ export function createAnthropicChatModel(cfg: AnthropicChatConfig): ChatModel {
                 return { result: { usage: parsed.usage }, failure, requestId: request_id ?? null, latencyMs };
               } catch (e) {
                 const latencyMs = Date.now() - started;
-                if (e instanceof Anthropic.APIUserAbortError) throw new ProviderHttpError("Request cancelled.", null, false, null, true);
-                if (e instanceof Anthropic.APIConnectionError) {
-                  const timedOut = e instanceof Anthropic.APIConnectionTimeoutError;
+                if (e instanceof Anthropic.APIUserAbortError && !timedOut) throw new ProviderHttpError("Request cancelled.", null, false, null, true);
+                if (e instanceof Anthropic.APIConnectionError || (e instanceof Anthropic.APIUserAbortError && timedOut)) {
+                  timedOut ||= e instanceof Anthropic.APIConnectionTimeoutError;
                   const msg = timedOut ? `Timed out after ${timeout} ms.` : `Connection error: ${redact(e.message)}`;
                   await onAttempt({ attempt, ok: false, status: null, timedOut, outcomeUnknown: true, requestId: null, latencyMs, error: msg });
                   last = new ProviderHttpError(msg, null, timedOut, null, true);
@@ -156,11 +194,15 @@ export function createAnthropicChatModel(cfg: AnthropicChatConfig): ChatModel {
                   const msg = `HTTP ${status ?? "error"}: ${redact(e.message).slice(0, 300)}`;
                   await onAttempt({ attempt, ok: false, status, timedOut: false, outcomeUnknown: false, requestId: e.requestID ?? null, latencyMs, error: msg });
                   last = new ProviderHttpError(msg, status, false, e.requestID ?? null, false);
-                  const retryable = e instanceof Anthropic.RateLimitError || e instanceof Anthropic.InternalServerError || status === 408 || status === 529;
+                  // An `error` event inside a stream has no status; overloaded / api errors there are retryable too.
+                  const streamType = (e.error as { error?: { type?: string } } | undefined)?.error?.type;
+                  const retryable = e instanceof Anthropic.RateLimitError || e instanceof Anthropic.InternalServerError || status === 408 || status === 529 || (status === null && (streamType === "overloaded_error" || streamType === "api_error"));
                   if (!retryable) throw last;
                 } else {
                   throw e;
                 }
+              } finally {
+                clearTimeout(timer);
               }
               if (attempt < maxRetries) await sleep(backoffMs(attempt, retryAfter));
             }

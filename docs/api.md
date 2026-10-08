@@ -1347,7 +1347,7 @@ only; every query filters by `workspace_id` + `project_id`. POSTs go through the
 | POST | `/projects/:pid/chat/sessions` | 201 `ChatSessionSummary` (prunes this user's sessions in the project to the newest 50) |
 | GET | `/projects/:pid/chat/sessions/:sid` | `ChatSessionDetail` (messages with steps, actions) |
 | DELETE | `/projects/:pid/chat/sessions/:sid` | `{deleted: true}`; 409 `chat_busy` while a turn runs |
-| POST | `/projects/:pid/chat/sessions/:sid/messages` body `{content}` (1-4,000 characters) | `ChatTurnResult`; `?stream=1` streams ndjson `ChatStreamEvent` lines (`started`, `step`, `status`, `done` with the same `ChatTurnResult`, or `error`) |
+| POST | `/projects/:pid/chat/sessions/:sid/messages` body `{content}` (1-4,000 characters) | `ChatTurnResult`; `?stream=1` streams ndjson `ChatStreamEvent` lines (`started`, `phase`, `step`, `text_delta`, `status`, `done` with the same `ChatTurnResult`, or `error`; see "Speed" below) |
 | POST | `/projects/:pid/chat/sessions/:sid/actions/:aid/confirm` | body empty, or `{secret: {ok, keyHint}}` for a secure-field action ([A35]; nothing else accepted). `ChatTurnResult` (`?stream=1` likewise): executes the pending action once, then the agent continues |
 | POST | `/projects/:pid/chat/sessions/:sid/actions/:aid/cancel` | `ChatTurnResult`: the action is cancelled and the agent is told so |
 
@@ -1487,3 +1487,44 @@ instructions, and cannot confirm anything.
 
 **Rendering.** Answers render as markdown-lite (paragraphs, lists, bold, inline code, links) parsed into React
 text nodes, never HTML; links only to `/projects/<this project>/...` routes or http(s) URLs.
+
+**Speed: routing, streaming, parallel reads (amends docs/build-kit.md [A40], 2026-10-08; code
+`src/worker/chat/{routing,stream,cache,prefs}.ts`, migration `0023_chat_speed.sql`).**
+- *Tool routing.* A round no longer sends all ~54 tool schemas. It sends the core tools (`get_overview`, `models`,
+  `list_runs`, `run_activity`, `navigate`), the meta tool `more_tools`, and the tools of the groups chosen
+  deterministically from the user's message (keyword / intent map) plus the groups the previous answer used:
+  `search_console`, `dataforseo` (competitors, volume), `internal_links`, `backlinks`, `live`, `geo`, `imports`
+  (sheets, Maton, GA4), `models` (model / key changes), `settings`, `work` (recommendations, runs), `seo_site`
+  (pages, audit, checklists, draft check), `export`. No match and no previous groups -> `work`. The system prompt
+  has a short base (rules, safety, actions, keys) plus one snippet per active group. Within a turn the set only
+  grows and keeps registry order: a call to a registered tool that was not sent still runs (same validation and
+  confirmation gate) and its group joins the next round; `more_tools {groups: [...]}` loads groups once per answer
+  (a second call returns an error result); an answer that says it lacks a tool ("I don't have a tool for ...") is
+  discarded once and the round is re-sent with every group. The routed set is kept with a paused action and reused
+  on confirm. Typical rounds drop from about 18,000 to 2,800-5,000 estimated input tokens (`estimateTokens`).
+- *New read tool `backlinks`* (`view`: `summary`, `list` with `status` / `contains`, `detail` by `id`, `events`):
+  the backlink monitor's stored checks ([A38]); checks are started on the Backlinks page, not from chat.
+- *Streaming.* With `?stream=1` the model is called with streaming (OpenAI-compatible: `stream: true`,
+  `stream_options: {include_usage: true}`, SSE `chat.completion.chunk` deltas with `content` and `tool_calls` by
+  index; Anthropic: Messages API SSE events parsed by the SDK). Visible text is forwarded as
+  `{type: "text_delta", round, delta, reset?}`: append to that round's text, `reset` = replace it, a later round
+  replaces the earlier round's text. Deltas are display only (the `done` result carries the stored answer); text is
+  released only up to the last whitespace and through the same key masking as the stored answer, and
+  `<tool_call>` text (text-tools mode) is never streamed. `{type: "phase", phase: "model" | "tools", round,
+  tools?}` says what the turn is doing. A provider that answers JSON to a stream request is accepted (its text goes
+  out as one delta); an HTTP 400 to a stream request is retried once without streaming and remembered. Usage comes
+  from the final stream chunk; without one the call is metered with Okara's estimate and `provider_calls.
+  tokens_are_estimate = 1`. JSON mode (no `?stream=1`) sends no stream request.
+- *Remembered endpoint facts.* `chat_model_prefs (workspace_id, host, model, text_tools_until, no_stream_until)`:
+  when an OpenAI-compatible endpoint ignores native tools (the text-tools fallback) or rejects streaming, later
+  turns start in that mode for 24 hours (no empty native round, no rejected stream attempt), then probe again.
+- *Parallel reads.* Read / output calls of one round run concurrently (at most 4); results go back to the model
+  and steps to the UI in call order. Actions stay sequential and confirmation-gated.
+- *Result cache.* The same read tool with the same normalized arguments in the same chat session within 120 s
+  reuses the earlier result (step text "(reused, under 2 min old)"); never for actions, output tools or errors;
+  live / run-status tools skip it when the user's message asks for fresh data ("refresh", "again", "latest",
+  "now", ...); a confirmed action clears the session's entries. Memory per Worker isolate (best effort across turns).
+- *Panel.* While a turn runs it shows the current step ("Thinking…", "Reading Search Console…", "Writing answer…")
+  with elapsed seconds and renders the streamed text (applied at most every 100 ms, markdown-lite text, never HTML,
+  `aria-busy`); the polite live region announces step changes only. Limits unchanged: 8 model rounds and 120 s per
+  turn, budgets, secret rules, the confirmation gate and the secure-field flow.

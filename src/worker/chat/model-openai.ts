@@ -10,15 +10,22 @@
  *   response: { choices: [{ message: { content, tool_calls: [{ id, type: "function", function: { name, arguments } }],
  *               refusal? }, finish_reason: "stop" | "tool_calls" | "length" | ... }], usage: { prompt_tokens, completion_tokens } }
  *   tool results: one { role: "tool", tool_call_id, content } message per call, after the assistant message.
+ *   streaming [A40] (https://platform.openai.com/docs/api-reference/chat-streaming): body adds stream: true and
+ *   stream_options: { include_usage: true }; the response is SSE "data: <chat.completion.chunk>" lines ending with
+ *   "data: [DONE]"; chunks carry choices[0].delta { content, tool_calls: [{ index, id?, function: { name?, arguments } }] }
+ *   and finish_reason; the last chunk has usage and no choices. A server that answers JSON instead is accepted; a 400
+ *   to a stream request is retried once without streaming and remembered (prefs.ts).
  * `arguments` is a JSON string the model generated; it may be invalid JSON and is always validated server-side.
  * The assistant message is replayed verbatim (role, content, tool_calls). Every attempt is metered
  * (writing/metering.ts); for a custom provider the response body is size-capped and the key is scrubbed
  * from stored errors (writing/http.ts).
  */
-import { requestJson } from "../writing/http";
+import { ProviderHttpError, requestJson } from "../writing/http";
 import { estimateTokens, metered, WriterOutputError, type WriterHooks } from "../writing/metering";
 import { normalizeBaseUrl } from "../providers/writer-openai";
 import { CHAT_MAX_OUTPUT_TOKENS, CHAT_MAX_RETRIES } from "./model-anthropic";
+import type { ModelPrefStore } from "./prefs";
+import { OpenAiStreamAccumulator, requestStream, ToolCallTextFilter } from "./stream";
 import { ChatModelError, type ChatModel, type RoundRequest, type RoundResult, type ToolCall } from "./types";
 
 export interface OpenAiChatConfig extends WriterHooks {
@@ -31,6 +38,8 @@ export interface OpenAiChatConfig extends WriterHooks {
   maxResponseBytes?: number;
   /** Where the owner picks another model (error text); default the writer card. */
   changeModelHint?: string;
+  /** [A40] Remembered endpoint facts (text-tools mode, no streaming) per (workspace, host, model). */
+  prefs?: ModelPrefStore;
 }
 
 type RawToolCall = { id?: unknown; type?: unknown; function?: { name?: unknown; arguments?: unknown } };
@@ -92,7 +101,8 @@ export function extractTextToolCalls(text: string): { text: string; calls: Array
  * Every requested call is still validated and confirmation-gated server-side exactly like native tool calls.
  */
 export function textToolsSystem(system: string, tools: RoundRequest["tools"]): string {
-  const catalog = tools.map((t) => `- ${t.name}: ${t.description}\n  arguments (JSON Schema): ${JSON.stringify(t.parameters)}`).join("\n");
+  // [A40] `additionalProperties: false` is dropped here (it only costs tokens: arguments are validated server-side).
+  const catalog = tools.map((t) => `- ${t.name}: ${t.description}\n  arguments (JSON Schema): ${JSON.stringify(t.parameters, (k, v) => (k === "additionalProperties" && v === false ? undefined : v))}`).join("\n");
   return `${system}
 
 ## Calling tools (this endpoint has no native tool calling)
@@ -131,12 +141,15 @@ export function buildOpenAiChatMessages(req: Pick<RoundRequest, "system" | "hist
   return messages;
 }
 
-export function buildOpenAiChatRequest(model: string, req: RoundRequest, textTools = false): Record<string, unknown> {
+/** [A40] `stream`: SSE response with deltas, and the usage chunk at the end (stream_options.include_usage). */
+export function buildOpenAiChatRequest(model: string, req: RoundRequest, textTools = false, stream = false): Record<string, unknown> {
+  const streaming = stream ? { stream: true, stream_options: { include_usage: true } } : {};
   if (textTools) {
     return {
       model,
       messages: buildOpenAiChatMessages({ ...req, system: textToolsSystem(req.system, req.tools) }, true),
       max_completion_tokens: CHAT_MAX_OUTPUT_TOKENS,
+      ...streaming,
     };
   }
   return {
@@ -144,6 +157,7 @@ export function buildOpenAiChatRequest(model: string, req: RoundRequest, textToo
     messages: buildOpenAiChatMessages(req),
     tools: req.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } })),
     max_completion_tokens: CHAT_MAX_OUTPUT_TOKENS,
+    ...streaming,
   };
 }
 
@@ -202,58 +216,109 @@ export function describeEmptyResponse(body: ChatCompletion): string {
 export function createOpenAiChatModel(cfg: OpenAiChatConfig): ChatModel {
   const base = normalizeBaseUrl(cfg.baseUrl);
   const maxRetries = cfg.maxRetries ?? CHAT_MAX_RETRIES;
+  // [A40] What this endpoint needs, learned in this session or remembered per (workspace, host, model) (prefs.ts).
   let textTools = false;
-  return {
-    provider: "openai_compatible",
-    model: cfg.model,
-    async round(req: RoundRequest): Promise<RoundResult> {
-      if (!textTools) {
-        const first = await this.attempt(req, false);
-        if (first.ok || !req.tools.length) return finish(first);
-        textTools = true; // this endpoint ignored native tools: use text tools for the rest of the session's model
-      }
-      return finish(await this.attempt(req, true));
-    },
-    async attempt(req: RoundRequest, text: boolean): Promise<Attempt> {
-      const body = buildOpenAiChatRequest(cfg.model, req, text);
-      let parsed: RoundResult | null = null;
-      let empty: string | null = null;
-      try {
-        await metered(
-          cfg,
-          { provider: "openai_compatible", model: cfg.model, purpose: "chat.turn", estimatedTokens: estimateTokens(JSON.stringify(body)) + CHAT_MAX_OUTPUT_TOKENS, maxRetries },
-          async (onAttempt) => {
-            const r = await requestJson({
-              fetchImpl: cfg.fetchImpl,
-              url: `${base}/chat/completions`,
-              headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json" },
-              body,
-              timeoutMs: Math.max(5_000, Math.min(req.timeoutMs, 90_000)),
-              maxRetries,
-              requestIdHeader: "x-request-id",
-              onAttempt,
-              sleep: cfg.sleep,
-              maxResponseBytes: cfg.maxResponseBytes,
-              secrets: [cfg.apiKey],
+  let noStream = false;
+  let loaded: Promise<void> | null = null;
+  const loadPrefs = () =>
+    (loaded ??= cfg.prefs
+      ? cfg.prefs.load().then((p) => {
+          textTools ||= p.textTools;
+          noStream ||= p.noStream;
+        })
+      : Promise.resolve());
+
+  async function send(req: RoundRequest, text: boolean): Promise<Attempt> {
+    if (!req.onText || noStream) return attempt(req, text, false);
+    try {
+      return await attempt(req, text, true);
+    } catch (e) {
+      // Some compatible servers reject `stream` / `stream_options` with 400: retry once without, and remember.
+      if (!(e instanceof ProviderHttpError) || e.status !== 400) throw e;
+      const a = await attempt(req, text, false);
+      noStream = true;
+      await cfg.prefs?.save({ noStream: true });
+      return a;
+    }
+  }
+
+  async function attempt(req: RoundRequest, text: boolean, stream: boolean): Promise<Attempt> {
+    const body = buildOpenAiChatRequest(cfg.model, req, text, stream);
+    const estimatedInput = estimateTokens(JSON.stringify(body));
+    let parsed: RoundResult | null = null;
+    let empty: string | null = null;
+    try {
+      await metered(
+        cfg,
+        { provider: "openai_compatible", model: cfg.model, purpose: "chat.turn", estimatedTokens: estimatedInput + CHAT_MAX_OUTPUT_TOKENS, maxRetries },
+        async (onAttempt) => {
+          const common = {
+            fetchImpl: cfg.fetchImpl,
+            url: `${base}/chat/completions`,
+            headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json" },
+            body,
+            timeoutMs: Math.max(5_000, Math.min(req.timeoutMs, 90_000)),
+            maxRetries,
+            requestIdHeader: "x-request-id",
+            onAttempt,
+            sleep: cfg.sleep,
+            maxResponseBytes: cfg.maxResponseBytes,
+            secrets: [cfg.apiKey],
+          };
+          let json: ChatCompletion;
+          let requestId: string | null;
+          let latencyMs: number;
+          let estimatedUsage = false;
+          if (!stream) {
+            const r = await requestJson(common);
+            json = (r.json ?? {}) as ChatCompletion;
+            requestId = r.requestId;
+            latencyMs = r.latencyMs;
+          } else {
+            let acc = new OpenAiStreamAccumulator();
+            let filter = new ToolCallTextFilter();
+            const r = await requestStream({
+              ...common,
+              onData: (data) => {
+                const visible = filter.push(acc.push(data));
+                if (visible) req.onText?.(visible);
+              },
+              onRestart: () => {
+                acc = new OpenAiStreamAccumulator();
+                filter = new ToolCallTextFilter();
+                req.onRestart?.();
+              },
             });
-            const json = (r.json ?? {}) as ChatCompletion;
-            parsed = parseOpenAiChatResponse(json);
-            const failure =
-              parsed.stop === "refusal" ? new WriterOutputError("The model declined the request.", "refusal")
-              : parsed.stop === "max_tokens" ? new WriterOutputError("The model's answer was cut off (output limit).", "truncated")
-              : null;
-            if (!failure && !parsed.text.trim() && !parsed.toolCalls.length) empty = describeEmptyResponse(json);
-            return { result: { usage: parsed.usage }, failure, requestId: r.requestId, latencyMs: r.latencyMs };
-          },
-        );
-      } catch (e) {
-        if (e instanceof WriterOutputError) throw new ChatModelError(e.message, e.reason === "refusal" ? "refusal" : "truncated");
-        throw e;
-      }
-      if (!parsed) throw new ChatModelError("The model returned no response.", "invalid_response");
-      return { ok: !empty, result: parsed, empty, text };
-    },
-  } as ChatModel & { attempt(req: RoundRequest, text: boolean): Promise<Attempt> };
+            requestId = r.requestId;
+            latencyMs = r.latencyMs;
+            if (r.streamed) {
+              const tail = filter.flush();
+              if (tail) req.onText?.(tail);
+              json = acc.toCompletion() as ChatCompletion;
+              // No usage chunk (stream_options unsupported): meter Okara's estimate, labelled as such.
+              estimatedUsage = !acc.usage;
+            } else json = (r.json ?? {}) as ChatCompletion;
+          }
+          parsed = parseOpenAiChatResponse(json);
+          if (estimatedUsage) {
+            const out = parsed.text + parsed.toolCalls.map((c) => `${c.name}${JSON.stringify(c.input)}`).join("");
+            parsed.usage = { inputTokens: estimatedInput, outputTokens: estimateTokens(out), estimated: true };
+          }
+          const failure =
+            parsed.stop === "refusal" ? new WriterOutputError("The model declined the request.", "refusal")
+            : parsed.stop === "max_tokens" ? new WriterOutputError("The model's answer was cut off (output limit).", "truncated")
+            : null;
+          if (!failure && !parsed.text.trim() && !parsed.toolCalls.length) empty = describeEmptyResponse(json);
+          return { result: { usage: parsed.usage }, failure, requestId, latencyMs };
+        },
+      );
+    } catch (e) {
+      if (e instanceof WriterOutputError) throw new ChatModelError(e.message, e.reason === "refusal" ? "refusal" : "truncated");
+      throw e;
+    }
+    if (!parsed) throw new ChatModelError("The model returned no response.", "invalid_response");
+    return { ok: !empty, result: parsed, empty, text };
+  }
 
   function finish(a: Attempt): RoundResult {
     if (a.ok) return a.result;
@@ -262,6 +327,22 @@ export function createOpenAiChatModel(cfg: OpenAiChatConfig): ChatModel {
       "invalid_response",
     );
   }
+
+  return {
+    provider: "openai_compatible",
+    model: cfg.model,
+    async round(req: RoundRequest): Promise<RoundResult> {
+      await loadPrefs();
+      if (!textTools) {
+        const first = await send(req, false);
+        if (first.ok || !req.tools.length) return finish(first);
+        // This endpoint ignored native tools: use text tools for the rest of the turn, and remember it [A40].
+        textTools = true;
+        await cfg.prefs?.save({ textTools: true });
+      }
+      return finish(await send(req, true));
+    },
+  };
 }
 
 interface Attempt {

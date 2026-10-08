@@ -26,6 +26,7 @@ import { createCallRecorder } from "../runs/calls";
 import { createApiFetch, writerStatusForWorkspace } from "../runs/runtime";
 import { createAnthropicChatModel } from "./model-anthropic";
 import { createOpenAiChatModel } from "./model-openai";
+import { chatModelPrefStore } from "./prefs";
 import type { ChatModel } from "./types";
 
 export type ChatModelResolution =
@@ -67,6 +68,7 @@ export async function resolveChatModel(env: Env, db: Db, workspaceId: string, pr
         fetchImpl: createApiFetch(env, opts.fetchImpl ?? fetch, [p.host]),
         maxResponseBytes: CUSTOM_WRITER_MAX_RESPONSE_BYTES,
         changeModelHint: CHAT_CARD_HINT,
+        prefs: chatModelPrefStore(db, workspaceId, p.host, p.model, clock),
         calls,
         budget,
       }),
@@ -87,6 +89,7 @@ export async function resolveChatModel(env: Env, db: Db, workspaceId: string, pr
         baseUrl: p.baseUrl,
         fetchImpl: createApiFetch(env, opts.fetchImpl ?? fetch, [p.host]),
         maxResponseBytes: CUSTOM_WRITER_MAX_RESPONSE_BYTES,
+        prefs: chatModelPrefStore(db, workspaceId, p.host, p.model, clock),
         calls,
         budget,
       }),
@@ -108,7 +111,16 @@ export async function resolveChatModel(env: Env, db: Db, workspaceId: string, pr
   if (status.provider === "anthropic") {
     return { status: "ready", model: createAnthropicChatModel({ apiKey: key.key, model: status.model, fetchImpl, calls, budget }) };
   }
-  return { status: "ready", model: createOpenAiChatModel({ apiKey: key.key, model: status.model, baseUrl: env.WRITER_BASE_URL!, fetchImpl, calls, budget }) };
+  const prefs = chatModelPrefStore(db, workspaceId, hostOf(env.WRITER_BASE_URL), status.model, clock);
+  return { status: "ready", model: createOpenAiChatModel({ apiKey: key.key, model: status.model, baseUrl: env.WRITER_BASE_URL!, fetchImpl, prefs, calls, budget }) };
+}
+
+function hostOf(url: string | undefined): string {
+  try {
+    return new URL(url ?? "").host;
+  } catch {
+    return "writer";
+  }
 }
 
 /** Readiness without decrypting anything (GET .../chat/status). */

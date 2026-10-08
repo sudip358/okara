@@ -31,6 +31,7 @@ export function createCallRecorder(db: Db, scope: CallScope, clock: Clock = syst
         request_id: call.requestId ?? null,
         input_tokens: intOrNull(call.inputTokens),
         output_tokens: intOrNull(call.outputTokens),
+        ...(call.tokensAreEstimate ? { tokens_are_estimate: 1 } : {}),
         search_requests: intOrNull(call.searchRequests),
         cost_usd: cost,
         // A null cost is unknown, which is never "actual".

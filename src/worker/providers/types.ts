@@ -14,6 +14,8 @@ export interface ProviderCallRecord {
   requestId?: string | null;
   inputTokens?: number | null;
   outputTokens?: number | null;
+  /** [A40] Token counts are Okara's estimate (the provider reported no usage, e.g. a stream without a usage chunk). */
+  tokensAreEstimate?: boolean;
   searchRequests?: number | null;
   /** null = unknown. Never record 0 for an unknown cost. */
   costUsd: number | null;

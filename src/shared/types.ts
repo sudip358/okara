@@ -1658,11 +1658,22 @@ export interface ChatTurnResult {
   actions: ChatAction[];
 }
 
+/**
+ * [A40] Progress of a turn: "model" = waiting for the model (round n), "tools" = running these tools. The panel shows
+ * "Thinking…", "Reading Search Console…"; the first text_delta of a round means "Writing answer…".
+ */
+export type ChatPhase = "model" | "tools";
+
 /** One line of the ndjson stream (?stream=1). */
 export type ChatStreamEvent =
   | { type: "started"; sessionId: string; userMessage: ChatMessage | null; messageId: string }
   | { type: "step"; step: ChatStep }
   | { type: "status"; text: string }
+  /** [A40] Masked answer text as it is generated: append `delta` to round `round`'s text (reset: replace it). A new round
+   *  replaces the previous round's text. Display only: the `done` result carries the stored answer. */
+  | { type: "text_delta"; round: number; delta: string; reset?: boolean }
+  /** [A40] What the turn is doing now. */
+  | { type: "phase"; phase: ChatPhase; round: number; tools?: string[] }
   | { type: "done"; result: ChatTurnResult }
   | { type: "error"; code: string; message: string };
 

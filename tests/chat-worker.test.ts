@@ -19,6 +19,7 @@ import { buildSystemPrompt } from "@worker/chat/prompt";
 import { capForModel, CHAT_TOOLS, getTool, toolSpecs, TOOL_RESULT_MAX_CHARS, type ToolContext } from "@worker/chat/tools";
 import type { ChatModel, RoundRequest, RoundResult } from "@worker/chat/types";
 import { CHAT_SESSIONS_KEPT } from "@worker/chat/store";
+import { toolsForGroups } from "@worker/chat/routing";
 import { createTestEnv } from "./helpers/env";
 import { authHeaders, FIXED_NOW, seedProject, seedUser } from "./helpers/fixtures";
 import { projectRow, seedCrawl, seedGsc } from "./checklists-seed";
@@ -197,7 +198,9 @@ describe("Ask Okara: Anthropic-shaped tool loop through the Messages adapter", (
     const first = fake.requests[0]!;
     expect(first.model).toBe("configured-chat-model");
     expect(first.tool_choice).toBeUndefined(); // auto (forced tool use is rejected by current models)
-    expect((first.tools as Json[]).map((t) => t.name)).toEqual(CHAT_TOOLS.map((t) => t.name));
+    // [A40] Routed: the core tools plus the Search Console group for this question, in registry order, then more_tools.
+    expect((first.tools as Json[]).map((t) => t.name)).toEqual([...toolsForGroups(CHAT_TOOLS, ["search_console"]).map((t) => t.name), "more_tools"]);
+    expect((first.tools as Json[]).length).toBeLessThan(CHAT_TOOLS.length / 2);
     expect(String(first.system)).toContain("untrusted evidence");
     const second = fake.requests[1]!.messages as Array<{ role: string; content: unknown }>;
     expect(second).toHaveLength(3);
@@ -624,8 +627,11 @@ describe("Ask Okara: streaming, CSRF, rate limit", () => {
     const res = await testApp(env, userId).request(`/projects/${projectId}/chat/sessions/${sid}/messages?stream=1`, { method: "POST", body: JSON.stringify({ content: "Overview please" }), headers: { "Content-Type": "application/json" } }, env);
     expect(res.headers.get("content-type")).toMatch(/application\/x-ndjson/);
     const events = (await res.text()).trim().split("\n").map((l) => JSON.parse(l) as ChatStreamEvent);
-    expect(events.map((e) => e.type)).toEqual(["started", "step", "done"]);
-    const done = events[2] as Extract<ChatStreamEvent, { type: "done" }>;
+    // [A40] phase events and the answer text (one delta here: this fake provider answers JSON, not SSE).
+    expect(events.map((e) => e.type)).toEqual(["started", "phase", "phase", "step", "phase", "text_delta", "done"]);
+    expect(events[2]).toMatchObject({ type: "phase", phase: "tools", round: 1, tools: ["get_overview"] });
+    expect(events[5]).toEqual({ type: "text_delta", round: 2, delta: "Here is your overview." });
+    const done = events[6] as Extract<ChatStreamEvent, { type: "done" }>;
     expect(done.result.message.content).toBe("Here is your overview.");
   });
 
