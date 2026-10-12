@@ -1176,3 +1176,64 @@ animation are off under `prefers-reduced-motion`.
 
 **Not shown:** no backlink "value", authority or traffic estimate from Okara; DA, traffic and price appear only on the
 Backlinks page as the owner's own sheet labels.
+
+## 20. Internal links Live panel (amendment 2026-10-12, docs/build-kit.md [A41])
+
+Owner request on `/projects/:pid/internal-links`: "can you add live animator which will show live action". A panel at
+the top of the Internal links page shows what the link agent is doing, in this view's visual language, built only from
+the progress events the real analysis run / graph rebuild stored (`GET /projects/:pid/seo/internal-links/live`,
+docs/api.md "Internal links live progress"). Code: `src/web/pages/links/{LinkLivePanel.tsx,live-lib.ts}` (pure
+helpers), reusing `../live/motion.tsx` (`LIVE_CSS`, `Shimmer`, `PulseDot`, `AnimatedNumber`, `useReducedMotion`) and
+the replay clock of `../live/engine.ts`. Tests: `tests/links-live{,-web}.test.ts`.
+
+**Modes.**
+- Empty: "No link analysis or graph rebuild has been recorded yet…" with the two buttons (open by default).
+- Live (the stored run is `running`, or this page's start request is in flight): `LIVE` chip with the live dot,
+  "Live from this link analysis's stored progress events · nothing is projected", the wall-clock elapsed time (the
+  only timer). Polls every `pollMs` (1.5 s), one request at a time, visible tab only; when the run ends, one last fetch,
+  then the report and every tab reload (`onFinished`; the tabs remount). Nothing polls while idle. Open while running;
+  a run watched on the page stays open after it ends.
+- Replay (the latest run is finished): `REPLAY` chip, "Replay of the link analysis on 12 Oct 2026, 10:07 · real stored
+  events" (+ "· 10× speed[ · idle gaps over 10 s shortened]" while playing, "· paused (▶ plays at stored times, Step
+  shows the next stored event)" when stopped mid-way). Shown at its final state; ▶ reveals the stored events at their
+  stored times (1× / 10× / 30×), Step moves to the next stored event (runs on small sites finish in well under a
+  second, so Step is how to watch them), ⏮ / ⏭. Collapsed by default once a run exists (the viewer's choice is
+  remembered per browser, try/catch). Demo projects add "Demo project (seeded crawl data) · " in front.
+- Interrupted (`running` with no stored update for 10 minutes) and failed runs never read as running: their open
+  stage reads "ended without a result" / "failed", later stages "not reached", and the stored failure note is shown.
+
+**Stage rail** (chips in execution order, colour plus glyph plus word): analysis Graph ▸ Verify placed ▸ Candidates ▸
+Jev judging ▸ Draft sentences ▸ Saved; graph rebuild Graph ▸ Verify placed ▸ Saved. A chip is done when its last stage
+stored a final event (✓), partial (◐), skipped (–, "not called" / "none drafted"), running (● pulsing, only while live
+or at a replay playhead inside it), failed (✗). Counts under each chip come from the latest stored event ("12 URLs ·
+30 links", "1 verified · 1 not found of 2", "40 pairs · 6 matched", "batch 1 of 3 · 2 judged · 1 kept · 1 dropped",
+"1 drafted of 2", "6 suggestions"). Verification runs inside the graph build, so Verify placed sits right after Graph.
+
+**Counters** (tweened from the stored totals, instant under reduced motion; during a replay they come from the revealed
+events and switch to the stored totals at the end): pages loaded, pairs considered (n with a fitting sentence), judged by
+Jev (calls), kept by Jev (dropped · to check), sentences drafted (of n pairs without a sentence), placed links verified
+(of n checked · n not found), suggestions saved; graph rebuilds: URLs in the graph (links). A figure a stage did not
+report is left out, never shown as 0.
+
+**Waiting line** (Shimmer, live only, genuinely pending work per section 0 rule 3): "Waiting for Jev · batch 2 of 3"
+(a Jev call is in flight), "Waiting for the writer · call 1 of 1", "Saving 6 suggestions", "Storing the link graph ·
+12 URLs", "Loading stored snapshots". Never in replay.
+
+**Link flow lane**: the pairs carried by the events' items (at most 20 per event), one row per source → target pair
+(`/products/pull ⟶ /blogs/care`, anchor “care for brass”, priority 1.23), with a verdict chip appended per stage as it
+arrives: candidate, sentence found, kept by Jev, Jev: check yourself, dropped by Jev, no Jev answer, not sent to Jev,
+drafted, draft rejected, not drafted, verified, not found, pending crawl, source unavailable. Most recently updated
+first, 24 rows (the count of further sampled pairs is stated). Rows first shown by a newly arrived (or newly revealed)
+event slide in (`lv-row-in`, at most 12 at once), new chips pop (`lv-pop`); the first paint of a run never animates.
+Paths and anchors are untrusted page text: React text only.
+
+**Reduced motion**: no slide, pop, pulse, ping or tween (classes are not applied and the shared CSS is wrapped in
+`no-preference`); content still updates, replay still advances. **Layout**: full width above the tabs; the rail scrolls
+inside itself; counters 2 / 3 / 6 columns; paths break anywhere; the section is `relative overflow-hidden` so sr-only
+text inside the scrolled rail never widens the page; no horizontal page scroll at 390 px, light and dark (verified on
+the dev server). **Buttons** are the page's own Rebuild graph / Run link analysis actions (same handlers, rate limits,
+409 / 429 banners); while one runs the panel says "Starting the link analysis…" until the run's first events arrive.
+
+**Not shown**: no predicted traffic or link value, no Jev confidence the stage did not store (verdict words only), no
+progress for builds after a crawl (the crawl's own steps are in the Live SEO view). The Live SEO tab's internal-link
+containers (section 18) are unchanged.

@@ -817,6 +817,61 @@ Broken links reach it through the existing technical rule SEO-LINK-BROKEN-INTERN
 earlier crawls. Redirected links are not fed to the agent (a redirect is not an error, and one template link would
 fill the 0–2/day cap); they stay on the Broken links tab.
 
+## Internal links live progress (amends docs/build-kit.md [A30]; [A41], 2026-10-12)
+
+Owner request on `/projects/:pid/internal-links`: "can you add live animator which will show live action". Types:
+`src/shared/link-live.ts`. Code: `src/worker/links/progress.ts` (recorder + read), emit points in
+`src/worker/links/{run,graph-store,jev,draft}.ts`, route in `src/worker/routes/links.ts`, UI
+`src/web/pages/links/{LinkLivePanel.tsx,live-lib.ts}`. Migration 0024.
+
+**Approach: synchronous work, stored progress.** `POST .../internal-links/run` and `POST .../graph/rebuild` still do
+their work inside the request and return the same payloads (Ask Okara's confirmed actions call the same functions).
+While they run, the real code paths append events to an append-only log at each stage boundary; the page polls
+`GET .../live` from a second request during the first. Nothing moved to `ctx.waitUntil` or the cron: the work's
+budgets, rate limits (3 runs, 6 rebuilds per project per hour), 409 guards and tests are unchanged. Event writes are
+buffered into a few D1 batches per run (start, before the graph load, before the graph save, before Jev, each writer
+call, before the suggestion save, end); each Jev batch's events ride in the same D1 batch as that batch's
+`decision_records` (no extra round trip). A failure to store progress never fails the run (the recorder disables
+itself). Tracked: analysis runs (their graph build included) and manual rebuilds; graph builds after a crawl and the
+demo seed are not tracked.
+
+`GET /projects/:pid/seo/internal-links/live?run=<id>&after=<seq>&limit=<1..200>` -> `LinkLiveResponse`
+`{run, events[], nextCursor, hasMore, pollMs}`:
+- `run` is the project's latest tracked run (`null` when none): `{id, kind: analysis | graph, status: running |
+  completed | partial | failed | interrupted, isDemo, startedAt, updatedAt, finishedAt, totals, eventsStored,
+  eventsDropped}`. `interrupted` is computed on read: still `running` with no stored update for 10 minutes.
+- `events` are the run's events with `seq > after`, ascending, at most `limit` (default and max 200). The cursor
+  applies only when `run` names the latest run; otherwise (a newer run started, or no `run`) events start at seq 1.
+  Pass `nextCursor` back as `after` with `run=<run.id>`; `hasMore` says another page is waiting.
+- Each event: `{seq, at, stage, status: started | progress | completed | partial | skipped | failed, detail: {n?,
+  items?, note?}}`. `n` holds the counts the code computed; `items` (at most 20) are `{s, t, a?, v, p?}`: source and
+  target path (plain text, clipped to 160), anchor (clipped to 120), verdict, priority (candidates only); `note` is a
+  short code-written sentence. detail is at most 4,000 characters (items are halved until it fits).
+- `pollMs` = 1500. Tenancy: `requireProject` (404 for non-members, 401 without a session); every query filters
+  `workspace_id` and `project_id`. Bad `after` / `limit` / `run` -> 400.
+
+| Stage | Emitted by | `n` (and items) |
+|---|---|---|
+| `run` started / completed / partial / failed | start and end of the tracked run | final counts; failed carries `note: "Run failed: …"` |
+| `graph.load` started, completed | `computeGraph` (snapshots, inventory, Search Console rows, overrides) | `pages, inventory, truncated, searchConsole` |
+| `graph.edges` completed | `buildLinkGraph` | `urls, edges, contentEdges, orphans` |
+| `graph.clusters` completed | `buildClusters` | `hubs, spokes` |
+| `graph.anchors` completed | `auditAllAnchors` | `audited, flagged` |
+| `graph.verify` completed / skipped | `verifyExpectedLinks` (placed-link auto-verification) | `checked, verified, notFound, pending, sourceUnavailable`; items: first 20 checks (`verified`, `not_found`, `pending`, `source_unavailable`) |
+| `graph.save` started, completed / skipped | `persistGraph` (skipped when another build is in progress) | `urls` |
+| `pages` completed | analysis: graph pages usable for the run | `pages, eligible, analysed` |
+| `candidates` completed | candidate pairs + cluster gaps, priority-sorted | `considered, termPairs, clusterGapPairs`; items: top 20 by priority (`candidate`, `p`) |
+| `sentences` completed | existing-sentence and anchor matching up to the pair cap | `matched, noFittingSentence, withoutAnchor, cap, capped`; items: first 20 matched with the anchor |
+| `jev` started, progress (one per batch), completed / partial / skipped | `decideLinks` | started `pairs, batches, batchSize`; progress `batch, batches, calls, judged, answered, kept, review, dropped, noAnswer, notSent` with the batch's pairs (`kept` = suggested, `review`, `dropped` = rejected, `no_answer`, `not_sent`); skipped with the reason (not configured, demo, no pairs) |
+| `drafts` started, progress (one per writer call), completed / partial / skipped | `draftSentences` | started `pool, cap, calls`; progress `call, calls, drafted, rejected, notDrafted` with the call's pairs (`drafted`, `draft_rejected`, `not_drafted`); skipped with the reason |
+| `save` started, completed | suggestion rows stored | `rows, suggested, review, rejected, drafts` |
+
+Bounds and retention: at most 400 events per run (the final `run` event is always stored; others beyond the cap
+are counted in `eventsDropped`); the latest 5 tracked runs per project are kept (older runs and their events are
+deleted when a new one starts). Totals in `run.totals` (`pages, urls, edges, verifyChecked, verified, notFound,
+pairsConsidered, pairsMatched, judged, jevKept, jevReview, jevDropped, jevCalls, draftPool, drafted, draftRejected,
+writerCalls, saved`) are written with each stored batch; a stage that did not report leaves its fields out.
+
 ## Sign-in errors
 
 `GET /auth/login` and `GET /auth/callback` report failures by redirecting to `/?authError=<code>`. The sign-in

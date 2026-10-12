@@ -201,17 +201,36 @@ interface WriterDraft {
 }
 
 /** Drafts sentences in calls of DRAFT_PAIRS_PER_CALL pairs, stopping at the first budget or writer failure. */
-export async function draftSentences(writer: WritingProvider, pairs: readonly DraftPair[], opts: { maxPairs?: number } = {}): Promise<DraftRun> {
+/** [A41] One writer call's result for the Live panel: 1-based call number, its pairs and outcomes (null = not drafted). */
+export interface DraftCallInfo {
+  index: number;
+  calls: number;
+  pairs: Array<{ pair: DraftPair; outcome: DraftOutcome | null }>;
+  stoppedBy: DraftRun["stoppedBy"];
+}
+
+export async function draftSentences(
+  writer: WritingProvider,
+  pairs: readonly DraftPair[],
+  opts: { maxPairs?: number; onCall?: (c: DraftCallInfo) => Promise<void> | void } = {},
+): Promise<DraftRun> {
   const list = pairs.slice(0, Math.max(0, Math.min(MAX_DRAFTS_PER_RUN, opts.maxPairs ?? MAX_DRAFTS_PER_RUN)));
   const outcomes: DraftOutcome[] = [];
   const skipped: string[] = [];
   let calls = 0;
   let stoppedBy: DraftRun["stoppedBy"] = null;
   let error: string | null = null;
+  const total = Math.ceil(list.length / DRAFT_PAIRS_PER_CALL);
+  const report = async (i: number, batch: readonly DraftPair[]) => {
+    if (!opts.onCall) return;
+    const byKey = new Map(outcomes.map((o) => [o.pairKey, o]));
+    await opts.onCall({ index: Math.floor(i / DRAFT_PAIRS_PER_CALL) + 1, calls: total, pairs: batch.map((p) => ({ pair: p, outcome: byKey.get(p.pairKey) ?? null })), stoppedBy });
+  };
   for (let i = 0; i < list.length; i += DRAFT_PAIRS_PER_CALL) {
     const batch = list.slice(i, i + DRAFT_PAIRS_PER_CALL);
     if (stoppedBy) {
       skipped.push(...batch.map((p) => p.pairKey));
+      await report(i, batch);
       continue;
     }
     const items = batch.map((p, n) => ({
@@ -244,6 +263,7 @@ export async function draftSentences(writer: WritingProvider, pairs: readonly Dr
         error = e instanceof Error ? e.message.slice(0, 200) : "Writer call failed.";
       }
       skipped.push(...batch.map((p) => p.pairKey));
+      await report(i, batch);
       continue;
     }
     const drafts = (output && typeof output === "object" && Array.isArray((output as { drafts?: unknown }).drafts) ? (output as { drafts: WriterDraft[] }).drafts : []) as WriterDraft[];
@@ -259,6 +279,7 @@ export async function draftSentences(writer: WritingProvider, pairs: readonly Dr
       const insertAfter = typeof d.insert_after === "string" && evidence.some((e) => e.id === d.insert_after && /^ev_s\d+$/.test(e.id)) ? d.insert_after : null;
       outcomes.push({ pairKey: p.pairKey, text, citedEvidenceIds: cited, insertAfter, evidence, validation: validateDraftSentence(text, p.anchor, cited, evidence), writer: who });
     });
+    await report(i, batch);
   }
   return { outcomes, calls, skipped, stoppedBy, error };
 }

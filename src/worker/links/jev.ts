@@ -316,6 +316,23 @@ export interface LinkJevDeps {
   linkRunId: string;
   clock: Clock;
   batchSize?: number;
+  /**
+   * [A41] Called once per batch right before that batch's D1 write (decision records); the statements it returns join
+   * the same write (the Live panel's progress events, without an extra round trip).
+   */
+  onBatch?: (b: LinkJevBatchInfo) => Array<[string, ...unknown[]]>;
+}
+
+export interface LinkJevBatchInfo {
+  /** 1-based batch number and the number of batches. */
+  index: number;
+  batches: number;
+  /** The batch's pairs (index into the input) with their outcome or why they were not sent. */
+  pairs: Array<{ i: number; pair: LinkJevPair; outcome: LinkJevOutcome | null; skipped: "budget" | "error" | null }>;
+  calls: number;
+  asked: number;
+  answered: number;
+  stoppedBy: "budget" | "error" | null;
 }
 
 export interface LinkJevRun {
@@ -349,6 +366,18 @@ export async function decideLinks(pairs: readonly LinkJevPair[], deps: LinkJevDe
   let provider: string | null = null;
   let stoppedBy: LinkJevRun["stoppedBy"] = null;
 
+  const batches = Math.ceil(askable.length / batchSize);
+  const hook = (start: number, batch: ReadonlyArray<{ i: number; p: LinkJevPair }>): Array<[string, ...unknown[]]> =>
+    deps.onBatch?.({
+      index: Math.floor(start / batchSize) + 1,
+      batches,
+      pairs: batch.map((x) => ({ i: x.i, pair: x.p, outcome: outcomes[x.i] ?? null, skipped: skipped[x.i] ?? null })),
+      calls,
+      asked,
+      answered,
+      stoppedBy,
+    }) ?? [];
+
   for (let start = 0; start < askable.length; start += batchSize) {
     const batch = askable.slice(start, start + batchSize).map((x, n) => ({ ...x, key: `link_${n}`, state: pairState(x.p) }));
     const now = iso(deps.clock());
@@ -381,6 +410,7 @@ export async function decideLinks(pairs: readonly LinkJevPair[], deps: LinkJevDe
         skipped[x.i] = stoppedBy;
         await record(x, { res: null, answers: null, tier: null, outcome: "rejected", reason: stoppedBy === "budget" ? "budget" : "decision_unavailable" });
       }
+      stmts.push(...hook(start, batch));
       await deps.db.batch(stmts);
       continue;
     }
@@ -406,6 +436,7 @@ export async function decideLinks(pairs: readonly LinkJevPair[], deps: LinkJevDe
         skipped[x.i] = stoppedBy ?? "error";
         await record(x, { res: null, answers: null, tier: null, outcome: "rejected", reason: stoppedBy === "budget" ? "budget" : "decision_unavailable" });
       }
+      stmts.push(...hook(start, batch));
       await deps.db.batch(stmts);
       continue;
     }
@@ -431,6 +462,7 @@ export async function decideLinks(pairs: readonly LinkJevPair[], deps: LinkJevDe
         reason: o ? o.reasonCode : "decision_unavailable",
       });
     }
+    stmts.push(...hook(start, batch));
     await deps.db.batch(stmts);
   }
 

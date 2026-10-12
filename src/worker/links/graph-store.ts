@@ -24,6 +24,7 @@ import { loadLatestSnapshots, type SnapshotRecord } from "./graph-load";
 import { gscSourceLabel, loadGscPageData } from "./gsc";
 import { jsonEachInsert, runBatches } from "./sql";
 import { brandStopwords } from "./terms";
+import { LinkProgress, pairItem } from "./progress";
 import { loadExpectedLinks, persistVerifications, verifyExpectedLinks, VERIFY_VERSION, type VerificationResult } from "./verify";
 
 export const GRAPH_METHOD_VERSION = `${GRAPH_VERSION}+${CLUSTERS_VERSION}+${ANCHOR_AUDIT_VERSION}+${VERIFY_VERSION}`;
@@ -255,6 +256,11 @@ export interface BuildOptions {
   text?: boolean;
   /** Throw 409 instead of returning null when another build is in progress. */
   throwOnBusy?: boolean;
+  /**
+   * [A41] Progress events: an analysis run's recorder (its graph stages go into that run's log), or "own" to track
+   * this build as its own Live run (manual rebuilds). Omitted: nothing is recorded (crawl and demo builds).
+   */
+  progress?: LinkProgress | "own" | null;
 }
 
 export interface ComputedGraph {
@@ -268,9 +274,16 @@ export interface ComputedGraph {
 }
 
 /** Loads the inputs and computes the graph, clusters, anchor audit and verifications in memory (nothing written). */
-export async function computeGraph(db: Db, project: ProjectRow, opts: Pick<BuildOptions, "now" | "includeCrawlRunId" | "text">): Promise<ComputedGraph | null> {
+export async function computeGraph(
+  db: Db,
+  project: ProjectRow,
+  opts: Pick<BuildOptions, "now" | "includeCrawlRunId" | "text"> & { progress?: LinkProgress | null },
+): Promise<ComputedGraph | null> {
   const host = graphHost(project);
   if (!host) return null;
+  const rec = opts.progress ?? LinkProgress.none();
+  rec.emit("graph.load", "started", { note: "Loading stored snapshots, the crawl inventory and Search Console rows." });
+  await rec.flush();
   const scope = { id: project.id, workspaceId: project.workspace_id };
   const inventory = await loadInventory(db, scope);
   const state = await loadInventoryState(db, scope);
@@ -278,12 +291,26 @@ export async function computeGraph(db: Db, project: ProjectRow, opts: Pick<Build
   const gsc = await loadGscPageData(db, project);
   const overrides = await loadClusterOverrides(db, project);
   const sheetHubs = await loadSheetHubHints(db, project);
+  rec.emit("graph.load", "completed", { n: { pages: loaded.rows.length, inventory: inventory.length, truncated: loaded.truncated ? 1 : 0, searchConsole: gsc ? 1 : 0 } });
+  rec.total({ pages: loaded.rows.length });
   const homeUrl = `https://${host}/`;
   const graph = buildLinkGraph({ host, homeUrl, inventory, snapshots: loaded.rows, snapshotsTruncated: loaded.truncated, gsc, now: opts.now });
+  rec.emit("graph.edges", "completed", { n: { urls: graph.nodes.length, edges: graph.edges, contentEdges: graph.contentEdges, orphans: graph.nodes.filter((n) => n.orphan).length } });
+  rec.total({ urls: graph.nodes.length, edges: graph.edges });
   const aliases = parseJson<unknown[]>(project.brand_aliases_json, []).filter((a): a is string => typeof a === "string");
   const clusters = buildClusters(graph, { overrides, sheetHubs, extraStop: brandStopwords(project.brand_name, aliases) });
+  rec.emit("graph.clusters", "completed", { n: { hubs: clusters.hubs.size, spokes: clusters.spokes.size } });
   const audits = auditAllAnchors(graph);
+  rec.emit("graph.anchors", "completed", { n: { audited: audits.size, flagged: [...audits.values()].filter((a) => a.flags.length > 0).length } });
   const verifications = verifyExpectedLinks(graph, await loadExpectedLinks(db, project));
+  const v = { verified: 0, not_found: 0, pending: 0, source_unavailable: 0 };
+  for (const r of verifications) v[r.status]++;
+  rec.emit("graph.verify", verifications.length ? "completed" : "skipped", {
+    n: { checked: verifications.length, verified: v.verified, notFound: v.not_found, pending: v.pending, sourceUnavailable: v.source_unavailable },
+    items: verifications.slice(0, 20).map((r) => pairItem(r.sourceKey, r.targetKey, r.status)),
+    ...(verifications.length ? {} : { note: "No placed links to verify (accept or mark suggestions implemented, or import your sheet)." }),
+  });
+  rec.total({ verifyChecked: verifications.length, verified: v.verified, notFound: v.not_found });
   const summary = summarize(graph, clusters, audits, verifications, gsc ? gscSourceLabel(gsc) : null, state, inventory.length);
   return { graph, clusters, audits, verifications, summary, snapshots: loaded.rows, gsc };
 }
@@ -296,12 +323,20 @@ export async function buildAndStoreLinkGraph(db: Db, project: ProjectRow, opts: 
     if (opts.throwOnBusy) throw conflict("The link graph is already being rebuilt for this project. Try again in a few minutes.");
     return null;
   }
+  const own = opts.progress === "own";
+  const rec: LinkProgress =
+    opts.progress === "own" ? await LinkProgress.start(db, project, { kind: "graph", refId: graphId, userId: opts.userId ?? null }) : (opts.progress ?? LinkProgress.none());
   try {
-    const computed = (await computeGraph(db, project, opts))!;
+    const computed = (await computeGraph(db, project, { ...opts, progress: rec }))!;
+    rec.emit("graph.save", "started", { n: { urls: computed.graph.nodes.length } });
+    await rec.flush();
     await persistGraph(db, project, graphId, computed, opts.now);
+    rec.emit("graph.save", "completed", { n: { urls: computed.graph.nodes.length } });
+    if (own) await rec.finish("completed", { n: { urls: computed.graph.nodes.length, edges: computed.graph.edges } });
     return { graphId, ...computed };
   } catch (e) {
     await failBuild(db, project, graphId, e, opts.now);
+    if (own) await rec.finish("failed", { note: `Graph build failed: ${e instanceof Error ? e.message.slice(0, 200) : "unknown error"}` });
     throw e;
   }
 }

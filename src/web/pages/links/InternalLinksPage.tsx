@@ -4,7 +4,10 @@
  * their missing links), Link graph (per-URL table), Broken links, Anchors (anchor text audit), Placed & verified.
  * Everything is built from the latest snapshot of every crawled page (the rolling crawl covers the whole sitemap over
  * successive runs); coverage is shown on every tab. Okara never edits pages.
+ * [A41] A "Live" panel above the tabs shows what the link agent is doing (LinkLivePanel.tsx): it polls the stored
+ * progress events while a run is in flight and refreshes the report and the tabs when the run ends.
  */
+import { useState } from "react";
 import { useParams, useSearchParams } from "react-router";
 import type { LinkGraphSummary, LinkSuggestion, LinkSuggestionReport } from "@shared/types";
 import { api, ApiError, errorMessage } from "@web/lib/api";
@@ -15,6 +18,7 @@ import { BrokenTab } from "./BrokenTab";
 import { ClustersTab } from "./ClustersTab";
 import { GraphTab } from "./GraphTab";
 import { LINK_LABEL_CONFIDENCE, LINK_LABEL_REVIEW, WORKBENCH_TABS, tabFromParam, type WorkbenchTab } from "./lib";
+import { LinkLivePanel } from "./LinkLivePanel";
 import { CoverageStrip } from "./parts";
 import { PlacedTab } from "./PlacedTab";
 import { SuggestionsTab } from "./SuggestionsTab";
@@ -28,6 +32,7 @@ export function InternalLinksPage() {
   const runner = useMutation(() => api<LinkSuggestionReport>(`${base}/run`, { method: "POST" }));
   const rebuilder = useMutation(() => api<LinkGraphSummary>(`${base}/graph/rebuild`, { method: "POST" }));
   const r = report.data;
+  const [tabsKey, setTabsKey] = useState(0);
 
   const run = async () => {
     const next = await runner.run();
@@ -36,7 +41,36 @@ export function InternalLinksPage() {
   const rebuild = async () => {
     const g = await rebuilder.run();
     if (g && r) report.setData({ ...r, graph: g });
+    if (g) setTabsKey((k) => k + 1);
   };
+  /** A tracked run ended (started here, in another tab, or by Ask Okara): reload the report and remount the tabs. */
+  const onLiveFinished = () => {
+    report.reload();
+    setTabsKey((k) => k + 1);
+  };
+  const runLabel = runner.loading ? "Analysing…" : r?.generatedAt ? "Run again" : "Run analysis";
+  const actionButtons = (where: "header" | "live") => (
+    <>
+      <Button
+        size={where === "live" ? "sm" : undefined}
+        onClick={() => void rebuild()}
+        loading={rebuilder.loading}
+        disabled={!projectId || (where === "live" && runner.loading)}
+        title="Rebuild the link graph from stored crawl snapshots (no paid calls)"
+      >
+        {rebuilder.loading ? "Rebuilding…" : "Rebuild graph"}
+      </Button>
+      <Button
+        size={where === "live" ? "sm" : undefined}
+        variant="primary"
+        onClick={() => void run()}
+        loading={runner.loading}
+        disabled={!projectId || (where === "live" && rebuilder.loading)}
+      >
+        {where === "live" ? (runner.loading ? "Analysing…" : "Run link analysis") : runLabel}
+      </Button>
+    </>
+  );
   const replaceSuggestions = (changed: LinkSuggestion[]) => {
     if (!r) return;
     const byId = new Map(changed.map((s) => [s.id, s]));
@@ -80,15 +114,20 @@ export function InternalLinksPage() {
         actions={
           <>
             {r && <StateBadge state={r.state} />}
-            <Button onClick={() => void rebuild()} loading={rebuilder.loading} disabled={!projectId} title="Rebuild the link graph from stored crawl snapshots (no paid calls)">
-              {rebuilder.loading ? "Rebuilding…" : "Rebuild graph"}
-            </Button>
-            <Button variant="primary" onClick={() => void run()} loading={runner.loading} disabled={!projectId}>
-              {runner.loading ? "Analysing…" : r?.generatedAt ? "Run again" : "Run analysis"}
-            </Button>
+            {actionButtons("header")}
           </>
         }
       />
+
+      {projectId ? (
+        <LinkLivePanel
+          base={base}
+          busy={runner.loading || rebuilder.loading}
+          starting={runner.loading ? "Starting the link analysis…" : rebuilder.loading ? "Starting the graph rebuild…" : null}
+          actions={actionButtons("live")}
+          onFinished={onLiveFinished}
+        />
+      ) : null}
 
       <div role="note" aria-label="How to read these suggestions" className="rounded-lg border border-sky-300 bg-sky-50 px-4 py-3 text-sm text-sky-950 dark:border-sky-800 dark:bg-sky-950 dark:text-sky-100">
         <p className="font-semibold">{LINK_LABEL_REVIEW}</p>
@@ -99,7 +138,7 @@ export function InternalLinksPage() {
       {rebuilder.error ? <ActionError error={rebuilder.error} title="Could not rebuild the graph" /> : null}
       <CoverageStrip graph={r?.graph ?? null} />
 
-      <Tabs label="Internal links views" value={tab} onChange={setTab} tabs={WORKBENCH_TABS.map((t) => ({ id: t.id, label: t.label, content: content(t.id) }))} />
+      <Tabs label="Internal links views" value={tab} onChange={setTab} tabs={WORKBENCH_TABS.map((t) => ({ id: t.id, label: t.label, content: <div key={tabsKey} className="min-w-0">{content(t.id)}</div> }))} />
     </div>
   );
 }

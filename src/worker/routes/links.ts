@@ -16,6 +16,8 @@
  *   GET   /projects/:pid/seo/internal-links/broken[?format=csv] -> BrokenLinksReport | CSV
  *   GET   /projects/:pid/seo/internal-links/anchors[?all=1]  -> AnchorAuditReport
  *   GET   /projects/:pid/seo/internal-links/placed           -> PlacedLinksReport
+ *   GET   /projects/:pid/seo/internal-links/live?run=&after=&limit= -> LinkLiveResponse ([A41] progress of the latest
+ *                                                                 analysis run or manual graph rebuild; cursor = seq)
  *
  * - Tenancy: requireUser + requireProject (404 for non-members); every query filters by workspace_id.
  * - Run: setup_required (unverified host or no crawl) returns the report without using the rate limit;
@@ -56,7 +58,9 @@ import {
 } from "../links/report";
 import { anchorReport, brokenLinks, brokenLinksCsv, clusterReport, GRAPH_FILTERS, GRAPH_SORTS, graphCsv, graphSummary, graphUrlDetail, graphUrls } from "../links/graph-read";
 import { buildAndStoreLinkGraph, graphHost, setHubOverride, setSpokeAssignment } from "../links/graph-store";
+import { linkLive } from "../links/progress";
 import { runLinkSuggestions } from "../links/run";
+import { LINK_LIVE_PAGE_MAX } from "@shared/link-live";
 
 export const linkRoutes = new Hono<AppEnv>();
 
@@ -162,7 +166,7 @@ export async function rebuildLinkGraphFor(db: Db, project: ProjectRow, userId: s
   if (setup.state === "setup_required") return { data: await graphSummary(db, project, now) };
   const denied = await limitFor(db, `link_graph_rebuild:${project.id}`, GRAPH_REBUILD_RATE_LIMIT, now, "Link graph rebuilds");
   if (denied) return denied;
-  await buildAndStoreLinkGraph(db, project, { trigger: "manual", now, userId, throwOnBusy: true });
+  await buildAndStoreLinkGraph(db, project, { trigger: "manual", now, userId, throwOnBusy: true, progress: "own" });
   return { data: await graphSummary(db, project, now) };
 }
 
@@ -340,6 +344,24 @@ linkRoutes.get("/projects/:pid/seo/internal-links/placed", async (c) => {
   const db = c.get("db");
   const project = await requireProject(db, user.id, c.req.param("pid"));
   return c.json({ data: await placedLinksReport(db, project) });
+});
+
+// ------------------------------------------------------------------------------------ live progress [A41]
+
+linkRoutes.get("/projects/:pid/seo/internal-links/live", async (c) => {
+  const user = requireUser(c);
+  const db = c.get("db");
+  const project = await requireProject(db, user.id, c.req.param("pid"));
+  const int = (raw: string | undefined, d: number, max: number, what: string) => {
+    if (raw === undefined || raw === "") return d;
+    if (!/^\d{1,7}$/.test(raw) || Number(raw) > max) throw badRequest(`${what} must be an integer from 0 to ${max}.`);
+    return Number(raw);
+  };
+  const after = int(c.req.query("after"), 0, 1_000_000, "after");
+  const limit = Math.max(1, int(c.req.query("limit"), LINK_LIVE_PAGE_MAX, LINK_LIVE_PAGE_MAX, "limit"));
+  const run = c.req.query("run") ?? null;
+  if (run !== null && !/^[A-Za-z0-9_-]{1,80}$/.test(run)) throw badRequest("run must be a live run id.");
+  return c.json({ data: await linkLive(db, project, { after, runId: run, limit }, c.get("now")) });
 });
 
 linkRoutes.patch("/projects/:pid/seo/internal-links/:id", async (c) => {

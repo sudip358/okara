@@ -21,6 +21,10 @@
  * provider_calls reserved per call by the writer's metering).
  *
  * Nothing is fetched from the site and nothing on the site is changed.
+ *
+ * [A41] Progress: every stage appends events to the run's Live log (progress.ts): the graph stages (inside the graph
+ * build), pages, candidates (top 20 pairs by priority), sentences (first 20 matched pairs), jev (one event per batch
+ * with its pairs and verdicts), drafts (one event per writer call), save, and the final run event.
  */
 import type { LinkSuggestionReport } from "@shared/types";
 import type { Env } from "../env";
@@ -54,12 +58,13 @@ import {
   type LinkPage,
 } from "./candidates";
 import { clusterGapFor } from "./clusters";
-import { DRAFT_LABEL, DRAFT_VERSION, draftSentences, MAX_DRAFTS_PER_RUN, type DraftOutcome, type DraftPair } from "./draft";
+import { DRAFT_LABEL, DRAFT_PAIRS_PER_CALL, DRAFT_VERSION, draftSentences, MAX_DRAFTS_PER_RUN, type DraftOutcome, type DraftPair } from "./draft";
 import { linkedKeys, STALE_DAYS, type GraphNode } from "./graph";
 import type { SnapshotRecord } from "./graph-load";
 import { buildAndStoreLinkGraph, computeGraph, type ComputedGraph } from "./graph-store";
 import { gscSourceLabel } from "./gsc";
 import { decideLinks, LINK_BATCH_SIZE, type LinkJevOutcome, type LinkJevPair, type LinkJevRun } from "./jev";
+import { LinkProgress, pairItem } from "./progress";
 import { computePriority, explainPriority, LINK_PRIORITY_VERSION, type PriorityBreakdown } from "./priority";
 import { emptyReport, getLinkReport, linkSetup, type LinkRunSummary, type LinkSuggestionRow } from "./report";
 import { MAX_SENTENCES_PER_PAIR, rankSentences, type RankedSentence } from "./sentences";
@@ -85,6 +90,8 @@ export interface LinkRunOptions {
   maxDrafts?: number;
   clock?: Clock;
   userId?: string | null;
+  /** [A41] Clock for the Live panel's progress events (default: the wall clock, so elapsed time is real). */
+  progressClock?: Clock;
 }
 
 interface LoadedPage extends LinkPage {
@@ -204,12 +211,17 @@ export async function runLinkSuggestions(env: Env, db: Db, project: ProjectRow, 
     created_by: opts.userId ?? null,
     created_at: iso(now),
   });
+  const rec = await LinkProgress.start(db, project, { kind: "analysis", refId: linkRunId, userId: opts.userId ?? null, clock: opts.progressClock });
 
   try {
     // ------------------------------------------------------------ the full-site graph (stored for the other tabs)
     const computed: ComputedGraph =
-      (await buildAndStoreLinkGraph(db, project, { trigger: "run", now, text: true, userId: opts.userId ?? null, crawlRunId: crawl.id })) ??
-      (await computeGraph(db, project, { now, text: true }))!;
+      (await buildAndStoreLinkGraph(db, project, { trigger: "run", now, text: true, userId: opts.userId ?? null, crawlRunId: crawl.id, progress: rec })) ??
+      (await (async () => {
+        const c = (await computeGraph(db, project, { now, text: true, progress: rec }))!;
+        rec.emit("graph.save", "skipped", { note: "Another graph build is in progress: this run computed the graph in memory without storing it." });
+        return c;
+      })());
     const { graph, clusters, audits, gsc } = computed;
     const gscLabel = gsc ? gscSourceLabel(gsc) : null;
 
@@ -233,6 +245,7 @@ export async function runLinkSuggestions(env: Env, db: Db, project: ProjectRow, 
       { extraStop },
     );
     const analysed = eligible.filter((p) => (terms.get(p.pageId)?.length ?? 0) > 0);
+    rec.emit("pages", "completed", { n: { pages: pages.length, eligible: eligible.length, analysed: analysed.length } });
     const inlinksOf = (key: string) => graph.byKey.get(key)?.linksIn ?? 0;
     const linkedCache = new Map<string, Set<string>>();
     const linkedOf = (p: LinkPage) => {
@@ -312,6 +325,11 @@ export async function runLinkSuggestions(env: Env, db: Db, project: ProjectRow, 
     const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
     const byPriority = (a: Pair, b: Pair) => b.priority.value - a.priority.value || b.candidate.score - a.candidate.score || cmp(a.source.url, b.source.url) || cmp(a.target.url, b.target.url);
     pairs.sort(byPriority);
+    rec.emit("candidates", "completed", {
+      n: { considered: pairs.length, termPairs: pairs.length - gapPairs, clusterGapPairs: gapPairs },
+      items: pairs.slice(0, 20).map((p) => pairItem(p.source.url, p.target.url, "candidate", null, p.priority.value)),
+    });
+    rec.total({ pairsConsidered: pairs.length });
 
     // ------------------------------------------------------------ sentences and anchors, until the cap is full
     const maxPairs = Math.max(1, opts.maxPairs ?? MAX_PAIRS_PER_RUN);
@@ -340,6 +358,11 @@ export async function runLinkSuggestions(env: Env, db: Db, project: ProjectRow, 
       kept.push({ ...p, sentences, anchors, pick, anchorNote });
     }
     const capped = kept.length >= maxPairs && pairs.length > kept.length + noSentence.length;
+    rec.emit("sentences", "completed", {
+      n: { matched: kept.length, noFittingSentence: noSentence.length, withoutAnchor, cap: maxPairs, capped: capped ? 1 : 0 },
+      items: kept.slice(0, 20).map((p) => pairItem(p.source.url, p.target.url, "matched", p.pick.anchor.text)),
+    });
+    rec.total({ pairsMatched: kept.length });
 
     // ------------------------------------------------------------ draft pool: high-priority pairs with no fitting sentence
     const excluded = new Set([...seenPairs]);
@@ -365,13 +388,62 @@ export async function runLinkSuggestions(env: Env, db: Db, project: ProjectRow, 
       fallback: { sentenceKey: p.pick.sentence.key, anchorKey: p.pick.anchor.key },
     }));
     if (decisions && kept.length > 0) {
-      jev = await decideLinks(jevPairs, { decisions, db, workspaceId: project.workspace_id, projectId: project.id, linkRunId, clock, batchSize: opts.batchSize });
+      const size = Math.max(1, Math.min(opts.batchSize ?? LINK_BATCH_SIZE, LINK_BATCH_SIZE));
+      rec.emit("jev", "started", { n: { pairs: kept.length, batches: Math.ceil(kept.length / size), batchSize: size } });
+      await rec.flush();
+      const tally = { kept: 0, review: 0, dropped: 0, noAnswer: 0, notSent: 0 };
+      jev = await decideLinks(jevPairs, {
+        decisions,
+        db,
+        workspaceId: project.workspace_id,
+        projectId: project.id,
+        linkRunId,
+        clock,
+        batchSize: opts.batchSize,
+        onBatch: (b) => {
+          const items = b.pairs.map(({ i, outcome, skipped }) => {
+            const p = kept[i]!;
+            const v = skipped ? "not_sent" : !outcome ? "no_answer" : outcome.status === "suggested" ? "kept" : outcome.status === "review" ? "review" : "dropped";
+            tally[v === "not_sent" ? "notSent" : v === "no_answer" ? "noAnswer" : v]++;
+            const anchor = (outcome && p.anchors.find((a) => a.key === outcome.anchorKey)?.text) || p.pick.anchor.text;
+            return pairItem(p.source.url, p.target.url, v, anchor);
+          });
+          rec.emit("jev", "progress", { n: { batch: b.index, batches: b.batches, calls: b.calls, judged: b.asked, answered: b.answered, ...tally }, items });
+          rec.total({ judged: b.asked, jevKept: tally.kept, jevReview: tally.review, jevDropped: tally.dropped, jevCalls: b.calls });
+          return rec.drain();
+        },
+      });
+      rec.emit("jev", jev.stoppedBy ? "partial" : "completed", {
+        n: { calls: jev.calls, judged: jev.asked, answered: jev.answered, ...tally },
+        ...(jev.stoppedBy ? { note: jev.stoppedBy === "budget" ? "The project's daily Jev budget is used up: the remaining pairs are deterministic review suggestions." : "Jev could not be reached: the remaining pairs are deterministic review suggestions." } : {}),
+      });
+    } else {
+      rec.emit("jev", "skipped", {
+        note: isDemo ? "Demo project: Jev is never called; picks are deterministic." : kept.length === 0 ? "No pair with a fitting sentence to judge." : "Jev (TypeSafe) is not configured for this workspace: deterministic picks marked review.",
+      });
     }
 
     // ------------------------------------------------------------ drafted sentences (writer)
     let writer: WritingProvider | null = null;
     if (!isDemo && draftPool.length > 0) {
       writer = opts.writer === undefined ? await buildWriterForWorkspace(env, db, project.workspace_id, { projectId: project.id, clock }) : opts.writer;
+    }
+    rec.total({ draftPool: draftPool.length });
+    const poolByKey = new Map(draftPool.map((p) => [`${p.source.pageId}>${p.target.pageId}`, p]));
+    const draftTally = { drafted: 0, rejected: 0, notDrafted: 0 };
+    if (writer) {
+      rec.emit("drafts", "started", { n: { pool: draftPool.length, cap: maxDrafts, calls: Math.ceil(draftPool.length / DRAFT_PAIRS_PER_CALL) } });
+      await rec.flush();
+    } else {
+      rec.emit("drafts", "skipped", {
+        n: { pool: draftPool.length },
+        note:
+          draftPool.length === 0
+            ? "Every high-priority pair has a fitting existing sentence: nothing to draft."
+            : isDemo
+              ? "Demo project: the writer is never called, so no sentences are drafted."
+              : "No writer is set up (Integrations page): no sentences are drafted.",
+      });
     }
     const drafted = writer
       ? await draftSentences(
@@ -382,8 +454,28 @@ export async function runLinkSuggestions(env: Env, db: Db, project: ProjectRow, 
             source: { url: p.source.url, title: p.source.title, h1: p.source.h1s[0] ?? null, sentences: p.source.sentences },
             target: { url: p.target.url, title: p.target.title, h1: p.target.h1s[0] ?? null },
           })),
+          {
+            onCall: async (c) => {
+              const items = c.pairs.map(({ pair, outcome }) => {
+                const v = !outcome ? "not_drafted" : outcome.validation.ok && outcome.text ? "drafted" : "draft_rejected";
+                draftTally[v === "drafted" ? "drafted" : v === "draft_rejected" ? "rejected" : "notDrafted"]++;
+                const p = poolByKey.get(pair.pairKey);
+                return pairItem(p?.source.url ?? pair.source.url, p?.target.url ?? pair.target.url, v, pair.anchor);
+              });
+              rec.emit("drafts", "progress", { n: { call: c.index, calls: c.calls, ...draftTally }, items });
+              rec.total({ drafted: draftTally.drafted, draftRejected: draftTally.rejected, writerCalls: c.index });
+              await rec.flush();
+            },
+          },
         )
       : null;
+    if (drafted) {
+      rec.emit("drafts", drafted.stoppedBy ? "partial" : "completed", {
+        n: { calls: drafted.calls, ...draftTally },
+        ...(drafted.stoppedBy ? { note: drafted.stoppedBy === "budget" ? "Writer budget reached: the remaining pairs were not drafted." : "The writer failed: the remaining pairs were not drafted." } : {}),
+      });
+      rec.total({ writerCalls: drafted.calls });
+    }
     const draftByKey = new Map<string, DraftOutcome>((drafted?.outcomes ?? []).map((o) => [o.pairKey, o]));
 
     // ------------------------------------------------------------ suggestion rows
@@ -493,6 +585,8 @@ export async function runLinkSuggestions(env: Env, db: Db, project: ProjectRow, 
       }
     }
 
+    rec.emit("save", "started", { n: { rows: rows.length } });
+    await rec.flush();
     const stmts: Array<[string, ...unknown[]]> = rows.map((r) => insertRow(r));
     for (let i = 0; i < stmts.length; i += 50) await db.batch(stmts.slice(i, i + 50));
     // Earlier runs: open rows are superseded by this run; non-open rows are kept as status memory unless
@@ -541,6 +635,8 @@ export async function runLinkSuggestions(env: Env, db: Db, project: ProjectRow, 
 
     const counts = { suggested: 0, review: 0, rejected: 0 };
     for (const r of rows) counts[r.status]++;
+    rec.emit("save", "completed", { n: { rows: rows.length, ...counts, drafts: rows.filter((r) => r.placement === "draft_sentence").length } });
+    rec.total({ saved: rows.length });
 
     const notes: string[] = [];
     if (jev && decisions) {
@@ -624,8 +720,10 @@ export async function runLinkSuggestions(env: Env, db: Db, project: ProjectRow, 
       project.workspace_id,
       project.id,
     );
+    await rec.finish(jev?.stoppedBy || drafted?.stoppedBy ? "partial" : "completed", { n: { suggestions: rows.length, ...counts } });
     return await getLinkReport(db, project);
   } catch (e) {
+    await rec.finish("failed", { note: `Run failed: ${e instanceof Error ? e.message.slice(0, 200) : "unknown error"}` });
     await db
       .run(
         "UPDATE link_runs SET status = 'failed', notes_json = ?, finished_at = ? WHERE id = ? AND workspace_id = ? AND project_id = ?",
